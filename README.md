@@ -21,11 +21,12 @@ winit window; it does not yet run a real session.
 
 ```
 src/              the compositor: Smithay glue, backends, handlers, render, input
+  lib.rs          library surface: the pure modules below only (reusable, testable)
   core/           pure data: ids, geometry, colors, tags, window model (no Smithay)
   config/         TOML parsing, validation, defaults (no Smithay)
   layout/         pure layout engine: Layout trait + implementations (no Smithay)
   animation/      pure springs/easing curves + animated scalars (no Smithay)
-tests/            headless integration tests
+tests/            headless integration tests (drive the library directly)
 crawm-ipc/        IPC types + client (leaf; no other crawm-* deps)
 crawm-cli/        CLI client (`crawm-cli`)
 resources/        default config, session units, shaders, portals
@@ -33,7 +34,10 @@ docs/             ADRs and (later) the manual
 ```
 
 The root `Cargo.toml` is both the `crawm` package and the workspace root
-(niri-style), so plain `cargo run` starts the compositor.
+(niri-style), so plain `cargo run` starts the compositor. The package is
+lib + bin: `src/lib.rs` exposes only the pure modules, and `src/main.rs` is the
+thin Smithay entry point — so `tests/` can unit-drive layout/config/animation
+without a GPU.
 
 ## Building
 
@@ -42,6 +46,11 @@ cargo build --workspace
 cargo run -- --backend winit     # nested window on an existing session
 cargo run -- --validate          # parse + validate the config, then exit
 ```
+
+Backends are cargo features: `backend-winit` is the default (nested development);
+`--backend tty` needs `--features backend-tty` (bare-metal DRM/KMS, M4). The
+default build skips the DRM/session/input stack; `cargo clippy --all-features`
+builds the whole thing.
 
 ## License
 

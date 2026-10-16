@@ -46,7 +46,7 @@ jobs:
             libegl-dev libgl-dev libgles-dev \
             libgbm-dev libdrm-dev \
             libinput-dev libudev-dev libseat-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: test

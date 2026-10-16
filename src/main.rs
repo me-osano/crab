@@ -1,23 +1,24 @@
 //! crawm — a Wayland compositor merging mango tags, niri scrolling, and cosmic
 //! protocol breadth.
 //!
-//! This binary owns everything that touches Smithay. The pure logic lives in
-//! the Smithay-free [`core`], [`config`], [`layout`], and [`animation`] modules
-//! (see `ROADMAP.md` §5).
+//! This binary is the thin Smithay entry point: it owns backends, handlers,
+//! rendering, and input. The Smithay-free logic lives in the `crawm` library
+//! (see `src/lib.rs` and `ROADMAP.md` §5), which is also what `tests/` drives.
+//!
+//! Which backends are compiled in is a cargo feature: `backend-winit` (the
+//! default, nested development path) and `backend-tty` (bare-metal DRM/KMS, M4).
+//! `--backend headless` is always available so tests can start the compositor
+//! without graphics.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-pub mod animation;
 mod backend;
 mod cli;
-pub mod config;
-pub mod core;
-pub mod layout;
 mod logging;
 
-use crate::config::Config;
 use anyhow::Context as _;
 use clap::Parser as _;
+use crawm::config::Config;
 
 use crate::cli::{Args, Backend};
 
@@ -30,7 +31,7 @@ fn main() -> anyhow::Result<()> {
 
     if args.validate {
         // Validate even a default config, then report and exit.
-        crate::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
+        crawm::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
         println!(
             "ok: config valid (gaps={}, border-width={}, layout={}, animations={})",
             config.gaps, config.border_width, config.layout, config.animations
@@ -40,16 +41,36 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!(backend = ?args.backend, "starting crawm");
     match args.backend {
-        Backend::Winit => backend::winit::run(&config),
-        Backend::Tty => backend::tty::run(&config),
+        Backend::Winit => run_winit(&config),
+        Backend::Tty => run_tty(&config),
         Backend::Headless => backend::headless::run(&config),
     }
+}
+
+#[cfg(feature = "backend-winit")]
+fn run_winit(config: &Config) -> anyhow::Result<()> {
+    backend::winit::run(config)
+}
+
+#[cfg(not(feature = "backend-winit"))]
+fn run_winit(_config: &Config) -> anyhow::Result<()> {
+    anyhow::bail!("this crawm build has no `winit` backend; enable the `backend-winit` feature")
+}
+
+#[cfg(feature = "backend-tty")]
+fn run_tty(config: &Config) -> anyhow::Result<()> {
+    backend::tty::run(config)
+}
+
+#[cfg(not(feature = "backend-tty"))]
+fn run_tty(_config: &Config) -> anyhow::Result<()> {
+    anyhow::bail!("this crawm build has no `tty` backend; enable the `backend-tty` feature")
 }
 
 /// Loads the config from `--config`, or falls back to built-in defaults.
 fn resolve_config(args: &Args) -> anyhow::Result<Config> {
     match &args.config {
-        Some(path) => crate::config::load(path)
+        Some(path) => crawm::config::load(path)
             .with_context(|| format!("loading config from {}", path.display())),
         None => Ok(Config::default()),
     }

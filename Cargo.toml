@@ -1,8 +1,11 @@
 # crawm — package root AND workspace root (niri-style): the compositor itself
 # lives in `src/` here; the remaining library crates sit alongside it at the
-# repository root. Layout and boundary rules live in ROADMAP.md §5. The pure
-# code — the src/{core,config,layout,animation} modules — must never depend on
-# Smithay or Wayland; `scripts/check-boundaries.sh` enforces this in CI.
+# repository root. Layout and boundary rules live in ROADMAP.md §5.
+#
+# The package is lib + bin: `src/lib.rs` is the pure, Smithay-free surface
+# (src/{core,config,layout,animation}) and `src/main.rs` is the thin Smithay entry
+# point. `scripts/check-boundaries.sh` enforces both that boundary and the
+# downward-only dependency layering between the pure modules.
 
 [package]
 name = "crawm"
@@ -43,25 +46,18 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Renderer is GLES (ADR-0002): Vulkan is deliberately never enabled, and
-# xwayland arrives in M9. `renderer_multi` + the DRM/session/input backends are
-# enabled now to prove the bare-metal dependency stack builds (TODO 0.4).
+# Smithay is pinned to 0.7 (ADR-0002: GLES only, never Vulkan; xwayland in M9).
+# Only the renderer and frontend are unconditional — the backend stacks are
+# enabled by the `backend-*` features below, so a default build does not pull the
+# DRM/session/input stack.
 smithay = { version = "0.7", default-features = false, features = [
-  "backend_winit",
-  "backend_x11",
-  "backend_drm",
-  "backend_gbm",
-  "backend_libinput",
-  "backend_udev",
-  "backend_session_libseat",
   "desktop",
   "renderer_gl",
-  "renderer_multi",
   "wayland_frontend",
 ] }
 
-# The compositor binary (`src/main.rs`) — everything that touches Smithay.
-# The pure modules (src/{core,config,layout,animation}) pull in only pure deps:
+# The `crawm` package: the library (`src/lib.rs`, pure) plus the binary
+# (`src/main.rs`, Smithay glue). The pure modules pull in only pure deps:
 # serde/toml/thiserror for config parsing.
 [dependencies]
 crawm-ipc = { workspace = true }
@@ -75,6 +71,26 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[features]
+default = ["backend-winit"]
+
+# Nested window on an existing Wayland/X11 session (development, the default).
+backend-winit = ["smithay/backend_winit"]
+# Bare-metal DRM/KMS session (M4): pulls the session/input/GBM stack, so it is
+# off by default; CI builds it with `--all-features` to keep proving the stack
+# (TODO 0.4).
+backend-tty = [
+  "smithay/backend_drm",
+  "smithay/backend_gbm",
+  "smithay/backend_libinput",
+  "smithay/backend_udev",
+  "smithay/backend_session_libseat",
+  "smithay/renderer_multi",
+]
+# X11 window backend; no `--backend` value selects it yet, but it is kept so the
+# X11 stack keeps building under `--all-features`.
+backend-x11 = ["smithay/backend_x11"]
 
 [lints]
 workspace = true

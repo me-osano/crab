@@ -6,10 +6,11 @@
 //! reported rather than silently defaulted.
 //!
 //! `src/config` has no Smithay/Wayland dependency (ROADMAP §5); it depends only
-//! on [`crate::core`] for shared primitives like [`crate::core::Color`].
+//! on [`crate::core`] for shared primitives like [`crate::core::Color`], and
+//! only *downward* (`config → core`).
 //!
-//! ```text
-//! let config = config::parse("gaps = 4\n").unwrap();
+//! ```
+//! let config = crawm::config::parse("gaps = 4\n").unwrap();
 //! assert_eq!(config.gaps, 4);
 //! ```
 
@@ -166,12 +167,6 @@ fn checked_i32(raw: i64, name: &str) -> Result<i32, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_a_minimal_document() {
-        let cfg = parse("gaps = 4\n").unwrap();
-        assert_eq!(cfg.gaps, 4);
-    }
 
     #[test]
     fn defaults_are_valid() {

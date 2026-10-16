@@ -17,7 +17,7 @@
 2. [Design synthesis — the best of niri, mango, cosmic](#2-design-synthesis)
 3. [The completeness contract (feature target matrix)](#3-the-completeness-contract)
 4. [Protocol support matrix](#4-protocol-support-matrix)
-5. [Crate topology](#5-crate-topology)
+5. [Crate & module topology](#5-crate--module-topology)
 6. [Milestones](#6-milestones)
 7. [Integration with crawl-desktop](#7-integration-with-crawl-desktop)
 8. [Testing & verification](#8-testing--verification)
@@ -355,7 +355,7 @@ and cosmic ship **no** colour-management — **we add both**. cosmic has **no**
 
 ---
 
-## 5. Crate topology
+## 5. Crate & module topology
 
 Apply the same split rule as `crawl-desktop` (ADR 0005): **modules first**, promote
 to a crate only when (1) ≥2 consumers with different dep trees, (2) a heavy/system
@@ -368,6 +368,7 @@ crawm/
 ├── COMPOSITOR.md              # design (existing)
 ├── ROADMAP.md                 # this file
 ├── src/                     # the compositor: Smithay glue, backends, handlers, render, input
+│   ├── lib.rs                 # library surface: the pure modules only (reusable, testable)
 │   ├── core/                  # pure data: ids, geometry, spaces/tags, window model — no Smithay
 │   ├── config/                # TOML parsing, validation, defaults, schema, rules (pure)
 │   ├── layout/                # pure Layout trait + all layouts (unit/property-tested, no Smithay)
@@ -381,10 +382,21 @@ crawm/
 ```
 
 Rules:
+- The root package is **lib + bin**: `src/lib.rs` exposes the pure modules below
+  and `src/main.rs` is the thin Smithay entry point. The boundary script rejects
+  any non-pure `mod` in `lib.rs`, so the reusable surface stays graphics-free and
+  `tests/` can drive the pure modules directly (no shelling out to the binary).
 - The `src/{core,config,layout,animation}` modules are Smithay/Wayland-free by
   rule → fast unit tests, and they are what a future `crawl-desktop` could reuse.
   Enforced by `scripts/check-boundaries.sh` (source scan, since cargo metadata
   cannot isolate modules of one package).
+- The pure modules depend **downward only**: `core` on nothing, and
+  `config`/`layout`/`animation` on `core`. The same script fails on any upward or
+  sideways `crate::` edge (e.g. `core` reaching for `config` or `backend`).
+- Backends are **cargo features** on the `crawm` package: `backend-winit`
+  (default dev path), `backend-tty` (DRM/KMS, M4), `backend-x11`. A default build
+  therefore skips the DRM/session/input stack; CI builds `--all-features` to keep
+  proving it (TODO 0.4).
 - `src/core` and `src/config` were folded in from the former `crawm-core` /
   `crawm-config` crates, and `src/layout` / `src/animation` from `crawm-layout` /
   `crawm-anim`: each has a single consumer, so the ADR-0005 "modules first" rule
@@ -402,7 +414,8 @@ Rules:
   `tests/` (the root `Cargo.toml` is both the `crawm` package and the workspace
   root, niri-style).
 
-Inside `src/`: `main.rs`, `state.rs`, `backend/{mod,winit,tty,headless}.rs`,
+Inside `src/`: `lib.rs` (pure library surface), `main.rs`, `state.rs`,
+`backend/{mod,winit,tty,headless}.rs`,
 `handlers/` (one per protocol), `input/{mod,keyboard,pointer,gestures,binds}.rs`,
 `render/{mod,elements/,shaders.rs,damage.rs}`, `core/` (pure data model),
 `config/` (pure TOML parse/validate), `layout/` (pure), `layout_glue.rs`,

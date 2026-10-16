@@ -161,6 +161,7 @@ crawm/
 ├── Cargo.toml                  # `crawm` package + workspace
 ├── COMPOSITOR.md               # this file
 ├── src/                        # the compositor: Smithay glue, backends, render, handlers
+│   ├── lib.rs                  # library surface: the pure modules only (reusable, testable)
 │   ├── core/                   # pure data: ids, geometry, tags, window model, no Smithay
 │   ├── config/                 # parsing, validation, defaults, schema (pure)
 │   ├── layout/                 # Layout trait + implementations (pure, unit-tested)
@@ -175,11 +176,17 @@ crawm/
 └── docs/                       # mdBook; ADRs
 ```
 
+The package is **lib + bin**: `src/lib.rs` exposes only the pure
+`src/{core,config,layout,animation}` modules, and `src/main.rs` is the thin
+Smithay entry point (backends, handlers, render, input). `scripts/check-boundaries.sh`
+rejects any non-pure `mod` in `lib.rs`, so the reusable surface stays graphics-free.
+
 ### Inside `src/`
 
 ```
 src/
-├── main.rs
+├── lib.rs                      # library surface: pure modules only
+├── main.rs                     # bin: backends, handlers, render, input
 ├── state.rs                    # State struct + top-level event dispatch
 ├── backend/
 │   ├── mod.rs                  # Backend trait
@@ -206,6 +213,10 @@ src/
 ├── screencast/
 └── xwayland.rs
 ```
+
+Backends are compiled per cargo feature on the `crawm` package: `backend-winit`
+(nested window, the default dev path) and `backend-tty` (bare-metal DRM/KMS, M4);
+`headless` is always present so tests can run the compositor without graphics.
 
 ---
 

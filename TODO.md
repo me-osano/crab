@@ -53,15 +53,17 @@ locally as the canonical reference.
 - [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crawm-config` crate).
 - [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
 - [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style).
+- [x] `src/lib.rs` — the package is lib + bin: the pure modules are the reusable library surface (so doctests run and `tests/` can drive them directly); the boundary script rejects any non-pure `mod` here.
+- [x] Backend cargo features — `backend-winit` (default), `backend-tty`, `backend-x11` gate Smithay's backend stacks, so a default build skips DRM/session/input; CI builds `--all-features` to keep proving the stack.
 - [x] `crawm-cli/` — CLI client (renamed from `crawm-msg`).
 - [x] `resources/` — `default-config.toml`, `session/` (`.desktop`, systemd `.target`/`.service`), `shaders/`, `crawm-portals.conf`.
 - [x] Headless/integration tests live in `tests/` (the root package's integration tests).
-- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
+- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code or an upward/sideways `crate::` dependency, if `src/lib.rs` exposes a non-pure module, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
 
 ### 0.4 Smithay baseline
 - [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released tag is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
 - [ ] Clone and build `anvil` locally; walk its `state.rs`, backend selection, and handler wiring.
-- [x] Confirmed the toolchain builds `smithay` + `calloop` + `input` + `drm`/`gbm`/`egl`/`udev`/`libseat` on the target distro (all backends enabled in `Cargo.toml`; `cargo build --workspace` succeeds). `renderer_multi` on, `backend_vulkan` off (ADR-0002), `xwayland` deferred to M9.
+- [x] Confirmed the toolchain builds `smithay` + `calloop` + `input` + `drm`/`gbm`/`egl`/`udev`/`libseat` on the target distro: the backends are cargo features (`backend-tty` pulls the DRM/session/input stack) and CI runs `cargo clippy --all-features`, so the whole stack keeps building. `renderer_multi` on (under `backend-tty`), `backend_vulkan` off (ADR-0002), `xwayland` deferred to M9.
 
 ### 0.5 CI, logging, errors
 - [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `scripts/check-boundaries.sh`, `cargo deny check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now.)*
@@ -528,15 +530,18 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 
 ```
 crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
-                 · pure modules (Smithay-free, source-scanned in CI):
+                 · lib target (src/lib.rs) exposes the pure modules only:
                    src/core       → (ids, geometry, colors, tags)
                    src/config     → core, serde, toml, thiserror
                    src/layout     → core
                    src/animation  → core            (curves; geometry via core)
+                 · bin target (src/main.rs) + Smithay glue (backends, handlers, render, input)
+                 · pure modules are Smithay-free and depend downward only (source-scanned in CI)
 crawm-ipc      → (leaf; serde only)
 crawm-cli      → ipc                        (CLI)
 ```
 - `crawm-protocols` exists **only if ≥2 crates need** generated bindings; otherwise a `protocols` module inside the binary.
+- Backend features: `backend-winit` (default), `backend-tty`, `backend-x11`.
 - Feature flags: `xwayland`, `screencast`, `effects`, `dbus`, `profile-with-tracy`, and (later) `hdr`.
 
 ## Appendix C — Doc crosswalk

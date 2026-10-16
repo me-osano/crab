@@ -13,15 +13,15 @@ Index of the project's written material. Start with the roadmap.
 
 crawm is a single-process Wayland compositor built on [Smithay]. Logic that can
 be pure **is** pure: the data model, config, layout, and animation engines all
-live as Smithay-free modules inside the compositor, and only the IPC types stay
-a crate (shared with the CLI and with third-party tools):
+live as Smithay-free modules inside the compositor's **library target**, and only
+the IPC types stay a crate (shared with the CLI and with third-party tools):
 
 ```
-        ┌──────────────────────── crawm (binary) ───────────────────────────┐
-        │  Smithay glue · backends · handlers · render · input · ipc        │
-        │  (the only crate allowed to touch Smithay/calloop/…)              │
+        ┌──────────────────────── crawm (package) ──────────────────────────┐
+        │  bin: src/main.rs — Smithay glue, backends, handlers, render, input│
+        │       (the only place allowed to touch Smithay/calloop/…)         │
         │                                                                   │
-        │  pure modules — Smithay-free by rule, source-scanned in CI:       │
+        │  lib: src/lib.rs — pure modules only, source-scanned in CI:       │
         │    src/config     → core, serde, toml, thiserror                  │
         │    src/layout     → core                                          │
         │    src/animation  → core                                          │
@@ -40,8 +40,11 @@ a crate (shared with the CLI and with third-party tools):
 - The `src/{core,config,layout,animation}` modules have **no** Smithay or Wayland
   dependencies — enforced by a source scan, since cargo metadata cannot isolate
   modules of one package — so they compile and test in milliseconds.
+- Those pure modules depend **downward only** (`core` on nothing;
+  `config`/`layout`/`animation` on `core`), and `src/lib.rs` exposes them and
+  nothing else, so the reusable surface can never pull in graphics code.
 - `crawm-ipc` is a **leaf**: no other `crawm-*` dependency, so third-party tools can
   depend on it alone.
-- Only the `crawm` binary touches Smithay.
+- Only the `crawm` binary (`src/main.rs`) touches Smithay.
 
 [Smithay]: https://github.com/Smithay/smithay

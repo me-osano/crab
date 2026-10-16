@@ -6,12 +6,3 @@ perf.data*
 .idea/
 .DS_Store
 /result
-tests
-COMPOSITOR.md
-ROADMAP.md
-TODO.md
-rustfmt.toml
-rust-toolchain.toml
-NOTICE
-deny.toml
-justfile

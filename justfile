@@ -8,6 +8,12 @@ check:
     cargo test --workspace
     ./scripts/check-boundaries.sh
 
+# Full stack: the default build is winit-only, so this proves the DRM/session/
+# input backends still compile (mirrors the CI `clippy` job).
+check-all:
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo test --workspace --all-features
+
 build:
     cargo build --workspace
 
