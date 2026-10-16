@@ -20,24 +20,27 @@ winit window; it does not yet run a real session.
 ## Workspace layout
 
 ```
-crates/
-  crawm-core/     pure data: ids, geometry, colors, tags, window model (no Smithay)
-  crawm-layout/   Layout trait + implementations (pure)
-  crawm-anim/     spring/easing curves + animation clock (pure)
-  crawm-config/   TOML parsing, validation, defaults
-  crawm-ipc/      IPC types + client (leaf; no other crawm-* deps)
-  crawm/          the binary: Smithay glue, backends, handlers, render, input
-  crawm-msg/      CLI client (`crawm-msg`)
+src/              the compositor: Smithay glue, backends, handlers, render, input
+tests/            headless integration tests
+crawm-core/       pure data: ids, geometry, colors, tags, window model (no Smithay)
+crawm-layout/     Layout trait + implementations (pure)
+crawm-anim/       spring/easing curves + animation clock (pure)
+crawm-config/     TOML parsing, validation, defaults
+crawm-ipc/        IPC types + client (leaf; no other crawm-* deps)
+crawm-msg/        CLI client (`crawm-msg`)
 resources/        default config, session units, shaders, portals
 docs/             ADRs and (later) the manual
 ```
+
+The root `Cargo.toml` is both the `crawm` package and the workspace root
+(niri-style), so plain `cargo run` starts the compositor.
 
 ## Building
 
 ```sh
 cargo build --workspace
-cargo run -p crawm -- --backend winit     # nested window on an existing session
-cargo run -p crawm -- --validate          # parse + validate the config, then exit
+cargo run -- --backend winit     # nested window on an existing session
+cargo run -- --validate          # parse + validate the config, then exit
 ```
 
 ## License

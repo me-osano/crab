@@ -47,15 +47,15 @@ locally as the canonical reference.
 **Exit criteria:** `docs/decisions/README.md` index current; every framework-level choice has an ADR or a written rationale.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
-- [x] `crates/crawm-core/` — pure data: ids, logical geometry, colors, tags (no Smithay).
-- [x] `crates/crawm-layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure).
-- [x] `crates/crawm-anim/` — spring/easing curves + `Animated` scalar (pure).
-- [x] `crates/crawm-config/` — TOML parse/validate/defaults.
-- [x] `crates/crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
-- [x] `crates/crawm/` — the binary (backend selection, logging, panic hook, winit backend).
-- [x] `crates/crawm-msg/` — CLI client.
+- [x] `crawm-core/` — pure data: ids, logical geometry, colors, tags (no Smithay).
+- [x] `crawm-layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure).
+- [x] `crawm-anim/` — spring/easing curves + `Animated` scalar (pure).
+- [x] `crawm-config/` — TOML parse/validate/defaults.
+- [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
+- [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style).
+- [x] `crawm-msg/` — CLI client.
 - [x] `resources/` — `default-config.toml`, `session/` (`.desktop`, systemd `.target`/`.service`), `shaders/`, `crawm-portals.conf`.
-- [x] Headless/integration tests live in `crates/crawm/tests/` (Cargo has no workspace-level `tests/`; the doc's `tests/` is conceptual).
+- [x] Headless/integration tests live in `tests/` (the root package's integration tests).
 - [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if `-core`/`-layout`/`-anim`/`-config` gain Smithay/Wayland deps, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
 
 ### 0.4 Smithay baseline

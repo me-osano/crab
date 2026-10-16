@@ -1,19 +1,27 @@
-# crawm — workspace root
-#
+# crawm — package root AND workspace root (niri-style): the compositor itself
+# lives in `src/` here; library crates sit alongside it at the repository root.
 # Layout and boundary rules live in ROADMAP.md §5. The pure crates
 # (crawm-core / crawm-layout / crawm-anim / crawm-config) must never depend on
 # Smithay or Wayland; `scripts/check-boundaries.sh` enforces this in CI.
 
+[package]
+name = "crawm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The crawm Wayland compositor."
+
 [workspace]
 resolver = "3" # edition 2024's resolver (MSRV-aware); see docs/decisions/
 members = [
-  "crates/crawm-core",
-  "crates/crawm-anim",
-  "crates/crawm-layout",
-  "crates/crawm-config",
-  "crates/crawm-ipc",
-  "crates/crawm",
-  "crates/crawm-msg",
+  ".",
+  "crawm-core",
+  "crawm-anim",
+  "crawm-layout",
+  "crawm-config",
+  "crawm-ipc",
+  "crawm-msg",
 ]
 
 [workspace.package]
@@ -26,11 +34,11 @@ authors = ["crawm contributors"]
 
 [workspace.dependencies]
 # Internal crates (path + version so they can be published later).
-crawm-core = { path = "crates/crawm-core", version = "0.0.0" }
-crawm-anim = { path = "crates/crawm-anim", version = "0.0.0" }
-crawm-layout = { path = "crates/crawm-layout", version = "0.0.0" }
-crawm-config = { path = "crates/crawm-config", version = "0.0.0" }
-crawm-ipc = { path = "crates/crawm-ipc", version = "0.0.0" }
+crawm-core = { path = "crawm-core", version = "0.0.0" }
+crawm-anim = { path = "crawm-anim", version = "0.0.0" }
+crawm-layout = { path = "crawm-layout", version = "0.0.0" }
+crawm-config = { path = "crawm-config", version = "0.0.0" }
+crawm-ipc = { path = "crawm-ipc", version = "0.0.0" }
 
 # External.
 anyhow = "1"
@@ -59,6 +67,23 @@ smithay = { version = "0.7", default-features = false, features = [
   "renderer_multi",
   "wayland_frontend",
 ] }
+
+# The compositor binary (`src/main.rs`) — everything that touches Smithay.
+[dependencies]
+crawm-core = { workspace = true }
+crawm-anim = { workspace = true }
+crawm-layout = { workspace = true }
+crawm-config = { workspace = true }
+crawm-ipc = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+smithay = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -153,28 +153,29 @@ A compositor that treats **layout as a swappable strategy**, not an identity. Us
 ## 5. Repository layout
 
 Use a workspace so layout logic and config can be tested without graphics dependencies.
+The root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style),
+so the compositor lives in a top-level `src/` and the library crates sit beside it.
 
 ```
 crawm/
-├── Cargo.toml                  # workspace
+├── Cargo.toml                  # `crawm` package + workspace
 ├── COMPOSITOR.md               # this file
-├── crates/
-│   ├── crawm-core/            # pure data: ids, geometry, tags, window model, no Smithay
-│   ├── crawm-layout/          # Layout trait + implementations (pure, unit-tested)
-│   ├── crawm-config/          # parsing, validation, defaults, schema
-│   ├── crawm-anim/            # spring/easing curves, animation clock (pure)
-│   ├── crawm-ipc/             # IPC types shared by compositor and CLI client
-│   ├── crawm/                 # the binary: Smithay glue, backends, render, handlers
-│   └── crawm-msg/             # CLI client: `crawm-msg ...`
+├── src/                        # the compositor: Smithay glue, backends, render, handlers
+├── tests/                      # integration tests using the headless backend
+├── crawm-core/                 # pure data: ids, geometry, tags, window model, no Smithay
+├── crawm-layout/               # Layout trait + implementations (pure, unit-tested)
+├── crawm-config/               # parsing, validation, defaults, schema
+├── crawm-anim/                 # spring/easing curves, animation clock (pure)
+├── crawm-ipc/                  # IPC types shared by compositor and CLI client
+├── crawm-msg/                  # CLI client: `crawm-msg ...`
 ├── resources/
 │   ├── default-config.toml
 │   ├── session/                # .desktop file, systemd units
 │   └── shaders/                # GLSL for effects
-├── docs/
-└── tests/                      # integration tests using the headless backend
+└── docs/                       # mdBook; ADRs
 ```
 
-### Inside `crawm`
+### Inside `src/`
 
 ```
 src/

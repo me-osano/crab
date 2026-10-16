@@ -364,21 +364,20 @@ versioning.
 
 ```
 crawm/
-├── Cargo.toml                 # workspace
+├── Cargo.toml                 # the `crawm` package (src/) AND the workspace root (niri-style)
 ├── COMPOSITOR.md              # design (existing)
 ├── ROADMAP.md                 # this file
-├── crates/
-│   ├── crawm-core/         # pure data: ids, geometry, spaces/tags, window model — no Smithay
-│   ├── crawm-layout/       # Layout trait + all layouts (pure, unit/property-tested)
-│   ├── crawm-anim/         # springs/easing/curves + animation clock (pure)
-│   ├── crawm-config/       # TOML parsing, validation, defaults, schema, rules
-│   ├── crawm-ipc/          # IPC types + client; shared by compositor and msg CLI
-│   ├── crawm-protocols/    # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
-│   ├── crawm/              # the binary: Smithay glue, backends, handlers, render, input
-│   └── crawm-msg/          # CLI client (`crawm-msg`)
+├── src/                     # the compositor: Smithay glue, backends, handlers, render, input
+├── tests/                     # headless integration tests + transcripts (root package's tests/)
+├── crawm-core/             # pure data: ids, geometry, spaces/tags, window model — no Smithay
+├── crawm-layout/           # Layout trait + all layouts (pure, unit/property-tested)
+├── crawm-anim/             # springs/easing/curves + animation clock (pure)
+├── crawm-config/           # TOML parsing, validation, defaults, schema, rules
+├── crawm-ipc/              # IPC types + client; shared by compositor and msg CLI
+├── crawm-protocols/        # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
+├── crawm-msg/              # CLI client (`crawm-msg`)
 ├── resources/                 # default-config.toml, session units/.desktop, shaders, portals
-├── docs/                      # mdBook; ADRs
-└── tests/                     # headless integration tests + transcripts
+└── docs/                      # mdBook; ADRs
 ```
 
 Rules:
@@ -390,10 +389,11 @@ Rules:
   otherwise a `protocols` module inside `crawm`.
 - **At M0** the workspace realizes `crawm-core` / `-layout` / `-anim` / `-config` /
   `-ipc` / `crawm` / `crawm-msg` plus `resources/`. `crawm-protocols` is deferred
-  until a second crate needs the bindings, and integration tests live in
-  `crates/crawm/tests/` (Cargo has no workspace-root `tests/`).
+  until a second crate needs the bindings, and integration tests live in the root
+  package's `tests/` (the root `Cargo.toml` is both the `crawm` package and the
+  workspace root, niri-style).
 
-Inside `crawm/src/`: `main.rs`, `state.rs`, `backend/{mod,winit,tty,headless}.rs`,
+Inside `src/`: `main.rs`, `state.rs`, `backend/{mod,winit,tty,headless}.rs`,
 `handlers/` (one per protocol), `input/{mod,keyboard,pointer,gestures,binds}.rs`,
 `render/{mod,elements/,shaders.rs,damage.rs}`, `layout_glue.rs`, `animation.rs`,
 `ipc.rs`, `config_reload.rs`, `screencast/`, `xwayland.rs`. (See `COMPOSITOR.md` §5.)

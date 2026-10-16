@@ -12,10 +12,10 @@ build:
     cargo build --workspace
 
 run:
-    cargo run -p crawm -- --backend winit
+    cargo run -- --backend winit
 
 validate:
-    cargo run -p crawm -- --validate
+    cargo run -- --validate
 
 boundaries:
     ./scripts/check-boundaries.sh
