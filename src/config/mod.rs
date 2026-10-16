@@ -5,11 +5,11 @@
 //! a key that is *present* but has the wrong type is an error, so a typo is
 //! reported rather than silently defaulted.
 //!
-//! `crawm-config` has no Smithay/Wayland dependency (ROADMAP §5); it depends only
-//! on `crawm-core` for shared primitives like [`crawm_core::Color`].
+//! `src/config` has no Smithay/Wayland dependency (ROADMAP §5); it depends only
+//! on [`crate::core`] for shared primitives like [`crate::core::Color`].
 //!
-//! ```
-//! let config = crawm_config::parse("gaps = 4\n").unwrap();
+//! ```text
+//! let config = config::parse("gaps = 4\n").unwrap();
 //! assert_eq!(config.gaps, 4);
 //! ```
 
@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crawm_core::Color;
+use crate::core::Color;
 use serde::Deserialize;
 
 /// The compositor configuration.
@@ -166,6 +166,12 @@ fn checked_i32(raw: i64, name: &str) -> Result<i32, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_a_minimal_document() {
+        let cfg = parse("gaps = 4\n").unwrap();
+        assert_eq!(cfg.gaps, 4);
+    }
 
     #[test]
     fn defaults_are_valid() {

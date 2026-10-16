@@ -26,7 +26,7 @@ Relevant prior art:
 ## Decision
 
 crawm's configuration is **TOML**, parsed with `serde` and the `toml` crate
-(`crawm-config`).
+(`src/config`).
 
 ## Consequences
 

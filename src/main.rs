@@ -2,20 +2,22 @@
 //! protocol breadth.
 //!
 //! This binary owns everything that touches Smithay. The pure logic lives in
-//! the `crawm-core` / `crawm-config` crates and in the Smithay-free
-//! [`animation`] and [`layout`] modules (see `ROADMAP.md` §5).
+//! the Smithay-free [`core`], [`config`], [`layout`], and [`animation`] modules
+//! (see `ROADMAP.md` §5).
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod animation;
 mod backend;
 mod cli;
+pub mod config;
+pub mod core;
 pub mod layout;
 mod logging;
 
+use crate::config::Config;
 use anyhow::Context as _;
 use clap::Parser as _;
-use crawm_config::Config;
 
 use crate::cli::{Args, Backend};
 
@@ -28,7 +30,7 @@ fn main() -> anyhow::Result<()> {
 
     if args.validate {
         // Validate even a default config, then report and exit.
-        crawm_config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
+        crate::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
         println!(
             "ok: config valid (gaps={}, border-width={}, layout={}, animations={})",
             config.gaps, config.border_width, config.layout, config.animations
@@ -47,7 +49,7 @@ fn main() -> anyhow::Result<()> {
 /// Loads the config from `--config`, or falls back to built-in defaults.
 fn resolve_config(args: &Args) -> anyhow::Result<Config> {
     match &args.config {
-        Some(path) => crawm_config::load(path)
+        Some(path) => crate::config::load(path)
             .with_context(|| format!("loading config from {}", path.display())),
         None => Ok(Config::default()),
     }

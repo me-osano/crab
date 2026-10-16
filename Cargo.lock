@@ -404,30 +404,25 @@ name = "crawm"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.13.2",
  "clap",
- "crawm-config",
- "crawm-core",
  "crawm-ipc",
+ "serde",
  "smithay",
+ "thiserror 2.0.21",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "crawm-config"
+name = "crawm-cli"
 version = "0.0.0"
 dependencies = [
- "crawm-core",
- "serde",
- "thiserror 2.0.21",
- "toml",
-]
-
-[[package]]
-name = "crawm-core"
-version = "0.0.0"
-dependencies = [
- "bitflags 2.13.2",
+ "anyhow",
+ "clap",
+ "crawm-ipc",
+ "serde_json",
 ]
 
 [[package]]
@@ -437,16 +432,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "crawm-msg"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "crawm-ipc",
- "serde_json",
 ]
 
 [[package]]

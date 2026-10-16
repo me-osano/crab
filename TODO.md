@@ -16,7 +16,7 @@ Phase 0 below.
 **Timeline:** part-time solo, **~37–55 weeks** cumulative to `v0.1.0` (M0–M11). Order
 matters more than dates. HDR/colour is a separate post-0.1 track.
 
-**Name:** `crawm`; binary `crawm`, CLI `crawm-msg`; env `CRAWM_SOCKET`;
+**Name:** `crawm`; binary `crawm`, CLI `crawm-cli`; env `CRAWM_SOCKET`;
 directory `crawm/`.
 
 ---
@@ -47,16 +47,16 @@ locally as the canonical reference.
 **Exit criteria:** `docs/decisions/README.md` index current; every framework-level choice has an ADR or a written rationale.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
-- [x] `crawm-core/` — pure data: ids, logical geometry, colors, tags (no Smithay).
+- [x] `src/core/` — pure data: ids, logical geometry, colors, tags (no Smithay; folded in from the former `crawm-core` crate).
 - [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crawm-layout` crate).
 - [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crawm-anim` crate).
-- [x] `crawm-config/` — TOML parse/validate/defaults.
+- [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crawm-config` crate).
 - [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
 - [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style).
-- [x] `crawm-msg/` — CLI client.
+- [x] `crawm-cli/` — CLI client (renamed from `crawm-msg`).
 - [x] `resources/` — `default-config.toml`, `session/` (`.desktop`, systemd `.target`/`.service`), `shaders/`, `crawm-portals.conf`.
 - [x] Headless/integration tests live in `tests/` (the root package's integration tests).
-- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if `-core`/`-layout`/`-anim`/`-config` gain Smithay/Wayland deps, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
+- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
 
 ### 0.4 Smithay baseline
 - [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released tag is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
@@ -113,7 +113,7 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 Goal: a real tiling model with per-output tags, per-tag layout, mixed tiling/floating,
 and per-tag layout memory. Everything here is pure and unit-testable.
 
-### 2.1 `crawm-core` data model (`COMPOSITOR.md` §6)
+### 2.1 `src/core` data model (`COMPOSITOR.md` §6)
 - [ ] Newtypes `WindowId`, `OutputId`, `TagMask(u32)`, `LayerId`; logical `f64` `Rect`/`Point`/`Size`.
 - [ ] `Window` (id, app_id, title, `tags: TagMask`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
 - [ ] `Output` (name, geometry, scale, `usable_area`, `view: TagView`, `tag_states: [TagState; 32]`).
@@ -248,9 +248,9 @@ Goal: boot `crawm` from a TTY and use it as the real session on one machine.
 Goal: a bar can display tags/windows via IPC, config edits apply live, and a bad config
 never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 
-### 5.1 `crawm-config`
+### 5.1 `src/config`
 - [ ] TOML parser (per ADR-0003) → typed `Config`; defaults in `resources/default-config.toml`.
-- [ ] Validation with **good error spans** (the `toml` crate reports line/column); `crawm-msg validate` (and `--validate`) for CI/pre-flight.
+- [ ] Validation with **good error spans** (the `toml` crate reports line/column); `crawm-cli validate` (and `--validate`) for CI/pre-flight.
 - [ ] File includes (`include = [...]`, with optional entries); user variables.
 
 ### 5.2 Hot reload
@@ -278,7 +278,7 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] Event stream: `WindowOpened/Closed/Changed/Focused`, `TagViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
 - [ ] Robust parsing: unknown event names/fields are skipped, never fatal.
 
-### 5.6 `crawm-msg`
+### 5.6 `crawm-cli`
 - [ ] `get <query>`, `watch <event-stream>`, `dispatch <action>`, `validate`; `--json` machine output.
 
 ### 5.7 Animation config surface
@@ -527,13 +527,14 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 ## Appendix B — Crate & dependency map
 
 ```
-crawm-core     → (pure; no deps on other crawm crates)
-crawm-config   → core                     (TOML parse/validate/defaults)
+crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
+                 · pure modules (Smithay-free, source-scanned in CI):
+                   src/core       → (ids, geometry, colors, tags)
+                   src/config     → core, serde, toml, thiserror
+                   src/layout     → core
+                   src/animation  → core            (curves; geometry via core)
 crawm-ipc      → (leaf; serde only)
-crawm          → core, config, ipc, [protocols]   + Smithay/calloop/…
-                 · pure modules (Smithay-free, enforced): src/layout → core,
-                   src/animation → core (curves; geometry via core)
-crawm-msg      → ipc                        (CLI)
+crawm-cli      → ipc                        (CLI)
 ```
 - `crawm-protocols` exists **only if ≥2 crates need** generated bindings; otherwise a `protocols` module inside the binary.
 - Feature flags: `xwayland`, `screencast`, `effects`, `dbus`, `profile-with-tracy`, and (later) `hdr`.

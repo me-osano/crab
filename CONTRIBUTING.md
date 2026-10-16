@@ -2,11 +2,10 @@
 
 ## Ground rules
 
-1. **Respect the crate/module boundaries.** `crawm-core` and `crawm-config` must
-   not depend on Smithay or any Wayland crate; the `src/layout` and `src/animation`
-   modules must stay Smithay/Wayland-free; `crawm-ipc` must not depend on any other
-   `crawm-*` crate. Run `scripts/check-boundaries.sh` (also enforced in CI) before
-   opening a PR.
+1. **Respect the crate/module boundaries.** The `src/{core,config,layout,animation}`
+   modules must stay Smithay/Wayland-free, and `crawm-ipc` must not depend on any
+   other `crawm-*` crate. Run `scripts/check-boundaries.sh` (also enforced in CI)
+   before opening a PR.
 2. **Layout, animation, and config logic is pure and tested.** No globals, no
    `Instant::now()` inside animation stepping, no I/O in layout code.
 3. **Never block the event loop.** No synchronous file I/O or D-Bus waits inside

@@ -4,8 +4,8 @@
 //! the `libinput` seat. Until then this is an explicit, honest failure rather than
 //! a silent no-op.
 
+use crate::config::Config;
 use anyhow::bail;
-use crawm_config::Config;
 
 /// Attempts to start the TTY backend.
 ///

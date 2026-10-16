@@ -1,6 +1,6 @@
 //! Easing curves and spring parameters.
 
-use crawm_core::Point;
+use crate::core::Point;
 
 /// Parameters of a damped spring, in SI-ish units (stiffness `N/m`, damping `N·s/m`).
 #[derive(Clone, Copy, Debug, PartialEq)]

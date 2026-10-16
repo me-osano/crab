@@ -4,8 +4,8 @@
 //! This is the M0 smoke test (TODO 0.5). It intentionally stops short of creating
 //! Wayland globals — those arrive with the real state in M1.
 
+use crate::config::Config;
 use anyhow::Context as _;
-use crawm_config::Config;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{Frame as _, Renderer as _};
 use smithay::backend::winit::{self, WinitEvent};

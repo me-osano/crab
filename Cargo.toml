@@ -1,8 +1,8 @@
 # crawm — package root AND workspace root (niri-style): the compositor itself
-# lives in `src/` here; library crates sit alongside it at the repository root.
-# Layout and boundary rules live in ROADMAP.md §5. The pure code — crawm-core,
-# crawm-config, and the `src/layout` / `src/animation` modules — must never
-# depend on Smithay or Wayland; `scripts/check-boundaries.sh` enforces this in CI.
+# lives in `src/` here; the remaining library crates sit alongside it at the
+# repository root. Layout and boundary rules live in ROADMAP.md §5. The pure
+# code — the src/{core,config,layout,animation} modules — must never depend on
+# Smithay or Wayland; `scripts/check-boundaries.sh` enforces this in CI.
 
 [package]
 name = "crawm"
@@ -16,10 +16,8 @@ description = "The crawm Wayland compositor."
 resolver = "3" # edition 2024's resolver (MSRV-aware); see docs/decisions/
 members = [
   ".",
-  "crawm-core",
-  "crawm-config",
   "crawm-ipc",
-  "crawm-msg",
+  "crawm-cli",
 ]
 
 [workspace.package]
@@ -32,8 +30,6 @@ authors = ["crawm contributors"]
 
 [workspace.dependencies]
 # Internal crates (path + version so they can be published later).
-crawm-core = { path = "crawm-core", version = "0.0.0" }
-crawm-config = { path = "crawm-config", version = "0.0.0" }
 crawm-ipc = { path = "crawm-ipc", version = "0.0.0" }
 
 # External.
@@ -65,17 +61,18 @@ smithay = { version = "0.7", default-features = false, features = [
 ] }
 
 # The compositor binary (`src/main.rs`) — everything that touches Smithay.
-# `src/animation` and `src/layout` are pure modules (no Smithay), enforced for
-# crawm-core/crawm-config by `scripts/check-boundaries.sh` crate deps and for
-# the in-tree modules by a source scan.
+# The pure modules (src/{core,config,layout,animation}) pull in only pure deps:
+# serde/toml/thiserror for config parsing.
 [dependencies]
-crawm-core = { workspace = true }
-crawm-config = { workspace = true }
 crawm-ipc = { workspace = true }
 
 anyhow = { workspace = true }
+bitflags = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 smithay = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

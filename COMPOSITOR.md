@@ -161,13 +161,13 @@ crawm/
 ├── Cargo.toml                  # `crawm` package + workspace
 ├── COMPOSITOR.md               # this file
 ├── src/                        # the compositor: Smithay glue, backends, render, handlers
+│   ├── core/                   # pure data: ids, geometry, tags, window model, no Smithay
+│   ├── config/                 # parsing, validation, defaults, schema (pure)
 │   ├── layout/                 # Layout trait + implementations (pure, unit-tested)
 │   └── animation/              # spring/easing curves, animated scalars (pure)
 ├── tests/                      # integration tests using the headless backend
-├── crawm-core/                 # pure data: ids, geometry, tags, window model, no Smithay
-├── crawm-config/               # parsing, validation, defaults, schema
 ├── crawm-ipc/                  # IPC types shared by compositor and CLI client
-├── crawm-msg/                  # CLI client: `crawm-msg ...`
+├── crawm-cli/                  # CLI client: `crawm-cli ...`
 ├── resources/
 │   ├── default-config.toml
 │   ├── session/                # .desktop file, systemd units
@@ -211,7 +211,7 @@ src/
 
 ## 6. Core data model
 
-Names are suggestions. Keep this part in `crawm-core` with no Smithay dependency.
+Names are suggestions. Keep this part in `src/core` with no Smithay dependency.
 
 ### Identifiers and geometry
 
@@ -592,9 +592,9 @@ needs are met by IPC plus the event stream.
 
 - **Hot reload** via file watcher with debounce.
 - **Atomic apply:** parse and validate into a new `Config`; only swap if valid.
-- **Errors surface visibly:** on-screen banner plus `crawm-msg validate` for CI/pre-flight.
+- **Errors surface visibly:** on-screen banner plus `crawm-cli validate` for CI/pre-flight.
 - `include = ["other.toml"]` support for splitting configs.
-- Provide `crawm-msg config schema` or documented defaults so editors can offer completion later.
+- Provide `crawm-cli config schema` or documented defaults so editors can offer completion later.
 
 ### 13.3 Example (sketch)
 
@@ -699,7 +699,7 @@ Apply rules **at map time** and **re-evaluate on title/app-id change** for rules
 
 - Unix domain socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; path exported as `CRAWM_SOCKET`.
 - Newline-delimited JSON, request/response plus an **event stream** subscription.
-- A `crawm-msg` CLI wraps it (`--json` for machine output).
+- A `crawm-cli` CLI wraps it (`--json` for machine output).
 
 ### Requests (initial set)
 
@@ -901,7 +901,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] Hot reload with atomic apply and error banner
 - [ ] Keybinds (keyboard, mouse, modes), hotkey overlay
 - [ ] Window rules (app-id/title match, floating, tag, size, opacity, focus)
-- [ ] IPC socket, JSON protocol, event stream, `crawm-msg`
+- [ ] IPC socket, JSON protocol, event stream, `crawm-cli`
 - [ ] Documentation of config and IPC; default config shipped
 - **Exit criteria:** bars can show tags/windows via IPC; config edits apply live
 

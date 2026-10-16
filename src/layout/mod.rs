@@ -14,7 +14,7 @@ mod placement;
 
 pub use placement::{Layout, LayoutInput, Placement};
 
-use crawm_core::WindowId;
+use crate::core::WindowId;
 
 /// Shows only the focused window, filling the area (others are hidden).
 #[derive(Clone, Copy, Debug, Default)]
@@ -66,7 +66,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Layout>> {
 
 /// Used by tests and the compositor to render a window that has no placement.
 #[must_use]
-pub fn hidden(window: WindowId, rect: crawm_core::Rect) -> Placement {
+pub fn hidden(window: WindowId, rect: crate::core::Rect) -> Placement {
     Placement {
         window,
         rect,
@@ -77,7 +77,7 @@ pub fn hidden(window: WindowId, rect: crawm_core::Rect) -> Placement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crawm_core::{Point, Rect, Size};
+    use crate::core::{Point, Rect, Size};
 
     fn input() -> LayoutInput {
         LayoutInput {

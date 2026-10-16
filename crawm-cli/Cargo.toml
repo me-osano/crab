@@ -1,5 +1,5 @@
 [package]
-name = "crawm-msg"
+name = "crawm-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "Command-line client for the crawm IPC socket."
 
 [[bin]]
-name = "crawm-msg"
+name = "crawm-cli"
 path = "src/main.rs"
 
 [lints]

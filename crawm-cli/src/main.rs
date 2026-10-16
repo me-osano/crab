@@ -1,10 +1,10 @@
-//! `crawm-msg` — a thin CLI over the crawm IPC socket.
+//! `crawm-cli` — a thin CLI over the crawm IPC socket.
 //!
 //! ```text
-//! crawm-msg version
-//! crawm-msg outputs | tags | windows | focused-window | layouts
-//! crawm-msg dispatch '{"view-tag":{"index":2}}'
-//! crawm-msg watch
+//! crawm-cli version
+//! crawm-cli outputs | tags | windows | focused-window | layouts
+//! crawm-cli dispatch '{"view-tag":{"index":2}}'
+//! crawm-cli watch
 //! ```
 
 use anyhow::Context as _;
@@ -13,7 +13,7 @@ use crawm_ipc::{Action, Client, Request, Response};
 
 /// Query and control a running crawm instance.
 #[derive(Debug, Parser)]
-#[command(name = "crawm-msg", version, about)]
+#[command(name = "crawm-cli", version, about)]
 struct Args {
     /// Emit compact JSON instead of pretty-printed JSON.
     #[arg(long, global = true)]
@@ -85,6 +85,6 @@ fn print(response: &Response, raw: bool) {
     };
     match text {
         Ok(text) => println!("{text}"),
-        Err(err) => eprintln!("crawm-msg: failed to encode response: {err}"),
+        Err(err) => eprintln!("crawm-cli: failed to encode response: {err}"),
     }
 }

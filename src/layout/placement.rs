@@ -1,6 +1,6 @@
 //! The `Layout` trait and the types it consumes and produces.
 
-use crawm_core::{Rect, WindowId};
+use crate::core::{Rect, WindowId};
 
 /// The inputs a layout needs to arrange a tag's windows.
 #[derive(Clone, Debug, PartialEq)]

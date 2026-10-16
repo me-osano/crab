@@ -11,7 +11,7 @@ gaps = 8
 border_width = 2
 border_color = "#7aa2f7"
 
-# Layout used for new tags. See `crawm-msg layouts` for the available set.
+# Layout used for new tags. See `crawm-cli layouts` for the available set.
 layout = "monocle"
 
 [animations]
