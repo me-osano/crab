@@ -1,13 +1,16 @@
 //! crawm — a Wayland compositor merging mango tags, niri scrolling, and cosmic
 //! protocol breadth.
 //!
-//! This binary owns everything that touches Smithay; the pure logic lives in the
-//! `crawm-*` libraries (see `ROADMAP.md` §5).
+//! This binary owns everything that touches Smithay. The pure logic lives in
+//! the `crawm-core` / `crawm-config` crates and in the Smithay-free
+//! [`animation`] and [`layout`] modules (see `ROADMAP.md` §5).
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod animation;
 mod backend;
 mod cli;
+pub mod layout;
 mod logging;
 
 use anyhow::Context as _;

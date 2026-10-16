@@ -48,8 +48,8 @@ locally as the canonical reference.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
 - [x] `crawm-core/` — pure data: ids, logical geometry, colors, tags (no Smithay).
-- [x] `crawm-layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure).
-- [x] `crawm-anim/` — spring/easing curves + `Animated` scalar (pure).
+- [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crawm-layout` crate).
+- [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crawm-anim` crate).
 - [x] `crawm-config/` — TOML parse/validate/defaults.
 - [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
 - [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style).
@@ -122,7 +122,7 @@ and per-tag layout memory. Everything here is pure and unit-testable.
 - [ ] **One** focus function that updates keyboard focus, activation (`xdg_toplevel`), border-color targets, and IPC events.
 - [ ] Document the **multi-tag-view rule**: combined set uses the lowest-numbered visible tag's layout (dwm behavior).
 
-### 2.2 `crawm-layout` engine (`COMPOSITOR.md` §7.1)
+### 2.2 `src/layout` engine (`COMPOSITOR.md` §7.1)
 - [ ] `LayoutInput`, `Placement { window, rect, visible, z_hint }`, `LayoutParams`, `ScrollState`.
 - [ ] `trait Layout { kind; arrange; neighbor?; command? }` — **pure functions**, no globals.
 - [ ] `layout_glue.rs` in the binary: bridge Smithay windows → layout input; map `Placement` back.
@@ -159,7 +159,7 @@ and per-tag layout memory. Everything here is pure and unit-testable.
 - [ ] `proptest` invariants: no overlaps (non-floating), all rects inside area, deterministic.
 - [ ] Snapshot tests per layout.
 
-**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-tag layouts and params are remembered; `cargo test -p crawm-layout` green.
+**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-tag layouts and params are remembered; `cargo test -p crawm layout` green.
 
 ---
 
@@ -168,7 +168,7 @@ and per-tag layout memory. Everything here is pure and unit-testable.
 Goal: niri-quality motion with mango-level configurability. Switches and layout changes
 are smooth, interruptible, and free of pops.
 
-### 3.1 `crawm-anim` (`COMPOSITOR.md` §9)
+### 3.1 `src/animation` (`COMPOSITOR.md` §9)
 - [ ] `Curve::{ Spring, Easing, Bezier }`; `Animated<T> { current, target, velocity, curve }`.
 - [ ] Interruptible retargeting (keep value + velocity); `is_animating()`.
 - [ ] **One synced clock per animation kind** (no per-window drift).
@@ -177,7 +177,7 @@ are smooth, interruptible, and free of pops.
 ### 3.2 Drive animations off the frame clock
 - [ ] Advance animations using the **vblank / `wp_presentation` time**, not `Instant::now()`.
 - [ ] Redraw machine keeps requesting frames while `is_animating()`; stops when settled.
-- [ ] `animation.rs` in the binary bridges `crawm-anim` ↔ placements/elements.
+- [ ] The frame-clock driver in `src/animation` bridges the primitives ↔ placements/elements.
 
 ### 3.3 `Scroller` layout (niri)
 - [ ] Infinite horizontal strip of columns; focused column centered / edge-aligned (`center`, `overspread`).
@@ -528,11 +528,11 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 
 ```
 crawm-core     → (pure; no deps on other crawm crates)
-crawm-layout   → core
-crawm-anim     → core                     (curves/clock; geometry via core)
 crawm-config   → core                     (TOML parse/validate/defaults)
 crawm-ipc      → (leaf; serde only)
-crawm          → core, layout, anim, config, ipc, [protocols]   + Smithay/calloop/…
+crawm          → core, config, ipc, [protocols]   + Smithay/calloop/…
+                 · pure modules (Smithay-free, enforced): src/layout → core,
+                   src/animation → core (curves; geometry via core)
 crawm-msg      → ipc                        (CLI)
 ```
 - `crawm-protocols` exists **only if ≥2 crates need** generated bindings; otherwise a `protocols` module inside the binary.

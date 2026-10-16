@@ -21,10 +21,10 @@ winit window; it does not yet run a real session.
 
 ```
 src/              the compositor: Smithay glue, backends, handlers, render, input
+  layout/         pure layout engine: Layout trait + implementations (no Smithay)
+  animation/      pure springs/easing curves + animated scalars (no Smithay)
 tests/            headless integration tests
 crawm-core/       pure data: ids, geometry, colors, tags, window model (no Smithay)
-crawm-layout/     Layout trait + implementations (pure)
-crawm-anim/       spring/easing curves + animation clock (pure)
 crawm-config/     TOML parsing, validation, defaults
 crawm-ipc/        IPC types + client (leaf; no other crawm-* deps)
 crawm-msg/        CLI client (`crawm-msg`)

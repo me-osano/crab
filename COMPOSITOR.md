@@ -161,11 +161,11 @@ crawm/
 ├── Cargo.toml                  # `crawm` package + workspace
 ├── COMPOSITOR.md               # this file
 ├── src/                        # the compositor: Smithay glue, backends, render, handlers
+│   ├── layout/                 # Layout trait + implementations (pure, unit-tested)
+│   └── animation/              # spring/easing curves, animated scalars (pure)
 ├── tests/                      # integration tests using the headless backend
 ├── crawm-core/                 # pure data: ids, geometry, tags, window model, no Smithay
-├── crawm-layout/               # Layout trait + implementations (pure, unit-tested)
 ├── crawm-config/               # parsing, validation, defaults, schema
-├── crawm-anim/                 # spring/easing curves, animation clock (pure)
 ├── crawm-ipc/                  # IPC types shared by compositor and CLI client
 ├── crawm-msg/                  # CLI client: `crawm-msg ...`
 ├── resources/
@@ -198,8 +198,9 @@ src/
 │   ├── elements/               # window, layer, cursor, border, shadow, blur, text
 │   ├── shaders.rs
 │   └── damage.rs
-├── layout_glue.rs              # bridges Smithay windows to the pure layout crate
-├── animation.rs                # drives crawm-anim off the frame clock
+├── layout/                    # pure layout engine (Layout trait, layouts, placement)
+├── layout_glue.rs              # bridges Smithay windows to the pure layout module
+├── animation/                  # pure primitives; driver advances them off the frame clock
 ├── ipc.rs
 ├── config_reload.rs
 ├── screencast/
@@ -782,7 +783,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 
 | Layer | Method |
 |---|---|
-| Layout math | Unit + property tests in `crawm-layout` (no graphics) |
+| Layout math | Unit + property tests in `src/layout` (no graphics) |
 | Animation curves | Unit tests with deterministic clocks |
 | Config | Parse/validate tests, golden error messages, fuzzing the parser |
 | Protocol handlers | Headless backend plus a test Wayland client (e.g., `wayland-client` based harness) |
@@ -827,7 +828,7 @@ Measure continuously; regressions block merges once benchmarks exist.
 |---|---|---|
 | Smithay API churn | Rebase pain | Pin commit; update in dedicated PRs; keep Smithay-facing code isolated in `handlers/` and `backend/` |
 | Scope creep (effects, every protocol) | Never reaching daily-drivable | Strict milestone gating (section 22); P0/P1 first; effects behind features |
-| Layout/animation coupling bugs | Glitchy resize | Pure layout crate; explicit animation retargeting tests |
+| Layout/animation coupling bugs | Glitchy resize | Pure layout module; explicit animation retargeting tests |
 | NVIDIA quirks | Unusable for part of audience | Test early on NVIDIA proprietary + nouveau/NVK; document known issues |
 | Fractional scaling rounding | Blurry or misaligned borders | Single place that converts logical → physical; snapshot tests |
 | Blur performance and damage interaction | Frame drops | Budgeted, cached, optional; disable under low power |
@@ -862,7 +863,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 
 ### Milestone 2: Layout core (2-3 weeks)
 
-- [ ] `Layout` trait, `Placement`, pure `crawm-layout` crate
+- [ ] `Layout` trait, `Placement`, pure `src/layout` module
 - [ ] Layouts: `Tile`, `Monocle`, `Floating`
 - [ ] Per-window `floating` flag; mixed tiled+floating on one tag
 - [ ] Tags: `TagMask`, view tag, move-to-tag, toggle-tag
@@ -906,7 +907,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 
 ### Milestone 6: Layout variety, scroller, and animation (4-6 weeks)
 
-- [ ] `crawm-anim`: spring + easing, interruptible, clock-driven
+- [ ] `src/animation`: spring + easing, interruptible, clock-driven
 - [ ] Animate window open/close/move/resize, tag switch, layout switch
 - [ ] Layouts: `Scroller` (niri-style), `Grid`, `Deck`, `Spiral`
 - [ ] Per-tag layout memory and params restore

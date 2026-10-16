@@ -1,6 +1,6 @@
 //! An interruptible animated scalar driven by a damped spring.
 
-use crate::curve::SpringParams;
+use super::curve::SpringParams;
 
 /// A scalar that moves toward a target under spring physics.
 ///

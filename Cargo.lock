@@ -405,21 +405,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "crawm-anim",
  "crawm-config",
  "crawm-core",
  "crawm-ipc",
- "crawm-layout",
  "smithay",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "crawm-anim"
-version = "0.0.0"
-dependencies = [
- "crawm-core",
 ]
 
 [[package]]
@@ -446,13 +437,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "crawm-layout"
-version = "0.0.0"
-dependencies = [
- "crawm-core",
 ]
 
 [[package]]

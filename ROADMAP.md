@@ -184,7 +184,7 @@ provenance, priority, target milestone, and how to verify it. Priority:
 | Per-layout directional `neighbor()` | niri | P1 | M2 |
 
 **Layout engine rule (from `COMPOSITOR.md` §7.1):** layouts are **pure functions**
-in `crawm-layout` — no Wayland, no globals — so they are unit- and
+in the `src/layout` module — no Wayland, no globals — so they are unit- and
 property-testable.
 
 ### C. Animation
@@ -368,10 +368,10 @@ crawm/
 ├── COMPOSITOR.md              # design (existing)
 ├── ROADMAP.md                 # this file
 ├── src/                     # the compositor: Smithay glue, backends, handlers, render, input
+│   ├── layout/                # pure Layout trait + all layouts (unit/property-tested, no Smithay)
+│   └── animation/             # springs/easing/curves + animated scalars (pure, no Smithay)
 ├── tests/                     # headless integration tests + transcripts (root package's tests/)
 ├── crawm-core/             # pure data: ids, geometry, spaces/tags, window model — no Smithay
-├── crawm-layout/           # Layout trait + all layouts (pure, unit/property-tested)
-├── crawm-anim/             # springs/easing/curves + animation clock (pure)
 ├── crawm-config/           # TOML parsing, validation, defaults, schema, rules
 ├── crawm-ipc/              # IPC types + client; shared by compositor and msg CLI
 ├── crawm-protocols/        # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
@@ -381,22 +381,30 @@ crawm/
 ```
 
 Rules:
-- `crawm-core`, `-layout`, `-anim`, `-config` have **no** Smithay/Wayland deps →
-  fast unit tests, and they are the crates a future `crawl-desktop` could reuse.
+- `crawm-core` and `crawm-config` have **no** Smithay/Wayland deps, and the
+  `src/layout` / `src/animation` modules are Smithay/Wayland-free by rule →
+  fast unit tests, and the crates are what a future `crawl-desktop` could reuse.
+  All of this is enforced by `scripts/check-boundaries.sh` (cargo-metadata check
+  for the crates, source scan for the modules).
+- `src/layout` and `src/animation` were folded in from the former
+  `crawm-layout` / `crawm-anim` crates: they have a single consumer, so the
+  ADR-0005 "modules first" rule above applies. Promote them back to crates only
+  when (1) fires — e.g. `crawl-desktop` needs them.
 - `crawm-ipc` is a **leaf** (no other `crawm-*` deps).
 - Only `crawm` (and `crawm-msg` for IPC) touch Smithay.
 - Keep generated protocol code in `crawm-protocols` **only if ≥2 crates need it**;
   otherwise a `protocols` module inside `crawm`.
-- **At M0** the workspace realizes `crawm-core` / `-layout` / `-anim` / `-config` /
-  `-ipc` / `crawm` / `crawm-msg` plus `resources/`. `crawm-protocols` is deferred
-  until a second crate needs the bindings, and integration tests live in the root
-  package's `tests/` (the root `Cargo.toml` is both the `crawm` package and the
-  workspace root, niri-style).
+- **At M0** the workspace realizes `crawm` (root package) / `crawm-core` /
+  `crawm-config` / `crawm-ipc` / `crawm-msg` plus `resources/`. `crawm-protocols`
+  is deferred until a second crate needs the bindings, and integration tests live
+  in the root package's `tests/` (the root `Cargo.toml` is both the `crawm`
+  package and the workspace root, niri-style).
 
 Inside `src/`: `main.rs`, `state.rs`, `backend/{mod,winit,tty,headless}.rs`,
 `handlers/` (one per protocol), `input/{mod,keyboard,pointer,gestures,binds}.rs`,
-`render/{mod,elements/,shaders.rs,damage.rs}`, `layout_glue.rs`, `animation.rs`,
-`ipc.rs`, `config_reload.rs`, `screencast/`, `xwayland.rs`. (See `COMPOSITOR.md` §5.)
+`render/{mod,elements/,shaders.rs,damage.rs}`, `layout/` (pure), `layout_glue.rs`,
+`animation/` (pure primitives + the frame-clock driver), `ipc.rs`,
+`config_reload.rs`, `screencast/`, `xwayland.rs`. (See `COMPOSITOR.md` §5.)
 
 ---
 
@@ -409,7 +417,8 @@ supersede `COMPOSITOR.md` §22 where they differ.
 
 ### M0 — Foundations *(1–2 weeks)*
 - [x] Settle the **license** — **GPL-3.0-or-later** (ADR-0001, §10).
-- [ ] Create the workspace + 8 crates from §5; `[workspace.dependencies]`.
+- [ ] Create the workspace + the §5 layout (root `crawm` package + `crawm-core` /
+      `crawm-config` / `crawm-ipc` / `crawm-msg`); `[workspace.dependencies]`.
 - [ ] Pin Smithay to a git rev (niri does this) or `0.7.x`+patch (cosmic does).
 - [ ] CI: build, clippy `-D warnings`, fmt, tests, `cargo-deny`.
 - [ ] `tracing` + panic hook to `$XDG_STATE_HOME`.
@@ -429,7 +438,7 @@ supersede `COMPOSITOR.md` §22 where they differ.
 ### M2 — Spaces & layout core *(3–4 weeks)* — *the "best of mango+dwm" phase*
 - [ ] `crawm-core`: `WindowId`, `OutputId`, `TagMask`, `Rect`, `Window`, `Output`,
       `TagView`, `FocusTarget`.
-- [ ] `crawm-layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
+- [ ] `src/layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
 - [ ] Layouts: `Tile`, `Monocle`, `Floating`. Mixed tiled+floating on one space.
 - [ ] Tags: `view`, `move-to-tag`, `toggle-tag`, **multi-tag view**, multi-tag windows.
 - [ ] **Per-space layout memory + params** (`Pertag` equivalent).
@@ -440,7 +449,7 @@ supersede `COMPOSITOR.md` §22 where they differ.
       layouts remembered.
 
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
-- [ ] `crawm-anim`: spring + easing + bezier; **one synced clock per kind**;
+- [ ] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
       interruptible retargeting; `is_animating()`.
 - [ ] `Scroller` layout (columns, focus/center/overspread, proportion presets,
       per-column width, vertical variant).
@@ -611,7 +620,7 @@ Rules:
 
 | Layer | Method |
 |---|---|
-| Layout math | Unit + `proptest` invariants in `crawm-layout` (no graphics) |
+| Layout math | Unit + `proptest` invariants in `src/layout` (no graphics) |
 | Animation curves | Deterministic-clock unit tests |
 | Config | Parse/validate tests, golden error messages, parser fuzzing |
 | Protocol handlers | Headless backend + a `wayland-client` test harness |
