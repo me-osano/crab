@@ -1,0 +1,5 @@
+[toolchain]
+# Smithay tracks stable Rust; bump this deliberately when upgrading Smithay.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

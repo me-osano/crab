@@ -1,0 +1,13 @@
+[package]
+name = "crawm-anim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure spring/easing curves and the animation clock for crawm."
+
+[lints]
+workspace = true
+
+[dependencies]
+crawm-core = { workspace = true }

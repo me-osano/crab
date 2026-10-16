@@ -1,0 +1,991 @@
+# crawm — Compositor design
+
+> Design document and roadmap for a Rust Wayland compositor + window manager that mixes **tag-based layouts** (mango), **scrollable tiling and engineering quality** (niri), and **broad protocol coverage and floating/tiling mixing** (COSMIC).
+>
+> Name: `crawm`. Status: **pre-alpha design**.
+> Notes on upstream projects are from memory; verify against current repos before copying any design decision.
+
+---
+
+## Table of contents
+
+1. [Vision](#1-vision)
+2. [Design principles](#2-design-principles)
+3. [Architecture overview](#3-architecture-overview)
+4. [Tech stack](#4-tech-stack)
+5. [Repository layout](#5-repository-layout)
+6. [Core data model](#6-core-data-model)
+7. [Layout system](#7-layout-system)
+8. [Event loop and render pipeline](#8-event-loop-and-render-pipeline)
+9. [Animation system](#9-animation-system)
+10. [Visual effects](#10-visual-effects)
+11. [Input, focus, and keybindings](#11-input-focus-and-keybindings)
+12. [Protocol support matrix](#12-protocol-support-matrix)
+13. [Configuration](#13-configuration)
+14. [IPC](#14-ipc)
+15. [XWayland](#15-xwayland)
+16. [Outputs, scaling, and color](#16-outputs-scaling-and-color)
+17. [Screencast and screenshots](#17-screencast-and-screenshots)
+18. [Session and desktop integration](#18-session-and-desktop-integration)
+19. [Testing and debugging](#19-testing-and-debugging)
+20. [Performance targets](#20-performance-targets)
+21. [Risks and mitigations](#21-risks-and-mitigations)
+22. [Roadmap](#22-roadmap)
+23. [References](#23-references)
+
+---
+
+## 1. Vision
+
+A compositor that treats **layout as a swappable strategy**, not an identity. Users should be able to:
+
+- Tile (master/stack, grid, deck, monocle) on one tag.
+- Scroll (niri-style infinite strip) on another.
+- Float freely on a third, or **mix floating and tiled windows on the same tag**.
+- Switch layout per tag at runtime with a keybind or IPC call, with smooth animation between states.
+
+### Goals
+
+- Correct, fast, tear-free Wayland compositor on bare metal (DRM/KMS) and nested (winit).
+- Multiple layouts behind one trait; per-tag layout state.
+- Modern UX: spring animations, gestures, blur/shadow/rounded corners as optional passes.
+- First-class scripting surface: hot-reloaded config, JSON IPC, event stream.
+- Works with the ecosystem: bars (waybar, ironbar, eww), launchers (fuzzel, rofi-wayland), lockers, screen sharing via portals, notifications.
+
+### Non-goals (initially)
+
+- Being a full desktop environment (no built-in panel, settings app, or file manager).
+- X11 window manager mode. XWayland support comes via `xwayland-satellite` or a minimal embedded approach.
+- Matching every effect of Hyprland/mango. Effects stay modular and are cut first when they threaten stability.
+- Network transparency, remote desktop (maybe later through PipeWire/portal).
+
+---
+
+## 2. Design principles
+
+1. **Correctness before polish.** Protocol compliance and frame pacing come before blur.
+2. **Layouts are pure functions.** A layout takes windows plus an area and returns placements. No hidden global state, so layouts are unit-testable without a Wayland connection.
+3. **State is single-owner.** One `State` struct driven by `calloop`; no `Arc<Mutex<_>>` soup. Cross-thread work (screencast, config parsing, asset loading) communicates through channels.
+4. **Everything animatable is a value with a target.** Do not mutate positions directly; set targets and let the animation system interpolate (interruptibly).
+5. **Config is validated, never trusted.** A bad config reload must never crash or lose the current config. Show an error overlay/notification and keep the last good config.
+6. **Make invariants unrepresentable.** Use newtypes (`TagMask`, `OutputId`, `WindowId`), enums for focus targets, and exhaustive matches.
+7. **Observable by default.** `tracing` spans around frame, layout, and protocol handlers; an optional debug overlay (frame time, damage, direct-scanout status).
+8. **Modular effects.** Each effect is a render pass behind a feature flag and a config switch, and can be disabled per window rule.
+
+---
+
+## 3. Architecture overview
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                              main / CLI                              │
+│        arg parsing · config load · backend selection · logging       │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │
+        ┌───────▼────────┐            ┌─────────────────────────────┐
+        │   calloop      │◄───────────┤ Event sources               │
+        │  event loop    │            │  · Wayland display fd       │
+        └───────┬────────┘            │  · libinput                 │
+                │                     │  · DRM vblank / winit       │
+                │                     │  · timers (animations)      │
+                │                     │  · config file watcher      │
+                │                     │  · IPC socket               │
+                │                     │  · D-Bus (logind/portals)   │
+                │                     │  · PipeWire channel         │
+                │                     └─────────────────────────────┘
+        ┌───────▼──────────────────────────────────────────────────┐
+        │                         State                            │
+        │  ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌─────────┐  │
+        │  │  Outputs   │ │ Tags/Space │ │ Windows  │ │  Input  │  │
+        │  └─────┬──────┘ └─────┬──────┘ └────┬─────┘ └────┬────┘  │
+        │        │              │             │            │       │
+        │  ┌─────▼──────────────▼─────────────▼────────────▼────┐  │
+        │  │   Layout engine (trait) + Animation system         │  │
+        │  └───────────────────────┬────────────────────────────┘  │
+        │                          │ placements                    │
+        │  ┌───────────────────────▼────────────────────────────┐  │
+        │  │            Render element builder                  │  │
+        │  │  (windows, layer surfaces, cursor, effects, UI)    │  │
+        │  └───────────────────────┬────────────────────────────┘  │
+        └──────────────────────────┼───────────────────────────────┘
+                                   │
+                 ┌─────────────────▼──────────────────┐
+                 │   Backend: DRM/GBM/EGL │ winit     │
+                 └────────────────────────────────────┘
+```
+
+### Data flow per frame (simplified)
+
+1. Event arrives (input, client commit, timer, IPC).
+2. Handler mutates `State` (focus, window set, tag membership, layout params).
+3. If layout inputs changed, mark the tag **layout-dirty**.
+4. On the next frame callback for an output: run layout for dirty tags, retarget animations, advance animations to the frame's presentation time, build render elements, submit via backend, then send `frame` callbacks and `wp_presentation` feedback.
+
+---
+
+## 4. Tech stack
+
+| Concern | Choice | Notes |
+|---|---|---|
+| Compositor toolkit | **Smithay** (git) | Track main; pin a commit in `Cargo.toml` and bump deliberately |
+| Event loop | **calloop** | Used by Smithay; all sources are calloop sources |
+| Backends | Smithay `winit`, `drm` + `gbm` + `egl` + `udev` + `libinput` + `libseat` | Winit for dev, DRM for real use |
+| Renderer | Smithay GLES renderer | Custom shaders for blur, rounded corners, shadows |
+| Config format | **TOML** (`serde` + `toml` crate) | See [section 13](#13-configuration) |
+| Config watching | `notify` crate | Debounced |
+| IPC | Unix socket + JSON (`serde_json`) | Event stream for bars/scripts |
+| D-Bus | `zbus` | logind, portals, screen-saver inhibit, accessibility later |
+| Screencast | `pipewire` crate | Dedicated thread; frames passed via dma-buf |
+| XWayland | `xwayland-satellite` (external) first | Avoids implementing an X11 WM |
+| Text rendering (UI overlays) | `cosmic-text` or `pango`/`cairo` | For error overlay, hotkey overlay, debug HUD |
+| Logging | `tracing` + `tracing-subscriber` | Optional `tracy-client` feature |
+| Errors | `anyhow` (binary), `thiserror` (libs) | |
+| Testing | `cargo test`, `proptest` for layouts, headless backend | See [section 19](#19-testing-and-debugging) |
+
+### Rust toolchain
+
+- Stable Rust, `edition = "2021"` (move to 2024 once dependencies settle).
+- `clippy` and `rustfmt` in CI; `#![deny(unsafe_op_in_unsafe_fn)]`.
+- Cargo features: `xwayland`, `screencast`, `effects`, `dbus`, `profile-with-tracy`.
+
+---
+
+## 5. Repository layout
+
+Use a workspace so layout logic and config can be tested without graphics dependencies.
+
+```
+crawm/
+├── Cargo.toml                  # workspace
+├── COMPOSITOR.md               # this file
+├── crates/
+│   ├── crawm-core/            # pure data: ids, geometry, tags, window model, no Smithay
+│   ├── crawm-layout/          # Layout trait + implementations (pure, unit-tested)
+│   ├── crawm-config/          # parsing, validation, defaults, schema
+│   ├── crawm-anim/            # spring/easing curves, animation clock (pure)
+│   ├── crawm-ipc/             # IPC types shared by compositor and CLI client
+│   ├── crawm/                 # the binary: Smithay glue, backends, render, handlers
+│   └── crawm-msg/             # CLI client: `crawm-msg ...`
+├── resources/
+│   ├── default-config.toml
+│   ├── session/                # .desktop file, systemd units
+│   └── shaders/                # GLSL for effects
+├── docs/
+└── tests/                      # integration tests using the headless backend
+```
+
+### Inside `crawm`
+
+```
+src/
+├── main.rs
+├── state.rs                    # State struct + top-level event dispatch
+├── backend/
+│   ├── mod.rs                  # Backend trait
+│   ├── winit.rs
+│   ├── tty.rs                  # DRM/KMS, multi-GPU later
+│   └── headless.rs             # for tests
+├── handlers/                   # one file per protocol (xdg_shell.rs, layer_shell.rs, ...)
+├── input/
+│   ├── mod.rs
+│   ├── keyboard.rs
+│   ├── pointer.rs
+│   ├── gestures.rs
+│   └── binds.rs
+├── render/
+│   ├── mod.rs                  # element ordering, frame composition
+│   ├── elements/               # window, layer, cursor, border, shadow, blur, text
+│   ├── shaders.rs
+│   └── damage.rs
+├── layout_glue.rs              # bridges Smithay windows to the pure layout crate
+├── animation.rs                # drives crawm-anim off the frame clock
+├── ipc.rs
+├── config_reload.rs
+├── screencast/
+└── xwayland.rs
+```
+
+---
+
+## 6. Core data model
+
+Names are suggestions. Keep this part in `crawm-core` with no Smithay dependency.
+
+### Identifiers and geometry
+
+```rust
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct WindowId(pub u64);
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct OutputId(pub u32);
+
+/// Bitmask of tags. Up to 32 tags is plenty (mango uses 9).
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
+pub struct TagMask(pub u32);
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Rect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
+```
+
+Use logical `f64` coordinates in the layout layer and convert to physical pixels (with rounding rules) only at render time. Fractional scaling makes integer logical coordinates a trap.
+
+### Window model
+
+```rust
+pub struct Window {
+    pub id: WindowId,
+    pub app_id: Option<String>,
+    pub title: Option<String>,
+    pub tags: TagMask,            // can belong to multiple tags
+    pub floating: bool,           // per-window override
+    pub fullscreen: bool,
+    pub maximized: bool,
+    pub urgent: bool,
+    pub float_geometry: Option<Rect>, // remembered when floating
+    pub min_size: Option<Size>,
+    pub max_size: Option<Size>,
+    pub rules: AppliedRules,      // result of matching window rules
+}
+```
+
+### Output and tag state
+
+Two viable models. **Recommendation: tags per output** (each monitor has its own tag view), as in mango/dwl.
+
+```rust
+pub struct Output {
+    pub id: OutputId,
+    pub name: String,             // "DP-1"
+    pub geometry: Rect,           // logical, after scale/transform
+    pub scale: f64,
+    pub usable_area: Rect,        // after layer-shell exclusive zones
+    pub view: TagView,            // which tags are visible and how
+    pub tag_states: [TagState; 32],
+}
+
+pub struct TagView {
+    pub visible: TagMask,         // can show multiple tags at once (union)
+    pub previous: TagMask,        // for "toggle back"
+}
+
+pub struct TagState {
+    pub layout: LayoutKind,       // Tile, Scroller, Monocle, Grid, Deck, Floating...
+    pub params: LayoutParams,     // master ratio, master count, gaps, etc.
+    pub scroll: ScrollState,      // for scroller: focused column, view offset
+    pub focus_history: Vec<WindowId>,
+}
+```
+
+Rule for **multi-tag view**: when several tags are visible, the layout of the *lowest-numbered visible tag* is used for the combined window set (dwm behavior). Document this clearly; it is the one place where tag models confuse people.
+
+### Focus model
+
+```rust
+pub enum FocusTarget {
+    Window(WindowId),
+    LayerSurface(LayerId),   // e.g. launcher with keyboard-interactivity
+    LockSurface(OutputId),
+    None,
+}
+```
+
+Keep a per-output MRU stack and a global "last focused output". Focus change must go through one function that also updates keyboard focus, activation state (`xdg_toplevel` activated), border color targets, and IPC events.
+
+---
+
+## 7. Layout system
+
+### 7.1 The trait
+
+```rust
+pub struct LayoutInput<'a> {
+    pub area: Rect,                       // usable area of the output
+    pub windows: &'a [LayoutWindow],      // tiled windows in order (floating excluded)
+    pub focused: Option<usize>,
+    pub params: &'a LayoutParams,
+    pub scroll: &'a mut ScrollState,      // layouts that need persistent state
+}
+
+pub struct Placement {
+    pub window: WindowId,
+    pub rect: Rect,
+    pub visible: bool,                    // monocle/deck hide non-top windows
+    pub z_hint: i32,
+}
+
+pub trait Layout {
+    fn kind(&self) -> LayoutKind;
+    fn arrange(&self, input: LayoutInput<'_>) -> Vec<Placement>;
+
+    /// Optional: directional focus within this layout (left/right/up/down).
+    fn neighbor(&self, input: &LayoutInput<'_>, from: usize, dir: Direction) -> Option<usize>;
+
+    /// Optional: layout-specific commands (grow master, scroll column, etc.)
+    fn command(&self, _cmd: LayoutCommand, _params: &mut LayoutParams) {}
+}
+```
+
+Floating windows are **not** passed to `arrange`; they keep their `float_geometry` and are drawn above tiled windows (with per-window raise on focus). This is what lets one tag mix both.
+
+### 7.2 Built-in layouts (planned)
+
+| Layout | Description | Source of idea |
+|---|---|---|
+| `Tile` | Master/stack, configurable master count and ratio, left/right/top/bottom variants | dwm/mango |
+| `Monocle` | One window fills the area; others hidden | dwm |
+| `Deck` | Master + stack where only the top of the stack is visible | mango/dwl patches |
+| `Grid` | Even grid | mango |
+| `Scroller` | Infinite horizontal strip of columns; focused column centered or edge-aligned | niri |
+| `Spiral/Dwindle` | Recursive splits | bspwm/Hyprland |
+| `Floating` | No automatic placement; cascading initial position | classic stacking |
+| `Tabbed/Stacked groups` (later) | Windows in a group share a rect with a tab bar | COSMIC/i3 |
+
+### 7.3 Mixing tiling and floating
+
+- Each window has `floating: bool`; toggling moves it between the layout's input set and the free set.
+- When un-floating, the window re-enters the layout at a sensible position (after the focused window).
+- Window rules can force floating (dialogs, `app_id` matches, windows with fixed min/max size, transient parents).
+- Floating windows can be **pinned** (visible on all tags) and **always-on-top**.
+- Interactive move/resize with the mouse on a tiled window can either auto-float it (default) or reorder in the layout (config option).
+
+### 7.4 Layout switching
+
+- Switching the layout of a tag does **not** change window state; it only changes how `arrange` is computed.
+- Animate each window's rect from old to new placement (see [section 9](#9-animation-system)).
+- Remember per-layout params so switching back restores master ratio, scroll offset, etc.
+
+### 7.5 Fullscreen, maximized, and special cases
+
+- Fullscreen windows are removed from layout input and placed at the full output geometry above layer-shell `Top` (but below `Overlay`), per protocol expectations.
+- Maximize in a tiled layout means "fill the usable area" without leaving the tag's window ordering.
+- Respect client min/max size hints; layouts treat them as soft constraints and clamp placements. Clients that ignore configure sizes need a "clip to rect" fallback.
+
+### 7.6 Testing layouts
+
+Because layouts are pure:
+
+- Unit tests on fixed inputs (golden rect lists).
+- `proptest` invariants: no overlaps in non-floating layouts, all rects inside area, total area coverage within gaps, deterministic output.
+- Snapshot tests for each layout with 1..12 windows.
+
+---
+
+## 8. Event loop and render pipeline
+
+### 8.1 Event loop
+
+- One `calloop::EventLoop<State>` on the main thread.
+- Wayland display is inserted as a calloop source; client dispatch happens in the loop.
+- Worker threads (config parse, PipeWire, screenshot encode) send results through `calloop::channel`.
+- **Never block** the loop: no synchronous file IO in handlers, no waiting on D-Bus.
+
+### 8.2 Per-output redraw state machine
+
+Follow the well-trodden approach (used by niri and Smithay's anvil):
+
+```
+Idle ──queue_redraw──► Queued ──render──► WaitingForVBlank ──vblank──► Idle
+                          ▲                       │
+                          └──── queue_redraw ─────┘ (EstimatedVBlank timer when nothing to show)
+```
+
+- Only render when something requested a redraw (damage, animation tick, cursor move).
+- When an animation is active, keep requesting redraws until all animations settle.
+- Use the vblank timestamp (or `wp_presentation` clock) as the animation time, not `Instant::now()`, so motion is smooth.
+
+### 8.3 Render element ordering (bottom to top)
+
+1. Background layer-shell surfaces (`Background`)
+2. Bottom layer-shell surfaces (`Bottom`)
+3. Tiled windows (z-hint order) with borders/shadows
+4. Floating windows (MRU order; always-on-top last)
+5. Fullscreen window (if any)
+6. Top layer-shell surfaces (`Top`) (hidden under fullscreen unless configured)
+7. Popups (`xdg_popup`) and subsurfaces of the above
+8. Overlay layer-shell surfaces (`Overlay`), session-lock surface when locked
+9. Compositor UI: overview, hotkey help, error banner, debug HUD
+10. Cursor (hardware plane if possible, otherwise composited)
+
+### 8.4 Damage tracking and scanout
+
+- Use Smithay's `OutputDamageTracker` / `DrmCompositor` so only changed regions are repainted.
+- **Direct scanout**: if a single fullscreen window's buffer is scanout-capable (dma-buf, right modifiers), submit it directly to the primary plane. Disable on effect use that touches that window.
+- **Overlay planes**: use for cursor first; video/window overlays are a later optimization.
+- Send `wp_presentation_feedback` and frame callbacks only for surfaces actually shown on that output.
+
+### 8.5 Multi-GPU (later)
+
+Support primary GPU rendering with copy to secondary GPU outputs (dma-buf import/export). Treat it as a late milestone; plan the `Backend` trait so a renderer per device is possible, but ship single-GPU first.
+
+---
+
+## 9. Animation system
+
+Goal: niri-quality motion with mango-level configurability.
+
+### Primitives
+
+```rust
+pub enum Curve {
+    Spring { damping_ratio: f64, stiffness: f64, epsilon: f64 },
+    Easing { duration_ms: u32, kind: EasingKind },
+    Bezier { duration_ms: u32, p1: (f64, f64), p2: (f64, f64) },
+}
+
+pub struct Animated<T> {
+    current: T,
+    target: T,
+    velocity: T,         // preserved on retarget for interruptibility
+    curve: Curve,
+}
+```
+
+### Requirements
+
+- **Interruptible:** retargeting mid-animation keeps current value and velocity (springs make this natural).
+- **Gesture-driven:** touchpad swipe controls the value 1:1 while fingers are down, then hands velocity to a spring on release.
+- **Clock-driven:** animations advance using the frame time passed in; the system reports `is_animating()` so the redraw machine knows whether to keep going.
+- **Per-event curves** configurable: window open/close, window move/resize, tag switch, layout switch, workspace overview, focus ring/border color.
+- **Reduce-motion switch:** one config flag and one IPC toggle that sets all durations to zero.
+
+### What gets animated
+
+| Event | Animated properties |
+|---|---|
+| Window open | alpha, scale, offset |
+| Window close | alpha, scale (render a snapshot texture after the client unmaps) |
+| Move/resize in layout | x, y, w, h (render at animated rect; for resize, crop/scale the last buffer until the client catches up) |
+| Tag switch | per-output horizontal/vertical slide of window groups |
+| Layout switch | per-window rect |
+| Scroller | view offset |
+| Border/focus ring | color blend |
+
+### Resize handling
+
+Clients commit new buffers after being configured, not instantly. For smooth visuals:
+
+- Immediately configure the client with the target size.
+- Keep drawing the old buffer scaled/cropped into the animated rect until the new buffer arrives.
+- For close animations, capture the last buffer into an offscreen texture before the surface goes away.
+
+---
+
+## 10. Visual effects
+
+All effects are optional render passes with a performance budget and a kill switch.
+
+| Effect | Approach | Notes |
+|---|---|---|
+| Rounded corners | Fragment shader with SDF mask on window texture | Must also clip borders and shadows |
+| Borders / focus ring | Drawn as rounded-rect shader quads around the window | Animate color; support gradients later |
+| Shadows | Pre-blurred rounded-rect shadow texture or analytic SDF shadow | Cache by size and radius |
+| Blur | Dual Kawase blur of the content *behind* a window | Needs the framebuffer behind the window; cache and update only on damage; respect `ext-background-effect` if/when stabilized |
+| Dim inactive | Alpha multiply | Cheap |
+| Opacity rules | Per-window rule (`opacity 0.9`) | |
+
+### Rules of the road
+
+- **Corner radius first**, then borders, then shadows. Blur last; it is expensive and interacts with damage tracking.
+- Effects must not break direct scanout when no effect applies to the scanned-out window.
+- Provide `effects { enabled false }` globally and per-window rule overrides (`blur false`).
+- Expose a "low power mode" that disables blur and shadows on battery.
+
+---
+
+## 11. Input, focus, and keybindings
+
+### Devices
+
+- libinput via Smithay: keyboard, pointer, touchpad, touchscreen, tablet (later), switches (lid).
+- Per-device config: natural scroll, tap, accel profile, click method, disable-while-typing.
+- XKB layouts configurable per keyboard; runtime layout switching via bind and IPC.
+
+### Keybindings
+
+- Declarative binds in config with **modifiers + key**, **mouse binds**, **gesture binds**, and **switch events**.
+- Bind flags: `repeat`, `allow-when-locked`, `allow-inhibiting=false` (so critical binds work even when a client inhibits shortcuts).
+- Optional **modes/submaps** (resize mode, passthrough mode).
+- A **hotkey overlay** listing active binds (niri has one; it is a great onboarding feature).
+
+### Focus policy
+
+- Click-to-focus default; optional focus-follows-mouse (with scroll-safe thresholds).
+- Focus-on-new-window with rules (`no-focus`, `focus-on-activation` via `xdg_activation`).
+- Respect `xdg_activation_v1` tokens to avoid focus stealing.
+- Pointer constraints and relative pointer for games; keyboard shortcuts inhibit protocol.
+
+### Gestures
+
+- Touchpad: 3-finger horizontal swipe for tag switch, 4-finger for overview (configurable).
+- Touchscreen: edge swipes (later).
+- Gestures write into animation targets directly (see section 9).
+
+### Interactive move/resize
+
+- Super+drag to move, Super+right-drag to resize, as in classic stacking WMs.
+- For tiled windows: dragging converts to floating or reorders, per config.
+- Snap-to-edges and tile-by-drag-to-edge can come later as stacking-mode polish.
+
+---
+
+## 12. Protocol support matrix
+
+Priority: **P0** (needed to boot a usable session), **P1** (needed for a good daily driver), **P2** (nice to have), **P3** (later / evaluate).
+
+| Protocol | Priority | Why |
+|---|---|---|
+| `wl_compositor`, `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output`, `wl_data_device_manager` | P0 | Core |
+| `xdg-shell` | P0 | Normal application windows and popups |
+| `linux-dmabuf` | P0 | GPU buffers; needed for performance and most clients |
+| `wlr-layer-shell` | P0 | Bars, launchers, wallpapers, notifications |
+| `xdg-decoration` | P0 | Server-side decoration negotiation |
+| `viewporter`, `fractional-scale` | P0/P1 | Correct HiDPI behavior |
+| `presentation-time` | P1 | Accurate frame timing for clients |
+| `idle-notify`, `idle-inhibit` | P1 | Idle management (swayidle etc.) |
+| `ext-session-lock` | P1 | Screen lockers |
+| `xdg-activation` | P1 | Focus stealing prevention, app-to-app activation |
+| `primary-selection`, `data-control` | P1 | Clipboard managers, middle-click paste |
+| `cursor-shape` | P1 | Client-requested cursors without shipping themes |
+| `pointer-constraints`, `relative-pointer` | P1 | Games |
+| `keyboard-shortcuts-inhibit` | P1 | Remote desktop, VMs |
+| `text-input` / `input-method` | P1 | CJK and on-screen keyboards |
+| `wlr-output-management` | P1 | `wlr-randr`, kanshi |
+| `wlr-output-power-management` | P1 | DPMS control |
+| `ext-foreign-toplevel-list` / `wlr-foreign-toplevel-management` | P1 | Taskbars |
+| `ext-workspace` | P1 | Workspace/tag widgets in bars |
+| `xdg-output` | P1 | Output names and logical geometry |
+| `wlr-screencopy` / `ext-image-copy-capture` | P1 | Screenshots, recording |
+| `xdg-desktop-portal` (ScreenCast, Screenshot) | P1 | Browser and OBS screen sharing via PipeWire |
+| `xdg-foreign` | P2 | Parent/child across processes |
+| `tablet-v2` | P2 | Drawing tablets |
+| `security-context` | P2 | Sandboxed apps (Flatpak) |
+| `single-pixel-buffer`, `alpha-modifier` | P2 | Cheap efficiency wins |
+| `content-type`, `tearing-control` | P2 | Gaming/video hints |
+| `ext-background-effect` | P2/P3 | Standardized blur request from clients |
+| `color-management` | P3 | HDR/ICC; track upstream |
+| `xdg-toplevel-drag`, `xdg-dialog` | P2 | Better drag/drop and modal dialog behavior |
+
+Keep this table in the repo and update it as protocols land. Each protocol gets its own handler file and, where possible, an integration test.
+
+---
+
+## 13. Configuration
+
+### 13.1 Format choice
+
+| Option | Pros | Cons |
+|---|---|---|
+| **TOML** *(chosen — ADR-0003)* | Ubiquitous, `serde` support, first-class tooling (`taplo`), familiar to everyone | Deeply-nested/repeated structures need arrays of tables |
+| **KDL** | Nested, readable, comments, good for repeated nodes (binds, rules); niri precedent | Fewer Rust crates and far less familiarity; kdl-rs now defaults to KDL v2 (`#true`/`#false`) |
+| Plain `key = value` (mango) | Easy to hand-edit; simple parsing | Weak structure; harder to validate |
+| Lua/Rhai scripting | Maximum power | Complexity, startup cost, safety |
+
+**Recommendation:** **TOML** for the main config (ADR-0003), with `snake_case` keys
+and arrays of tables (`[[window_rule]]`, `[[bind]]`) for repeated structures. Add an
+optional scripting layer (Rhai or Lua) only after IPC is solid; most "scripting"
+needs are met by IPC plus the event stream.
+
+### 13.2 Behavior
+
+- **Hot reload** via file watcher with debounce.
+- **Atomic apply:** parse and validate into a new `Config`; only swap if valid.
+- **Errors surface visibly:** on-screen banner plus `crawm-msg validate` for CI/pre-flight.
+- `include = ["other.toml"]` support for splitting configs.
+- Provide `crawm-msg config schema` or documented defaults so editors can offer completion later.
+
+### 13.3 Example (sketch)
+
+```toml
+# General
+gaps = 8
+border_width = 2
+focus_follows_mouse = false
+
+[tags]
+default_layout = "tile"
+
+# Per-tag defaults
+[[tags.tag]]
+index = 1
+layout = "scroller"
+
+[[tags.tag]]
+index = 2
+layout = "tile"
+master_ratio = 0.55
+master_count = 1
+
+[[tags.tag]]
+index = 3
+layout = "floating"
+
+[animations.window_open]
+spring = { damping = 1.0, stiffness = 800 }
+
+[animations.window_move]
+spring = { damping = 1.0, stiffness = 1000 }
+
+[animations.tag_switch]
+easing = { kind = "ease-out-cubic", duration_ms = 220 }
+
+[effects]
+corner_radius = 10
+
+[effects.shadow]
+enabled = true
+softness = 24
+offset = [0, 6]
+
+[effects.blur]
+enabled = true
+passes = 3
+radius = 6
+
+[input.keyboard]
+xkb_layout = "us,de"
+xkb_options = "grp:alt_shift_toggle"
+repeat_delay = 300
+repeat_rate = 40
+
+[input.touchpad]
+tap = true
+natural_scroll = true
+dwt = true
+
+[[output]]
+name = "DP-1"
+mode = "2560x1440@144"
+scale = 1.25
+position = [0, 0]
+
+[[window_rule]]
+match = { app_id = "^pavucontrol$" }
+floating = true
+size = [700, 500]
+
+[[window_rule]]
+match = { app_id = "^firefox$", title = "^Picture-in-Picture$" }
+floating = true
+pinned = true
+blur = false
+
+# Keybinds: chord = action
+[binds]
+"Mod+Return" = { spawn = ["foot"] }
+"Mod+Space" = { cycle_layout = {} }
+"Mod+F" = { toggle_floating = {} }
+"Mod+Shift+1" = { move_to_tag = 1 }
+"Mod+1" = { view_tag = 1 }
+"Mod+Ctrl+1" = { toggle_tag_view = 1 }
+"Mod+H" = { focus = "left" }
+"Mod+L" = { focus = "right" }
+"Mod+Shift+Q" = { close_window = {} }
+```
+
+### 13.4 Window rules
+
+Matching on `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `tag`, X11 vs Wayland. Actions: initial tag, floating, size, position, opacity, blur/shadow/corner overrides, `no-focus`, `pinned`, `always-on-top`, `block-out-from` (screencast privacy), default column width (scroller).
+
+Apply rules **at map time** and **re-evaluate on title/app-id change** for rules marked `dynamic`.
+
+---
+
+## 14. IPC
+
+### Transport
+
+- Unix domain socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; path exported as `CRAWM_SOCKET`.
+- Newline-delimited JSON, request/response plus an **event stream** subscription.
+- A `crawm-msg` CLI wraps it (`--json` for machine output).
+
+### Requests (initial set)
+
+```
+version | outputs | tags | windows | focused-window | layouts
+action <Action>                  # same actions as keybinds
+set-layout --tag N --output X <layout>
+config reload | validate
+event-stream
+```
+
+### Events
+
+`WindowOpened/Closed/Changed/Focused`, `TagViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
+
+### Rules
+
+- **Schema is versioned.** Additive changes only within a major version; include a version request.
+- IPC types live in `crawm-ipc` so third-party Rust tools can depend on it.
+- Keep action names identical between config binds and IPC (one `Action` enum, serialized both ways).
+- Document the protocol so bar authors can integrate (waybar modules, eww, custom scripts).
+
+---
+
+## 15. XWayland
+
+Options:
+
+1. **`xwayland-satellite` (recommended first):** an external process that acts as an X11 WM and presents X windows as normal Wayland toplevels. Far less compositor code; some edge-case limitations (certain X11-specific window behaviors).
+2. **Embedded X11 WM via Smithay's XWayland support:** full control, more work (ICCCM/EWMH, override-redirect, focus quirks).
+
+Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }`), spawn on demand when an X client connects, and set `DISPLAY` automatically. Revisit option 2 only if satellite limitations block real users.
+
+---
+
+## 16. Outputs, scaling, and color
+
+- Hotplug via udev; output add/remove updates tag views and migrates windows from removed outputs to a fallback output.
+- Modes: parse `WxH@Hz`, support custom modes later, VRR (adaptive sync) toggle.
+- **Fractional scaling:** use `wp_fractional_scale` + `wp_viewporter`; layout in logical coordinates; round buffer positions to physical pixels consistently to avoid blurry borders.
+- Transform (rotation/flip) support early, since it affects the coordinate pipeline everywhere.
+- Mirroring and extended layouts via output management.
+- **Color/HDR:** out of scope for v1; keep the render path structured (linear-light option later) so color-management protocol work is possible.
+
+---
+
+## 17. Screencast and screenshots
+
+### Screenshots
+
+- Built-in UI (niri style): select region/window/screen, copy to clipboard, save to file.
+- Also support `wlr-screencopy`/`ext-image-copy-capture` so `grim`, `slurp`, etc. work.
+
+### Screencast
+
+- Implement the portal backend path: `xdg-desktop-portal` → (your portal impl or a compatible one) → PipeWire stream fed by compositor frames.
+- Prefer **dma-buf** sharing to avoid CPU copies; fall back to shm.
+- Support **monitor** casting first, **window** casting second (render the window offscreen).
+- **Privacy:** `block-out-from "screencast"` window rule renders a blank/solid rect in cast output while visible locally.
+- Run the PipeWire loop on its own thread; communicate through channels.
+
+---
+
+## 18. Session and desktop integration
+
+- **Session start:** `.desktop` entry for display managers; wrapper script sets `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE=wayland`, imports env into systemd/D-Bus (`dbus-update-activation-environment`).
+- **systemd:** optional `crawm-session.target` and units for bars/wallpaper (`graphical-session.target` integration).
+- **Autostart:** `spawn-at-startup` entries in config.
+- **Portals:** ship `crawm-portals.conf` choosing `gtk`/`wlr`/own backends for FileChooser, Screenshot, ScreenCast.
+- **Notifications, bar, launcher, wallpaper:** explicitly **not built in**; document recommended pairings (e.g., waybar/ironbar, fuzzel, mako/swaync, swaybg/swww).
+- **Lock/idle:** support `ext-session-lock` and idle protocols; document `swayidle` + `swaylock`/`gtklock` setups.
+- **logind:** handle VT switching, session pause/resume, lid switch, suspend inhibit.
+- **Accessibility:** keep an eye on AT-SPI/screen reader support; cursor size/theme options; reduce-motion.
+- **Crash resilience:** log panics with backtrace to `$XDG_STATE_HOME`; consider a supervisor that restarts the compositor (clients will die, but the session does not drop to the DM).
+
+---
+
+## 19. Testing and debugging
+
+### Layers of testing
+
+| Layer | Method |
+|---|---|
+| Layout math | Unit + property tests in `crawm-layout` (no graphics) |
+| Animation curves | Unit tests with deterministic clocks |
+| Config | Parse/validate tests, golden error messages, fuzzing the parser |
+| Protocol handlers | Headless backend plus a test Wayland client (e.g., `wayland-client` based harness) |
+| State machine | Scripted scenarios: open N windows, switch tags, unplug output, assert focus and placements |
+| Visual regression | Headless render to PNG; compare with tolerance (later) |
+| Real hardware | Manual matrix: AMD, Intel, NVIDIA; multi-monitor; mixed DPI |
+
+### Dev workflow
+
+- `cargo run -- --backend winit` for nested iteration.
+- Debug HUD: frame time, damage regions, scanout state, animation count.
+- `tracing` filters per module (`RUST_LOG=crawm::render=debug`).
+- Optional Tracy profiling feature for frame hitches.
+- `WAYLAND_DEBUG=1` on test clients; `wayland-info` / `weston-info` for capability checks.
+- CI: build, clippy, fmt, unit tests, headless integration tests, `cargo deny` for dependency audit.
+
+### Compatibility test apps
+
+Firefox, Chromium (Ozone Wayland), GTK3/4 apps, Qt5/6 apps, Electron, foot/alacritty/kitty, mpv, a Steam game via Xwayland, OBS, a screen sharing browser tab, a login/lock cycle.
+
+---
+
+## 20. Performance targets
+
+| Metric | Target |
+|---|---|
+| Idle CPU (nothing changing) | ~0% (no unnecessary redraws) |
+| Frame time, 4 windows, no effects, 1440p/144 | < 2 ms CPU, no missed vblanks |
+| Frame time with blur on | < 6 ms GPU on mid-range iGPU at 1080p60 |
+| Input-to-photon latency | One frame; use direct scanout and cursor plane where possible |
+| Memory | < 100 MB resident with a typical session (excludes client buffers) |
+| Config reload | < 50 ms, no dropped frame |
+| Startup to first frame | < 500 ms |
+
+Measure continuously; regressions block merges once benchmarks exist.
+
+---
+
+## 21. Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Smithay API churn | Rebase pain | Pin commit; update in dedicated PRs; keep Smithay-facing code isolated in `handlers/` and `backend/` |
+| Scope creep (effects, every protocol) | Never reaching daily-drivable | Strict milestone gating (section 22); P0/P1 first; effects behind features |
+| Layout/animation coupling bugs | Glitchy resize | Pure layout crate; explicit animation retargeting tests |
+| NVIDIA quirks | Unusable for part of audience | Test early on NVIDIA proprietary + nouveau/NVK; document known issues |
+| Fractional scaling rounding | Blurry or misaligned borders | Single place that converts logical → physical; snapshot tests |
+| Blur performance and damage interaction | Frame drops | Budgeted, cached, optional; disable under low power |
+| Focus-handling bugs | Frustrating UX | One focus function; scenario tests; follow xdg-activation rules |
+| Single-maintainer burnout | Stalled project | Small milestones, docs, tests, early public releases to attract contributors |
+| Licensing mixups when borrowing ideas/code | Legal friction | niri is GPL-3.0, COSMIC components are GPL-3.0, mango/dwl derive from dwl/dwm (GPL/MIT mix). Re-implement ideas rather than copying code unless your license is compatible; check each source's license before reuse |
+
+---
+
+## 22. Roadmap
+
+Each milestone ends with something **runnable and demoable**. Checkboxes are the working task list. Time estimates assume part-time solo work and are rough; treat order as more important than dates.
+
+### Milestone 0: Foundations (1-2 weeks)
+
+- [ ] Create workspace and crates (`core`, `layout`, `config`, `anim`, `ipc`, `compositor`, `msg`)
+- [ ] CI: build, clippy, fmt, tests
+- [ ] Pin Smithay; get Anvil building as a reference
+- [ ] Logging with `tracing`; panic hook
+- [ ] Decide license; add `LICENSE`, `CONTRIBUTING.md`
+- **Exit criteria:** `cargo run` opens a winit window with a solid background
+
+### Milestone 1: First windows (2-3 weeks)
+
+- [ ] Winit backend with calloop loop
+- [ ] Core globals: compositor, shm, seat, output, data device
+- [ ] `xdg-shell`: toplevels and popups
+- [ ] Keyboard and pointer input; click-to-focus
+- [ ] Render windows with GLES; frame callbacks
+- [ ] Simple fixed placement (cascade)
+- **Exit criteria:** `foot` and a GTK app run inside the nested compositor, accept input, resize
+
+### Milestone 2: Layout core (2-3 weeks)
+
+- [ ] `Layout` trait, `Placement`, pure `crawm-layout` crate
+- [ ] Layouts: `Tile`, `Monocle`, `Floating`
+- [ ] Per-window `floating` flag; mixed tiled+floating on one tag
+- [ ] Tags: `TagMask`, view tag, move-to-tag, toggle-tag
+- [ ] Layout params: master ratio/count, gaps, cycle layout
+- [ ] Interactive move/resize for floating windows
+- [ ] Unit + property tests for layouts
+- **Exit criteria:** daily workflow of tiling plus floating dialogs works nested
+
+### Milestone 3: Bare-metal backend (3-4 weeks)
+
+- [ ] libseat session, udev device discovery
+- [ ] DRM/KMS + GBM + EGL rendering, vblank-driven redraw state machine
+- [ ] libinput devices and per-device config
+- [ ] Hardware cursor plane
+- [ ] VT switching and session pause/resume
+- [ ] `linux-dmabuf`, `viewporter`, `presentation-time`
+- [ ] Output hotplug basics; per-output tag views
+- **Exit criteria:** boot into the compositor from a TTY and use it for real on one machine
+
+### Milestone 4: Desktop essentials, P0/P1 protocols (4-6 weeks)
+
+- [ ] `wlr-layer-shell` with exclusive zones feeding `usable_area`
+- [ ] `xdg-decoration`, `cursor-shape`, `fractional-scale`
+- [ ] `xdg-activation`, `primary-selection`, `data-control`
+- [ ] `idle-notify/inhibit`, `ext-session-lock`
+- [ ] `wlr-output-management`, `output-power-management`, `xdg-output`
+- [ ] `ext-foreign-toplevel-list` / foreign-toplevel-management, `ext-workspace`
+- [ ] `pointer-constraints`, `relative-pointer`, `keyboard-shortcuts-inhibit`, `text-input/input-method`
+- [ ] Verified with waybar, fuzzel, swaybg, swaylock/gtklock, swayidle, wl-clipboard
+- **Exit criteria:** replace your current compositor for a full week without fallback
+
+### Milestone 5: Config, rules, and IPC (3-4 weeks)
+
+- [ ] TOML config parser with validation and good error messages
+- [ ] Hot reload with atomic apply and error banner
+- [ ] Keybinds (keyboard, mouse, modes), hotkey overlay
+- [ ] Window rules (app-id/title match, floating, tag, size, opacity, focus)
+- [ ] IPC socket, JSON protocol, event stream, `crawm-msg`
+- [ ] Documentation of config and IPC; default config shipped
+- **Exit criteria:** bars can show tags/windows via IPC; config edits apply live
+
+### Milestone 6: Layout variety, scroller, and animation (4-6 weeks)
+
+- [ ] `crawm-anim`: spring + easing, interruptible, clock-driven
+- [ ] Animate window open/close/move/resize, tag switch, layout switch
+- [ ] Layouts: `Scroller` (niri-style), `Grid`, `Deck`, `Spiral`
+- [ ] Per-tag layout memory and params restore
+- [ ] Touchpad gestures (tag switch, scroll) bound to animation targets
+- [ ] Reduce-motion switch
+- **Exit criteria:** switching layouts and tags feels smooth and interruptible, with no visual pops
+
+### Milestone 7: Effects (3-5 weeks)
+
+- [ ] Rounded corners shader (windows + borders)
+- [ ] Borders / focus ring with animated color
+- [ ] Shadows
+- [ ] Dim inactive, per-window opacity
+- [ ] Dual-Kawase blur with caching and damage awareness
+- [ ] Per-rule overrides and global kill switch; low-power mode
+- **Exit criteria:** effects on by default in a polished config without regressing frame-time targets
+
+### Milestone 8: Screen sharing, screenshots, XWayland (3-5 weeks)
+
+- [ ] `wlr-screencopy` / `ext-image-copy-capture`
+- [ ] Built-in screenshot UI (region/window/screen)
+- [ ] PipeWire screencast (monitor, then window) + portal integration
+- [ ] `block-out-from` privacy rules
+- [ ] XWayland via `xwayland-satellite` with auto-spawn
+- **Exit criteria:** Firefox/Chromium screen sharing, OBS capture, and a Steam game under XWayland work
+
+### Milestone 9: Hardening and 0.1 release (3-4 weeks)
+
+- [ ] Protocol conformance pass; fix client compatibility bugs from the test app matrix
+- [ ] Multi-monitor and mixed-DPI testing; rotated outputs
+- [ ] Direct scanout for fullscreen; overlay-plane experiments
+- [ ] Crash handling and session restart story
+- [ ] Packaging: `.desktop`, systemd units, portals config, AUR/Nix/Flatpak-less distro packages
+- [ ] Docs site: getting started, config reference, IPC reference, FAQ
+- [ ] Performance benchmarks and regression tracking
+- **Exit criteria:** tagged **v0.1.0**; announced; issue templates and contribution guide ready
+
+### Post-0.1 backlog (prioritize by user feedback)
+
+- Tabbed/stacked window groups (COSMIC/i3 style)
+- Overview mode (niri/GNOME style) with live thumbnails
+- Multi-GPU support
+- Tablet protocol, touchscreen gestures
+- `security-context`, `xdg-foreign`, `xdg-dialog`, `xdg-toplevel-drag`
+- `ext-background-effect` and client-requested blur
+- Color management / HDR (track upstream protocol and Smithay support)
+- Window-snap/edge-tiling UX for stacking users
+- Scripting layer (Rhai/Lua) on top of IPC
+- Embedded XWayland WM if satellite proves insufficient
+- Accessibility: screen reader hooks, high-contrast borders, magnifier
+- Session persistence (restore windows to tags after compositor restart where clients allow it)
+- Plugin API for custom layouts (WASM or dynamic loading) once the `Layout` trait is stable
+
+### Versioning and stability promises
+
+- `0.x`: config and IPC may change; breaking changes documented in `CHANGELOG.md`.
+- `1.0`: stable config schema, stable IPC schema, documented deprecation policy.
+
+---
+
+## 23. References
+
+**Projects to study**
+
+- **niri**: scrollable tiling, animation system, rendering, IPC, screencast. Rust + Smithay.
+- **MangoWC / mango (`mangowm`)**: tags, many layouts, scenefx effects, plain-text config. C + wlroots.
+- **COSMIC (`cosmic-comp`)**: mixed tiling/floating, protocol breadth, desktop integration. Rust + Smithay.
+- **Smithay `anvil`**: canonical Smithay usage.
+- **dwl / dwm**: tag semantics and minimal layout model.
+- **Sway / i3**: containers and IPC conventions.
+- **Hyprland**: effects and animation configuration ideas (C++).
+- **labwc / Wayfire**: stacking behavior and plugin architecture references.
+- **river**: layout-as-external-process idea (`river-layout-v3`) if you ever want out-of-process layouts.
+
+**Specs and docs**
+
+- Wayland protocols repository (stable, staging, unstable) and `wlr-protocols`
+- Smithay documentation and examples
+- `calloop` book
+- freedesktop.org: XDG specs, portals, PipeWire docs
+- DRM/KMS docs (kernel.org) for atomic modesetting and planes
+
+**Licensing note:** verify each project's license before adapting code (niri and COSMIC are GPL-3.0; wlroots-based projects vary). Reimplementing documented *ideas* is generally fine; copying *code* requires compatible licensing.

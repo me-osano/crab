@@ -1,0 +1,25 @@
+crawm
+Copyright (C) 2026 the crawm contributors
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version. See LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party code adapted into crawm
+--------------------------------------------------------------------------------
+
+crawm deliberately reuses ideas and (where noted) code from the following projects.
+Adapted files carry a header comment identifying their origin; this file records the
+projects and their licenses.
+
+  * niri            — GPL-3.0-or-later — https://github.com/YaLTeR/niri
+  * cosmic-comp     — GPL-3.0-only     — https://github.com/pop-os/cosmic-comp
+  * mango           — GPL-3.0-or-later — https://github.com/mangowm/mango
+  * smithay         — MIT              — https://github.com/Smithay/smithay
+  * anvil (example) — MIT              — https://github.com/Smithay/smithay
+
+See ROADMAP.md §11 and docs/decisions/0001-license.md for details.
+
+No third-party code has been adapted into crawm yet; this file exists so the
+convention is in place from the first adapted file.

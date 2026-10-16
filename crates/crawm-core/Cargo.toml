@@ -1,0 +1,13 @@
+[package]
+name = "crawm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure data model for crawm: identifiers, geometry, colors, and tags (no Smithay/Wayland)."
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = { workspace = true }

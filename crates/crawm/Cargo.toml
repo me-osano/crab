@@ -1,0 +1,27 @@
+[package]
+name = "crawm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The crawm Wayland compositor."
+
+[[bin]]
+name = "crawm"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+crawm-core = { workspace = true }
+crawm-anim = { workspace = true }
+crawm-layout = { workspace = true }
+crawm-config = { workspace = true }
+crawm-ipc = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+smithay = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

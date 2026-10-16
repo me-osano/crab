@@ -1,0 +1,20 @@
+[package]
+name = "crawm-msg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command-line client for the crawm IPC socket."
+
+[[bin]]
+name = "crawm-msg"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+crawm-ipc = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

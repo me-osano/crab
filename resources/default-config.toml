@@ -1,0 +1,18 @@
+# crawm configuration.
+#
+# This is the shipped default; copy it to $XDG_CONFIG_HOME/crawm/config.toml
+# (usually ~/.config/crawm/config.toml) and edit. Check it with
+# `crawm --validate --config <path>`.
+
+# Space between and around windows, in logical pixels.
+gaps = 8
+
+# Window border.
+border_width = 2
+border_color = "#7aa2f7"
+
+# Layout used for new tags. See `crawm-msg layouts` for the available set.
+layout = "monocle"
+
+[animations]
+enabled = true

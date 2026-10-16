@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=crawm
+Comment=A Wayland compositor merging mango tags, niri scrolling, and cosmic protocol breadth
+Exec=crawm
+Type=Application
+DesktopNames=crawm

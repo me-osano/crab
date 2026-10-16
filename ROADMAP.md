@@ -1,0 +1,762 @@
+# crawm — Roadmap
+
+> **Name:** `crawm` (binary `crawm`, CLI `crawm-msg`).
+> **Companion docs:** [`COMPOSITOR.md`](./COMPOSITOR.md) is the *design* (what and
+> why). This file is the *roadmap*: what to build, in what order, which verified
+> upstream feature it comes from, and how we prove the feature is complete.
+> Accepted decisions live in [`docs/decisions/`](./docs/decisions/README.md); the
+> granular working task list is [`TODO.md`](./TODO.md).
+> **Status:** planning. Upstream facts verified **2026-10-16** against
+> niri `v26.04`, mango `0.18.1`, and `cosmic-comp` master (`1.0.0`).
+
+---
+
+## Table of contents
+
+1. [What this project is](#1-what-this-project-is)
+2. [Design synthesis — the best of niri, mango, cosmic](#2-design-synthesis)
+3. [The completeness contract (feature target matrix)](#3-the-completeness-contract)
+4. [Protocol support matrix](#4-protocol-support-matrix)
+5. [Crate topology](#5-crate-topology)
+6. [Milestones](#6-milestones)
+7. [Integration with crawl-desktop](#7-integration-with-crawl-desktop)
+8. [Testing & verification](#8-testing--verification)
+9. [Performance targets](#9-performance-targets)
+10. [Licensing, risks, and open decisions](#10-licensing-risks-and-open-decisions)
+11. [Verified upstream references](#11-verified-upstream-references)
+
+---
+
+## 1. What this project is
+
+An **independent Wayland compositor + window manager in Rust on Smithay** that
+merges the three strongest compositor designs into one coherent whole:
+
+- **mango** — dwm/dwl-style **tags** with per-tag layouts, many layouts, runtime
+  plain-text config, scenefx-quality effects.
+- **niri** — **scrollable tiling**, a rigorous **animation system**, typed IPC +
+  event stream, typed text config, excellent protocol coverage.
+- **cosmic** — **mixed tiling/floating** with groups and tabbed stacks, first-class
+  config hot-reload, accessibility built into the compositor.
+
+The thesis (from `COMPOSITOR.md` §1) is **layout as a swappable strategy**: tiling,
+scrolling, floating, and stacked are per-space choices, not the compositor's
+identity.
+
+### Relationship to the other projects
+
+| Project | Role | Relationship |
+|---|---|---|
+| `crawm` (this) | The compositor | Server: owns DRM/KMS, input, windows |
+| `crawl-desktop` | The desktop shell | Client: its `crawl-compositor` adapter gains a **`crawm` backend** (§7) |
+| `crawl` v1 | The service daemon | Unchanged; runs under any compositor |
+| `amane` / `suzuha` | Reference immediate-mode shell | Unchanged; a model for how a shell consumes standard protocols |
+
+**The strategic payoff:** `crawl-desktop` was designed to run on *other people's*
+compositors (niri/mango/Hyprland/Sway). `crawm` makes the ecosystem
+self-contained: the shell drives our compositor through the **same standard
+protocols and the same `Compositor` trait**, so the shell never learns a
+crawl-specific API. This is the original "from-scratch compositor" idea, but kept
+as a **separate, independently-versioned project** so `crawl-desktop` ships on
+niri today and on `crawm` later without a rewrite.
+
+### Non-goals (initially)
+
+- Being a full desktop environment (no built-in panel/bar/settings/file manager).
+- An X11 window-manager mode (XWayland via `xwayland-satellite`).
+- Matching every Hyprland effect. Effects stay modular and are cut first.
+- Remote desktop / network transparency.
+
+---
+
+## 2. Design synthesis
+
+Ordered by where the idea comes from, with the reason we want it.
+
+### From niri (scrollable tiling + engineering rigor)
+
+| Take | Why |
+|---|---|
+| **Scrollable tiling engine** (infinite horizontal strip of columns) | The best existing tiling UX for ultrawide/many-window workflows; a layout nobody else in the stack offers |
+| **Stable layout on open** (a new window never reflows existing ones) | Avoids the classic "everything jumps" complaint; a deliberate niri trait worth preserving |
+| **Synced animation clock + springs** (one clock per animation kind) | Interruptible, gesture-friendly motion without per-window drift |
+| **Custom-shader open/close/resize animations** | High-quality polish with a small, contained surface (inline GLSL) |
+| **TOML config + `validate` + includes + hot reload** | Typed, commentable, splittable config with a real validator |
+| **Typed IPC crate + line-JSON + `event-stream`** | `niri-ipc` is a proven, documented protocol that bars/tools already consume |
+| **`xwayland-satellite` integration** (auto-spawn, restart) | Avoids implementing an X11 WM; the modern, low-risk choice |
+| **Built-in screenshot UI** (region/window/output) | Turns a missing feature into a first-class one |
+| **`security-context-v1` + restricted-client model** | Gates privileged protocols (session lock, screencopy, output mgmt) for sandboxed clients |
+| **Accessibility via AccessKit / Orca** | Screen-reader support is a real differentiator (2025-era niri) |
+| **Named workspaces + `on-overflow` centering** | Persistent, scriptable spaces rather than only dynamic ones |
+| **Fractional-layout discipline** (single logical→physical rounding path) | Prevents blurry/misaligned borders at fractional scale |
+
+### From mango (tags + layouts + effects)
+
+| Take | Why |
+|---|---|
+| **Tag model** (per-monitor, multi-tag view, **multiple tags per window**) | More expressive than workspaces; `comboview` (several tags at once) is genuinely useful |
+| **Per-tag layout state** (`Pertag`: layout + master count/factor + scroller proportion + dwindle tree) | Each tag remembers *how* it was arranged; rare and valuable |
+| **14 layouts** incl. `dwindle`, `fair`, `center_tile`, `vertical_*`, `deck`, `grid`, `scroller` | Broad coverage from one enum |
+| **Special workspace (tag 0) as a tiling overlay** with background dim | A better scratchpad: a full tiled surface over the current space |
+| **Runtime plain-text/TOML config** with variables, `source` includes, `auto_reload`, and an **error-nag bar** | Zero-recompile iteration; errors never kill the session |
+| **Per-event animation config with cubic-bezier curves** | Fine-grained motion control (niri gives springs; mango gives per-event tuning) |
+| **scenefx-quality effects** (blur, shadows, radius, opacity, dim) with **per-window overrides** and **wallpaper-cached blur** | The effects feature set users actually ask for, plus the performance trick that makes blur affordable |
+| **Named scratchpads** + standard scratchpad + minimize/restore | Everyday workflow |
+| **Window groups + auto tab bars** | Grouping without a separate compositor |
+| **Rich window states** (`is_global` sticky, `is_overlay`, `fakefullscreen`, terminal **swallow**, `is_unmanaged_global`) | The long tail of real desktop behaviour |
+| **Monitor rules** by name/make/model/serial regex; per-monitor tags; primary-output flag | Flexible multi-monitor without config sprawl |
+| **IPC `get` / `watch` / `dispatch`** + `ext-workspace` + first-party bar | Ergonomic scripting and bar integration |
+| **Overview (hycov-style) with jump labels**, overcircle, thumbnail switcher | Fast navigation; labels rescue non-Latin keyboard layouts |
+| **Virtual outputs** (headless) and **DRM lease** (VR) | Streaming (Sunshine/Moonlight) and VR support |
+| **HDR / colour / tearing / syncobj** (mango `wl-only` + Vulkan branch) | Later differentiator. mango's Vulkan coupling is **mango-specific** — we do HDR on **GLES** (ADR-0002, §4) |
+
+### From cosmic (mixed model + integration)
+
+| Take | Why |
+|---|---|
+| **Mixed tiling/floating with groups and tabbed stacks** | Cosmic's `ToggleStacking` / groups are the cleanest expression of "windows inside a slot" |
+| **Orientation + per-child size fractions + swap** | Predictable manual arrangements inside a layout |
+| **Edge-snap for floating windows** (8 snap corners + threshold) | Expected floating UX |
+| **`WorkspaceMode::{OutputBound, Global}` + vertical/horizontal layout + wraparound** | One switch covers single- and multi-monitor mental models |
+| **Pinned workspaces matched by EDID** | Stable monitor→workspace assignment |
+| **Config with per-key hot reload** (change one setting, no restart) | The right granularity; matches `crawl-desktop`'s live-config goal |
+| **Compositor-rendered overview** | One coherent surface rather than a bolt-on |
+| **Cursor shake-to-find** (magnify the pointer when shaken) | Small, delightful, universally useful |
+| **Accessibility built into the compositor** (zoom, colour filters: greyscale/protanopia/deuteranopia/tritanopia) | Accessibility as a first-class compositor feature |
+| **XWayland descaling + eavesdropping knobs** | Makes legacy/X11 apps behave under fractional scale |
+| **Broad, modern protocol coverage** (`ext-image-copy-capture` instead of `wlr-screencopy`, `security-context`, `drm-lease`) | Fewer legacy paths |
+
+### Deliberately **not** copied
+
+- **Cosmic's non-configurable animations** (hardcoded 200 ms etc.) — we want
+  niri/mango-level configurability.
+- **mango's C/wlroots + scenefx coupling** — we are on Smithay; we re-implement the
+  *effects ideas*, we do not take a wlroots renderer dependency.
+- **niri's lack of output mirroring** — we will provide mirroring (cosmic has it).
+- **Global-tag coupling across monitors** as a default — we adopt mango's
+  `synctag` *option*, not its assumption.
+- **A built-in bar/panel** — that is `crawl-desktop`'s job.
+
+---
+
+## 3. The completeness contract
+
+This matrix is the promise: **every row is a feature we intend to ship**, with its
+provenance, priority, target milestone, and how to verify it. Priority:
+**P0** = needed to boot a usable session, **P1** = needed for a daily driver,
+**P2** = polish/later. Keep this table in the repo and tick rows as they land.
+
+### A. Spaces & window model
+
+| Feature | Best source | Prio | MS | Verify |
+|---|---|---|---|---|
+| Tiling windows, master/stack | mango/dwm | P0 | M2 | N windows tile without overlap |
+| Per-window floating toggle; mixed tiled+floating on one space | mango + cosmic | P0 | M2 | Dialog floats over tiled windows |
+| Tags: per-output, multi-tag **view**, multiple tags per window | mango | P0 | M2 | `view 1+3`, `tag` a window onto 2 tags |
+| Named spaces / persistent workspaces | niri | P1 | M3 | Named space survives output unplug |
+| Special workspace (tiling overlay + dim) | mango | P1 | M7 | Overlay tiles over current space |
+| Window groups + tabbed/stacked containers | cosmic | P1 | M7 | Two windows stack in one slot |
+| Manual arrangements: orientation, swap, resize | cosmic | P1 | M7 | `Super+O` flips split orientation |
+| Edge-snap for floating windows | cosmic | P1 | M7 | Drag to corner snaps |
+| Sticky/`global` (all spaces), `overlay`, `fakefullscreen` | mango | P2 | M7 | Sticky window shows on every space |
+| Terminal **swallow** | mango | P2 | M7 | Terminal swallows GUI launched from it |
+| Minimize/restore + **named scratchpads** | mango | P2 | M7 | Named scratchpad launches/shows |
+| `WorkspaceMode::{OutputBound,Global}`, vertical/horizontal, wraparound | cosmic | P2 | M7 | Mode switch changes nav axis |
+| Pinned spaces by **EDID** | cosmic | P2 | M7 | Workspace follows the right monitor |
+| Session-persistence hints (restore windows where clients allow) | niri | P2 | post | — |
+
+### B. Layouts
+
+| Layout | Source | Prio | MS |
+|---|---|---|---|
+| `Tile` (master/stack, ratio+count, left/right/top/bottom) | mango/dwm | P0 | M2 |
+| `Floating` (cascade, mixed) | classic | P0 | M2 |
+| `Monocle` | dwm/mango | P0 | M2 |
+| `Scroller` (infinite columns, focus/center/overspread, presets) | niri + mango | P0 | M3 |
+| `Grid` | mango | P1 | M7 |
+| `Deck` (master + top-of-stack) | mango/dwl | P1 | M7 |
+| `Dwindle`/spiral (smart split, preserve, manual split) | mango/Hypr | P1 | M7 |
+| `Fair` + `VerticalFair` | mango | P1 | M7 |
+| `CenterTile`, `VerticalTile`, `RightTile` | mango | P2 | M7 |
+| `VerticalScroller`, `VerticalGrid`, `VerticalDeck` | mango | P2 | M7 |
+| Grouped/Stacked slots | cosmic | P1 | M7 |
+| Per-space layout memory + params restore | mango (`Pertag`) | P0 | M2/M3 |
+| Per-layout directional `neighbor()` | niri | P1 | M2 |
+
+**Layout engine rule (from `COMPOSITOR.md` §7.1):** layouts are **pure functions**
+in `crawm-layout` — no Wayland, no globals — so they are unit- and
+property-testable.
+
+### C. Animation
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| Spring + easing + cubic-bezier curves | niri + mango | P0 | M3 |
+| One synced clock per animation kind | niri | P0 | M3 |
+| Interruptible retargeting (keeps value + velocity) | niri | P0 | M3 |
+| Animate open/close/move/resize/space-switch/layout-switch | both | P0 | M3 |
+| Per-event configurable curves/durations | mango | P1 | M5 |
+| Gesture-driven values → spring handoff | niri + cosmic | P1 | M6 |
+| Custom-shader open/close/resize animations | niri | P2 | M8 |
+| Reduce-motion switch (config + IPC) | niri | P1 | M5 |
+| Resize: crop/scale last buffer until client catches up | niri | P1 | M3 |
+| Close: snapshot last buffer into a texture | niri | P1 | M3 |
+
+### D. Effects
+
+| Effect | Source | Prio | MS |
+|---|---|---|---|
+| Rounded corners (SDF, clips borders/shadows) | mango/scenefx | P1 | M8 |
+| Borders / focus ring, animated colour, gradients | niri + mango | P1 | M8 |
+| Shadows (cached, `shadow_only_floating` option) | mango/scenefx | P1 | M8 |
+| Dim inactive / opacity, per-window rules | mango | P1 | M8 |
+| Blur (dual-Kawase + **backdrop cache** + damage-aware) | mango/scenefx | P1 | M8 |
+| `ext-background-effect-v1` (client-requested blur) | niri | P2 | M8 |
+| Per-rule overrides (`no_blur`, `no_shadow`, …) + global kill switch | mango | P1 | M8 |
+| Low-power mode (disable blur/shadows on battery) | new | P2 | M8 |
+
+### E. Configuration
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| TOML config, comments, repeated nodes | niri | P0 | M5 |
+| `validate` subcommand + good error spans | niri | P0 | M5 |
+| Atomic hot reload; bad config keeps last good + on-screen error | niri + mango | P0 | M5 |
+| `include` / `source` (with `optional`) | niri + mango | P1 | M5 |
+| User variables (`$name`) | mango | P2 | M5 |
+| Per-key live reload where cheap | cosmic | P2 | M5 |
+| Default config shipped + documented | all | P0 | M5 |
+| Window / tag / layer / monitor / device **rules** | mango | P0 | M5 |
+| Dynamic rule re-evaluation on title/app-id change | mango | P2 | M5 |
+
+### F. IPC
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| Unix-socket, newline-JSON, typed Rust crate (`crawm-ipc`) | niri | P0 | M5 |
+| Request/response + `version` handshake | niri | P0 | M5 |
+| `event-stream` (open/close/focus/space/output/config) | niri | P0 | M5 |
+| `get` / `watch` / `dispatch <action>` CLI | mango (`mmsg`) | P0 | M5 |
+| `--json` machine output, `msg` CLI | both | P0 | M5 |
+| `ext-workspace-v1` so bars work without our IPC | mango/niri | P0 | M6 |
+| Action names identical between binds and IPC (one enum) | niri/mango | P0 | M5 |
+| Versioned schema, additive changes only | niri | P1 | M5 |
+
+### G. Input & binds
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| libinput: keyboard/pointer/touchpad/touch/tablet | all | P0 | M4 |
+| Per-device config (natural scroll, tap, dwt, accel, click method) | niri/mango | P0 | M4 |
+| xkb layouts + runtime switch | all | P0 | M4 |
+| Keyboard binds + modifiers + `Mod` remap | niri | P0 | M5 |
+| Mouse binds, axis/scroll binds, gesture binds, switch (lid) binds | mango | P1 | M5 |
+| Bind flags: repeat, `allow-when-locked`, `allow-inhibiting`, release, pass | niri + mango | P1 | M5 |
+| Key modes / submaps (resize, passthrough) | mango | P1 | M5 |
+| Touchpad gestures: 3-finger space, 4-finger overview, live preview | niri + mango | P1 | M6 |
+| Click-to-focus; optional focus-follows-mouse (scroll-safe) | all | P0 | M3 |
+| `xdg-activation` focus rules + `activation_bypass` | niri + mango | P1 | M6 |
+| Hotkey overlay (`hotkey-overlay-title`) | niri | P2 | M8 |
+| Cursor shake-to-find | cosmic | P2 | M8 |
+| Per-device rules (`device_rule` by name/type) | mango | P2 | M5 |
+
+### H. Outputs & display
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| Hotplug via udev; per-output spaces | all | P0 | M4 |
+| Modes `WxH@Hz`, custom modes, transform, position | all | P0 | M4 |
+| **Fractional scaling** (viewporter + fractional-scale) | all | P0 | M4 |
+| Mirroring / clone | cosmic (niri lacks) | P1 | M6 |
+| Output management protocol (`wlr-output-management`) | all | P1 | M6 |
+| Output power management (DPMS) | niri/mango | P1 | M6 |
+| VRR / adaptive sync | all | P1 | M6 |
+| Primary-output flag (for XWayland) | mango/cosmic | P1 | M6 |
+| Virtual (headless) outputs | mango | P2 | post |
+| DRM lease (VR) | mango/cosmic | P2 | post |
+| Tearing control / `syncobj` | mango | P2 | post |
+| **10-bit SDR scanout** (`RGB10A2`) + `max_bpc=10` | cosmic (`max_bpc`) + niri HDR forks | P1 | M4 |
+| 10-bit probe **per format**, not all-or-nothing | niri fork (`XR30`/`XB30` can fail to bind where `AR30`/`AB30` succeed) | P1 | M4 |
+| HDR passthrough for fullscreen clients + `HDR_OUTPUT_METADATA` | cosmic HDR reference | P3 | post-0.1 |
+| Desktop HDR: linear **F16** intermediate + tone mapping + PQ encode | cosmic HDR reference (design goal) | P3 | post-0.1 |
+| ICC / wide-gamut / per-output colour profiles | — | P3 | post-0.1 |
+
+> **Renderer decision (ADR-0002):** stay on Smithay's **GLES** renderer. mango's HDR
+> needs *its* Vulkan renderer — a mango-specific constraint, not a Smithay one. Every
+> working HDR implementation on Smithay (the cosmic HDR reference, the niri HDR
+> forks) runs on **GLES/glow**, which has FP16 render targets and 10-bit GBM scanout.
+> HDR depends on **unmerged** Smithay colour-management work, so plan to vendor a
+> patched Smithay rev. See §10 and `docs/decisions/0002-renderer-and-hdr.md`.
+
+### I. Session & integration
+
+| Feature | Source | Prio | MS |
+|---|---|---|---|
+| `.desktop` entry, session wrapper, env import (systemd + D-Bus) | all | P0 | M4 |
+| `spawn-at-startup` / autostart | niri/mango | P0 | M4 |
+| Portals config (screencast/screenshot/file chooser) | all | P1 | M9 |
+| logind: VT switch, pause/resume, lid, inhibit | all | P0 | M4 |
+| `ext-session-lock` + idle protocols | all | P1 | M6 |
+| Built-in screenshot UI | niri | P1 | M9 |
+| PipeWire screencast (monitor → window) + portal | niri/mango | P1 | M9 |
+| `block-out-from` screencast privacy | niri/mango | P1 | M9 |
+| XWayland via `xwayland-satellite` (auto-spawn/restart) | niri | P1 | M9 |
+| Crash resilience: log panic + optional supervisor restart | niri | P2 | M11 |
+| Accessibility: AccessKit/Orca | niri | P2 | post |
+| Accessibility: zoom + colour filters | cosmic | P2 | post |
+
+---
+
+## 4. Protocol support matrix
+
+Priority **P0** (usable session) / **P1** (daily driver) / **P2** (polish) /
+**P3** (later). Verified names from niri `v26.04`, mango `0.18.1`, cosmic master.
+This is the same list as `COMPOSITOR.md` §12, tightened with what upstream actually
+ships.
+
+| Protocol | Prio | Notes / source |
+|---|---|---|
+| `wl_compositor` (+sub), `wl_shm`, `wl_seat`, `wl_output`, `wl_data_device_manager` | P0 | Core |
+| `xdg-shell` (toplevels + popups, `xdg_activation`) | P0 | Core |
+| `linux-dmabuf` (+ feedback) | P0 | GPU buffers |
+| `wlr-layer-shell` | P0 | Bars, launchers, wallpapers |
+| `xdg-decoration` (+ KDE variant) | P0 | SSDs |
+| `viewporter`, `fractional-scale` | P0 | HiDPI |
+| `presentation-time` | P1 | Frame timing |
+| `idle-notify`, `idle-inhibit` | P1 | swayidle |
+| `ext-session-lock` | P1 | Lockers |
+| `primary-selection`, `data-control` (`ext` + `wlr`) | P1 | Clipboard managers |
+| `cursor-shape` | P1 | Client cursors |
+| `pointer-constraints`, `relative-pointer` | P1 | Games |
+| `keyboard-shortcuts-inhibit` | P1 | Remote desktop |
+| `text-input-v3`, `input-method-v2` | P1 | CJK/IME |
+| `wlr-output-management`, `xdg-output` | P1 | `wlr-randr`, kanshi |
+| `wlr-output-power-management` | P1 | DPMS |
+| `ext-foreign-toplevel-list`, `wlr-foreign-toplevel-management` | P1 | Taskbars (`ext-workspace` too) |
+| `ext-workspace` | P1 | Workspace widgets |
+| `ext-image-copy-capture` (+`ext-image-capture-source`) | P1 | Modern screenshots/record (niri/cosmic); mango ships both this **and** `wlr-screencopy` |
+| `wlr-screencopy` | P1 | Legacy `grim`/`slurp` compat |
+| `xdg-desktop-portal` ScreenCast/Screenshot | P1 | Browser/OBS sharing |
+| `xdg-foreign`, `xdg-dialog`, `xdg-toplevel-drag` | P2 | Parent/child, modals, dnd |
+| `single-pixel-buffer`, `alpha-modifier` | P2 | Cheap wins |
+| `content-type`, `tearing-control` | P2 | Gaming/video |
+| `tablet-v2` | P2 | Drawing tablets |
+| `security-context-v1` | P2 | Flatpak/sandbox (niri restricted model) |
+| `ext-background-effect` | P2 | Client-requested blur |
+| `drm-lease` | P2 | VR |
+| `wp_color_management_v1` (staging) + `wp_color_representation_v1` | P3 | HDR/colour (ADR-0002). Needs unmerged Smithay work (PR #1143); **GLES, not Vulkan**. The `representation` protocol is required for Wine/Proton scRGB + BT.2020 passthrough |
+| `wp_commit_timing` / `wp_fifo` | P3 | Future frame pacing |
+
+**Where we deliberately exceed upstream:** niri has **no** output mirroring, and niri
+and cosmic ship **no** colour-management — **we add both**. cosmic has **no**
+`wlr-screencopy` (only `ext-image-copy-capture`) and **no** `wlr-foreign-toplevel`
+(uses `ext-*` + its own); we choose the ecosystem-friendly superset:
+`ext-image-copy-capture` **and** legacy `wlr-screencopy`.
+
+---
+
+## 5. Crate topology
+
+Apply the same split rule as `crawl-desktop` (ADR 0005): **modules first**, promote
+to a crate only when (1) ≥2 consumers with different dep trees, (2) a heavy/system
+dep must be isolated, or (3) a genuinely stable public API earns independent
+versioning.
+
+```
+crawm/
+├── Cargo.toml                 # workspace
+├── COMPOSITOR.md              # design (existing)
+├── ROADMAP.md                 # this file
+├── crates/
+│   ├── crawm-core/         # pure data: ids, geometry, spaces/tags, window model — no Smithay
+│   ├── crawm-layout/       # Layout trait + all layouts (pure, unit/property-tested)
+│   ├── crawm-anim/         # springs/easing/curves + animation clock (pure)
+│   ├── crawm-config/       # TOML parsing, validation, defaults, schema, rules
+│   ├── crawm-ipc/          # IPC types + client; shared by compositor and msg CLI
+│   ├── crawm-protocols/    # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
+│   ├── crawm/              # the binary: Smithay glue, backends, handlers, render, input
+│   └── crawm-msg/          # CLI client (`crawm-msg`)
+├── resources/                 # default-config.toml, session units/.desktop, shaders, portals
+├── docs/                      # mdBook; ADRs
+└── tests/                     # headless integration tests + transcripts
+```
+
+Rules:
+- `crawm-core`, `-layout`, `-anim`, `-config` have **no** Smithay/Wayland deps →
+  fast unit tests, and they are the crates a future `crawl-desktop` could reuse.
+- `crawm-ipc` is a **leaf** (no other `crawm-*` deps).
+- Only `crawm` (and `crawm-msg` for IPC) touch Smithay.
+- Keep generated protocol code in `crawm-protocols` **only if ≥2 crates need it**;
+  otherwise a `protocols` module inside `crawm`.
+- **At M0** the workspace realizes `crawm-core` / `-layout` / `-anim` / `-config` /
+  `-ipc` / `crawm` / `crawm-msg` plus `resources/`. `crawm-protocols` is deferred
+  until a second crate needs the bindings, and integration tests live in
+  `crates/crawm/tests/` (Cargo has no workspace-root `tests/`).
+
+Inside `crawm/src/`: `main.rs`, `state.rs`, `backend/{mod,winit,tty,headless}.rs`,
+`handlers/` (one per protocol), `input/{mod,keyboard,pointer,gestures,binds}.rs`,
+`render/{mod,elements/,shaders.rs,damage.rs}`, `layout_glue.rs`, `animation.rs`,
+`ipc.rs`, `config_reload.rs`, `screencast/`, `xwayland.rs`. (See `COMPOSITOR.md` §5.)
+
+---
+
+## 6. Milestones
+
+Each milestone ends with **something runnable and demoable**. Estimates assume
+part-time solo work and are rough; **order matters more than dates**. The granular,
+chronological task list lives in [`TODO.md`](./TODO.md); these milestone summaries
+supersede `COMPOSITOR.md` §22 where they differ.
+
+### M0 — Foundations *(1–2 weeks)*
+- [x] Settle the **license** — **GPL-3.0-or-later** (ADR-0001, §10).
+- [ ] Create the workspace + 8 crates from §5; `[workspace.dependencies]`.
+- [ ] Pin Smithay to a git rev (niri does this) or `0.7.x`+patch (cosmic does).
+- [ ] CI: build, clippy `-D warnings`, fmt, tests, `cargo-deny`.
+- [ ] `tracing` + panic hook to `$XDG_STATE_HOME`.
+- [ ] Get Smithay `anvil` building locally as a reference.
+- [ ] **Exit:** `cargo run` opens a winit window with a solid background.
+
+### M1 — First windows *(2–3 weeks)*
+- [ ] Winit backend + `calloop` event loop (single-owner `State`).
+- [ ] Core globals: compositor, shm, seat, output, data-device.
+- [ ] `xdg-shell` toplevels + popups.
+- [ ] Keyboard + pointer input; click-to-focus.
+- [ ] GLES render; frame callbacks; per-output redraw state machine
+      (Idle→Queued→WaitingForVBlank→Idle).
+- [ ] Fixed cascade placement.
+- [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize.
+
+### M2 — Spaces & layout core *(3–4 weeks)* — *the "best of mango+dwm" phase*
+- [ ] `crawm-core`: `WindowId`, `OutputId`, `TagMask`, `Rect`, `Window`, `Output`,
+      `TagView`, `FocusTarget`.
+- [ ] `crawm-layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
+- [ ] Layouts: `Tile`, `Monocle`, `Floating`. Mixed tiled+floating on one space.
+- [ ] Tags: `view`, `move-to-tag`, `toggle-tag`, **multi-tag view**, multi-tag windows.
+- [ ] **Per-space layout memory + params** (`Pertag` equivalent).
+- [ ] Cycle layout; master ratio/count; gaps/borders.
+- [ ] Interactive move/resize for floating; float-tiled conversion.
+- [ ] Unit + `proptest` invariants (no overlaps, in-area, deterministic).
+- [ ] **Exit:** a full day of tiling + floating dialogs works nested, with per-tag
+      layouts remembered.
+
+### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
+- [ ] `crawm-anim`: spring + easing + bezier; **one synced clock per kind**;
+      interruptible retargeting; `is_animating()`.
+- [ ] `Scroller` layout (columns, focus/center/overspread, proportion presets,
+      per-column width, vertical variant).
+- [ ] Named spaces + `on-overflow` centering; `default-column-display normal|tabbed`.
+- [ ] Animate open/close/move/resize/space-switch/layout-switch.
+- [ ] Resize: configure immediately, draw last buffer scaled/cropped until commit.
+      Close: snapshot last buffer.
+- [ ] Clock = vblank/`wp_presentation`, not `Instant::now()`.
+- [ ] **Exit:** tag/space switches and layout changes are smooth and interruptible,
+      no pops.
+
+### M4 — Bare-metal backend *(3–4 weeks)*
+- [ ] libseat session, udev discovery.
+- [ ] DRM/KMS + GBM + EGL; vblank-driven redraw.
+- [ ] libinput devices + per-device config; xkb + runtime layout switch.
+- [ ] Hardware cursor plane.
+- [ ] VT switch + session pause/resume; logind integration.
+- [ ] `linux-dmabuf`, `viewporter`, `presentation-time`, **fractional-scale**.
+- [ ] **10-bit SDR scanout** (`RGB10A2`) + `max_bpc=10`, with a **per-format** probe
+      (some formats fail to bind on some GPUs — ADR-0002, §3H).
+- [ ] Output hotplug; per-output tag views; transform.
+- [ ] `.desktop` + session wrapper + env import.
+- [ ] **Exit:** boot from a TTY and use `crawm` on real hardware.
+
+### M5 — Config, rules, IPC *(4–6 weeks)*
+- [ ] `crawm-config`: TOML parse + validate + `include`/`source` + variables;
+      atomic hot reload + on-screen error; `crawm-msg validate`.
+- [ ] Binds: keyboard (+`Mod` remap), mouse, axis, gesture, switch; flags
+      (`repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass);
+      **key modes/submaps**.
+- [ ] Rules: window, tag, layer, monitor, device (match + actions from §3E).
+- [ ] `crawm-ipc` + socket + `event-stream` + `version`; `crawm-msg`
+      `get`/`watch`/`dispatch`; bind and IPC share **one `Action` enum**.
+- [ ] Per-event animation curves/durations; reduce-motion switch.
+- [ ] **Exit:** a bar shows tags/windows over IPC; config edits apply live; bad
+      config never crashes.
+
+### M6 — Protocol breadth P0/P1 *(4–6 weeks)* — *the "cosmic breadth" phase*
+- [ ] `wlr-layer-shell` with exclusive zones → `usable_area`.
+- [ ] `xdg-decoration`, `cursor-shape`, `fractional-scale`, `viewporter`.
+- [ ] `xdg-activation` (+`activation_bypass`), `primary-selection`, `data-control`.
+- [ ] `idle-notify/inhibit`, `ext-session-lock`.
+- [ ] `wlr-output-management`, `wlr-output-power-management`, `xdg-output`, mirroring.
+- [ ] `ext-foreign-toplevel-list` / `wlr-foreign-toplevel-management`, `ext-workspace`.
+- [ ] `pointer-constraints`, `relative-pointer`, `keyboard-shortcuts-inhibit`,
+      `text-input-v3` / `input-method-v2`.
+- [ ] Touchpad gestures → animation targets (live preview).
+- [ ] Verify with waybar, fuzzel, swaybg, swaylock/gtklock, swayidle, wl-clipboard.
+- [ ] **Exit:** replace your current compositor for a **full week** without fallback.
+
+### M7 — Layout variety, grouping, window states *(4–6 weeks)* — *"all of mango + cosmic"*
+- [ ] Layouts: `Grid`, `Deck`, `Dwindle`, `Fair`, `VerticalFair`, `CenterTile`,
+      `VerticalTile`, `RightTile`, `Vertical*`; per-layout params + presets.
+- [ ] **Special workspace** overlay with dim + per-app auto-assign.
+- [ ] **Groups + tabbed/stacked** containers (cosmic); auto tab bar.
+- [ ] Named scratchpads + standard scratchpad + minimize/restore.
+- [ ] Window states: `global` (sticky), `overlay`, `fakefullscreen`, swallow,
+      `unmanaged_global`.
+- [ ] `WorkspaceMode::{OutputBound,Global}`, vertical/horizontal, wraparound,
+      pinned spaces by EDID.
+- [ ] **Exit:** every layout in §3B works; grouping and scratchpads feel native.
+
+### M8 — Effects *(3–5 weeks)* — *"mango/scenefx quality on Smithay"*
+- [ ] Rounded corners (SDF) clipping borders + shadows.
+- [ ] Borders / focus ring with animated colour + gradients.
+- [ ] Shadows (cached, `shadow_only_floating`).
+- [ ] Dim inactive + per-window opacity rules.
+- [ ] Dual-Kawase blur, **backdrop cache**, damage-aware; `ext-background-effect`.
+- [ ] Per-rule overrides + global kill switch; low-power mode.
+- [ ] Custom-shader open/close/resize (niri); hotkey overlay; cursor shake-to-find.
+- [ ] **Exit:** effects on by default in a polished config, without regressing §9.
+
+### M9 — Overview, capture, XWayland *(4–6 weeks)*
+- [ ] Overview: zoom-out grid of spaces, live thumbnails, `jump labels`, gesture
+      open/close, drag-and-drop.
+- [ ] Screenshots: built-in UI (region/window/output) + `ext-image-copy-capture`
+      + legacy `wlr-screencopy`.
+- [ ] Capture path is colour-correct: once HDR exists, convert HDR→SDR for
+      screenshots/screencast (otherwise captures look washed out).
+- [ ] PipeWire screencast (monitor → window) + portal integration.
+- [ ] `block-out-from "screencast"` privacy rules.
+- [ ] XWayland via **`xwayland-satellite`** (auto-spawn, restart, `DISPLAY`).
+- [ ] **Exit:** Firefox/Chromium screen share, OBS, and a Steam game under XWayland
+      all work.
+
+### M10 — crawl-desktop integration *(2–3 weeks, can overlap M6+)*
+- [ ] Add a **`crawm` backend** to `crawl-desktop`'s `crawl-compositor`
+      implementing the `Compositor` trait (§7).
+- [ ] Ensure `ext-workspace`, `ext-foreign-toplevel-list`, `wlr-output-management`,
+      `ext-image-copy-capture`, and IPC `dispatch` cover every `Capability`.
+- [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) unmodified on `crawm`.
+- [ ] **Exit:** `crawl-desktop` boots on `crawm` with the same capability
+      negotiation it uses on niri.
+
+### M11 — Hardening & `v0.1.0` *(3–4 weeks)*
+- [ ] Protocol conformance pass; fix the client compatibility matrix bugs.
+- [ ] Multi-monitor + mixed-DPI + rotated outputs.
+- [ ] Direct scanout for fullscreen; overlay-plane experiments.
+- [ ] Crash handling + session restart story; log to `$XDG_STATE_HOME`.
+- [ ] Packaging: `.desktop`, systemd units, portals, AUR/Nix/distro packages.
+- [ ] Docs site: getting started, config reference, IPC reference, FAQ.
+- [ ] Benchmarks + regression tracking.
+- [ ] **Exit:** tagged **v0.1.0**, announced, issue templates + contribution guide.
+
+### HDR & colour management *(post-0.1)*
+> Begins after a usable `v0.1.0`. Depends on **unmerged** Smithay colour-management
+> work (PR #1143) → plan to **vendor a patched Smithay git rev**. **GLES only; do not
+> adopt Vulkan** (ADR-0002). See `docs/decisions/0002-renderer-and-hdr.md`.
+- [ ] **Phase 1 — HDR passthrough:** fullscreen/borderless HDR clients (games, video)
+      get PQ/BT.2020 scanout + `HDR_OUTPUT_METADATA`; the SDR desktop is tone-mapped
+      around them. Implement `wp_color_management_v1` + `wp_color_representation_v1`
+      behind a flag (the latter is required for Wine/Proton scRGB + BT.2020).
+- [ ] **Phase 2 — desktop HDR:** composite into a **linear F16** intermediate,
+      apply per-surface transforms + tone mapping, encode PQ at the output boundary;
+      teach effects (blur/shadows) the working space.
+- [ ] **Phase 3 — real colour management:** ICC / wide-gamut / per-output profiles via
+      the **DRM Color Pipeline API** (Linux 6.19+; 1D/3D LUTs, matrices).
+- [ ] Keep direct/overlay scanout correct while an HDR post-process is active (the
+      cosmic reference disables them during HDR).
+- [ ] **Exit:** native HDR games/video *and* HDR screen capture both look correct.
+
+### Post-0.1 backlog (prioritise by user feedback)
+Multi-GPU; tablet + touchscreen gestures; `security-context`, `xdg-foreign`,
+`xdg-dialog`, `xdg-toplevel-drag`; DRM-lease/VR; virtual
+outputs; session persistence; scripting layer (Rhai/Lua) over IPC; embedded
+XWayland WM if satellite proves insufficient; **accessibility** (AccessKit/Orca,
+high-contrast, magnifier); plugin API for custom layouts once the `Layout` trait is
+stable.
+
+### Versioning promises
+- `0.x`: config + IPC may change; breaking changes documented in `CHANGELOG.md`.
+- `1.0`: stable config + IPC schema with a documented deprecation policy.
+
+---
+
+## 7. Integration with crawl-desktop
+
+`crawl-desktop` already defines the integration seam: the `Compositor` trait in
+`crates/crawl-compositor` and the capability enum
+`{ Workspaces, WindowList, FocusWindow, Screenshots, OutputManagement, Overview, Launch }`,
+with `Event::{WorkspacesChanged, ActiveWorkspaceChanged, WindowsChanged, ActiveWindowChanged, OutputsChanged}`.
+
+**Goal:** `crawm` is a first-class backend, discoverable by env var, with **no
+crawl-specific API** — the shell uses standard protocols + a small IPC surface.
+
+| `crawl-compositor` need | `crawm` provides |
+|---|---|
+| `Workspaces` / workspace events | `ext-workspace-v1` (bars) + IPC `get spaces`/`watch` for names/urgency |
+| `WindowList`, `FocusWindow`, active window | `ext-foreign-toplevel-list` + `wlr-foreign-toplevel-management`; IPC `dispatch focus-window` |
+| `Outputs`, `OutputManagement` | `wlr-output-management` + `xdg-output` (matches the existing matrix row) |
+| `Screenshots` | `ext-image-copy-capture` (+ legacy `wlr-screencopy`) |
+| `Overview` | IPC `dispatch overview` (toggle) |
+| `Launch` | IPC `dispatch spawn <cmd>` |
+| Detection | export `CRAWM_SOCKET`; `crawl-compositor::detect()` gains one arm (before niri) |
+| Sessions | `crawl-session` either spawns `crawm` in its own `.desktop`, or attaches as a client when `CRAWM_SOCKET` is set |
+
+Rules:
+- **Never require a crawl-specific protocol.** If a shell feature can use a
+  standard protocol, it must.
+- Keep the `crawm-ipc` `Action` enum and `crawl-desktop`'s action names aligned
+  so one keybind table can target both where possible.
+- The `crawl-desktop` boundary lint (`docs/decisions/0005`) still applies: the shell
+  links `crawl-ui` + `crawl-ipc`, never the daemon — and never `crawm`'s internals.
+
+---
+
+## 8. Testing & verification
+
+| Layer | Method |
+|---|---|
+| Layout math | Unit + `proptest` invariants in `crawm-layout` (no graphics) |
+| Animation curves | Deterministic-clock unit tests |
+| Config | Parse/validate tests, golden error messages, parser fuzzing |
+| Protocol handlers | Headless backend + a `wayland-client` test harness |
+| State machine | Scripted scenarios: open N windows, switch spaces, unplug output, assert focus/placements |
+| Visual regression | Headless render → PNG, compare with tolerance (later) |
+| **Real-world matrix** | Firefox, Chromium (Ozone), GTK3/4, Qt5/6, Electron, foot/alacritty/kitty, mpv, a Steam game via XWayland, OBS, a screen-share tab, a lock/unlock cycle |
+| **Integration** | `crawl-desktop` shell on `crawm` (§7), plus the existing `docs/compositor-matrix.md` rows filled in |
+
+Dev workflow: `cargo run -- --backend winit`; debug HUD (frame time, damage,
+scanout, animation count); `RUST_LOG` per module; optional Tracy; `WAYLAND_DEBUG=1`;
+`wayland-info`; CI runs build/clippy/fmt/tests/headless/`cargo-deny`.
+
+---
+
+## 9. Performance targets
+
+| Metric | Target |
+|---|---|
+| Idle CPU (nothing changing) | ~0% (no unnecessary redraws) |
+| Frame time, 4 windows, no effects, 1440p/144 | < 2 ms CPU, no missed vblanks |
+| Frame time with blur | < 6 ms GPU on a mid-range iGPU at 1080p60 |
+| Input-to-photon latency | one frame; direct scanout + cursor plane |
+| Resident memory | < 100 MB (excludes client buffers) |
+| Config reload | < 50 ms, no dropped frame |
+| Startup → first frame | < 500 ms |
+
+Regressions block merges once benchmarks exist.
+
+---
+
+## 10. Licensing, risks, and open decisions
+
+### License — **DECIDED: `GPL-3.0-or-later`** (ADR-0001)
+
+| Upstream | License |
+|---|---|
+| **niri** | **GPL-3.0-or-later** |
+| **cosmic-comp** | **GPL-3.0-only** |
+| **mango** | **GPL-3.0-or-later** (dwl base is also GPL-3.0-or-later; dwm/wlroots/sway/scenefx are MIT) |
+| **Smithay** | MIT |
+
+**Implication.**
+- If you want to **copy code** from niri/cosmic/mango, `crawm` must be
+  **GPL-3.0(-or-later)** and carry attribution.
+- If you want a **permissive** license (MIT/MPL/Apache), you may **only
+  re-implement from docs/specs**, never copy their source.
+
+**Recommendation:** license `crawm` **GPL-3.0-or-later**. It is a *separate
+process* talking to `crawl-desktop` (MIT) over Wayland/IPC, so copyleft does not
+propagate into the MIT crates — and it lets you lift proven code (niri's scroller,
+mango's layout math) with attribution instead of re-deriving it. If you prefer a
+permissive core, split it: GPL-3.0 for the binary/renderer, MIT for the pure
+`-core`/`-layout`/`-anim`/`-config` crates you write yourself.
+
+**Decision (2026-10-16):** `crawm` is **`GPL-3.0-or-later`**. This permits
+copying and adapting code from niri, cosmic-comp, and mango (all GPL-3.0) with
+attribution — including the HDR/colour-management work — while keeping the
+`crawl-desktop`/`crawl` MIT crates unaffected (separate process, no linking). See
+`docs/decisions/0001-license.md`.
+
+### Risks & mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Smithay API churn | rebase pain | Pin a git rev; isolate Smithay-facing code in `handlers/`+`backend/`; update in dedicated PRs |
+| Scope creep (14 layouts + effects + HDR) | never daily-drivable | Hard milestone gating; M6 exit = one full week as primary |
+| Renderer choice blocks HDR | rework | **Resolved (ADR-0002):** GLES, and HDR works on GLES. Residual: Smithay colour-management is **unmerged** → plan to vendor a patched Smithay rev |
+| Effects ↔ damage bugs | frame drops | Budget + cache blur; keep effects behind flags; M8 exit checks §9 |
+| Fractional-scale rounding | blurry borders | Single logical→physical conversion site + snapshot tests |
+| NVIDIA quirks | unusable for some | Test early on proprietary + NVK; document a `Nvidia`-style page |
+| Single-maintainer burnout | stall | Small milestones, docs from day one, early public releases |
+| License mixups | legal friction | Settle §10 in M0; attribute any adapted code |
+
+### Decisions (see `docs/decisions/`)
+
+- **ADR-0001 — License:** `GPL-3.0-or-later`. ✅ *decided 2026-10-16*
+- **ADR-0002 — Renderer & HDR:** Smithay **GLES**; HDR is a post-0.1, phased feature
+  on GLES (never Vulkan). ✅ *decided 2026-10-16*
+- **ADR-0003 — Config format:** **TOML** (via `serde` + the `toml` crate; keys are
+  `snake_case`). ✅ *decided 2026-10-16*
+- **ADR-0004 — Space model** *(open)*: pure tags (mango), pure named workspaces
+  (niri), or the unified "space" hybrid proposed here.
+- **ADR-0005 — IPC** *(open)*: reuse niri's `niri-ipc` schema shape, or a fresh
+  schema; and whether to expose `ext-workspace` as the primary bar interface
+  (recommended).
+- **ADR-0006 — XWayland** *(open)*: `xwayland-satellite` (recommended) vs in-process
+  (cosmic).
+- **ADR-0007 — Effects** *(open)*: implement on Smithay GLES ourselves vs adopt a
+  scenefx-like crate.
+
+**M0 foundation choices** (recorded in `TODO.md` Phase 0; promote to ADRs if revisited):
+
+- **Edition 2024 + `resolver = "3"`**, workspace `rust-version = "1.85"` — to match
+  `crawl`/`crawl-desktop` and get MSRV-aware resolution.
+- **Smithay `0.7.0` from crates.io** (not a git rev): no unreleased patches are
+  needed yet, and a released tag is reproducible; the vendored git rev arrives with
+  HDR (ADR-0002). `backend_vulkan` is off (ADR-0002); `xwayland` is deferred to M9.
+
+---
+
+## 11. Verified upstream references
+
+**Meta (verified 2026-10-16):**
+
+| Project | Latest | Language / toolkit | License | Size |
+|---|---|---|---|---|
+| niri (`niri-wm/niri`) | v26.04 | Rust + Smithay (git pin) | GPL-3.0-or-later | ~97.6k LOC |
+| mango (`mangowm/mango`) | 0.18.1 | C + wlroots 0.20 + scenefx 0.5 | GPL-3.0-or-later | ~30–36k LOC |
+| cosmic-comp (`pop-os/cosmic-comp`) | 1.0.0 | Rust + Smithay 0.7 (upstream pin) | GPL-3.0-only | ~73k LOC |
+
+**niri**
+- https://github.com/niri-wm/niri · https://niri-wm.github.io/niri/
+- IPC: `docs/wiki/IPC.md` · Animations: `Configuration:-Animations` · Layout:
+  `Configuration:-Layout` · Window Rules · Input · Outputs · Gestures
+- Overview: `docs/wiki/Overview.md` · Xwayland: `docs/wiki/Xwayland.md` ·
+  Security: `docs/wiki/Security-Model.md` · Accessibility: `docs/wiki/Accessibility.md`
+
+**mango**
+- https://github.com/mangowm/mango · https://mangowm.github.io/docs/ ·
+  https://mangowm.github.io/llms-full.txt
+- Layouts · Rules · Effects · Animations · IPC · Monitors · Input · Keys/Mouse ·
+  Overview · Scratchpad (docs pages) · `mangobar`
+- https://github.com/mangowm/mangobar · https://github.com/DreamMaoMao/mango-config
+
+**cosmic**
+- https://github.com/pop-os/cosmic-comp · https://github.com/pop-os/cosmic-protocols
+- https://github.com/pop-os/cosmic-epoch ·
+  https://system76.com/blog/post/cosmic-de-tiling-redesign-and-libcosmic-rebasing
+- HDR: issue #1384 · Animations: issue #376
+
+**HDR / colour management (verified 2026-10-16)** — see ADR-0002
+- `wp_color_management_v1` — wayland-protocols **staging**, landed 2025-02-13;
+  `wp_color_representation_v1` for Wine/Proton scRGB + BT.2020 passthrough
+- Smithay colour-management: PR `Smithay/smithay#1143` *(open)* · `#982`
+- Cosmic HDR reference (validated, **GLES**):
+  https://github.com/franzjeger/cosmic-hdr-reference
+- niri HDR forks (GLES): https://github.com/dividebysandwich/niri
+  (`hdr-smithay-master`) · https://github.com/losnoco/niri (`color-management-features`)
+- Linux **DRM Color Pipeline API** (kernel 6.19+):
+  https://docs.kernel.org/gpu/rfc/color_pipeline.html
+- Hyprland HDR on GLES: https://wiki.hypr.land/Configuring/Monitors/
+
+**Ecosystem / specs**
+- Smithay + `anvil` example · `calloop` book · `wayland-protocols` (stable,
+  staging, unstable) · `wlr-protocols` · `xdg-desktop-portal`
+- Reference compositors to study: dwl/dwm (tags), sway/i3 (containers + IPC),
+  Hyprland (effects config ideas), labwc/Wayfire (stacking + plugins),
+  river (out-of-process layouts), `xwayland-satellite`
