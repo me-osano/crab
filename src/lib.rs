@@ -3,7 +3,8 @@
 //! The compositor binary (`src/main.rs`) is a thin entry point that owns
 //! everything touching Smithay — backends, handlers, render, input. The logic
 //! that can be pure lives here so it is **testable without graphics** and
-//! reusable (ADR-0005 "modules first"; ROADMAP.md §5):
+//! reusable (the "modules first" split rule from `crawl-desktop`'s ADR-0005;
+//! ROADMAP.md §5):
 //!
 //! * [`core`] — identifiers, geometry, colors, spaces, window model;
 //! * [`config`] — TOML parsing, validation, and defaults;

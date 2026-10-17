@@ -18,4 +18,8 @@ a new ADR.
 - 0007 — Effects (own GLES implementation vs a scenefx-like crate)
 - 0008 — Client model (custom element list vs Smithay `Space`)
 
+Note: the "ADR-0005" cited by `ROADMAP.md` §5 and `src/lib.rs` for the *modules
+first* rule is `crawl-desktop`'s `docs/decisions/0005-crate-modularization.md` —
+not this project's 0005 (IPC schema).
+
 See `../../ROADMAP.md` §10 for the surrounding discussion.

@@ -3,7 +3,8 @@
 //!
 //! This module has **no** Smithay or Wayland dependencies (see `ROADMAP.md` §5),
 //! so it is fast to test and can be re-promoted into its own crate if a future
-//! out-of-process consumer needs it (ADR 0005 in reverse).
+//! out-of-process consumer needs it (`crawl-desktop`'s ADR-0005 split rule,
+//! read in reverse).
 //!
 //! [`Window`] and [`Output`] implement the model from `COMPOSITOR.md` §6; the
 //! layout engine that arranges them lives in [`crate::layout`].

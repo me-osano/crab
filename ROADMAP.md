@@ -361,7 +361,8 @@ and cosmic ship **no** colour-management — **we add both**. cosmic has **no**
 
 ## 5. Crate & module topology
 
-Apply the same split rule as `crawl-desktop` (ADR 0005): **modules first**, promote
+Apply the same split rule as `crawl-desktop` (their ADR-0005,
+`docs/decisions/0005-crate-modularization.md`): **modules first**, promote
 to a crate only when (1) ≥2 consumers with different dep trees, (2) a heavy/system
 dep must be isolated, or (3) a genuinely stable public API earns independent
 versioning.
@@ -403,8 +404,8 @@ Rules:
   proving it (TODO 0.4).
 - `src/core` and `src/config` were folded in from the former `crawm-core` /
   `crawm-config` crates, and `src/layout` / `src/animation` from `crawm-layout` /
-  `crawm-anim`: each has a single consumer, so the ADR-0005 "modules first" rule
-  above applies. Promote a module back to a crate only when (1) fires — e.g.
+  `crawm-anim`: each has a single consumer, so the `crawl-desktop` ADR-0005
+  "modules first" rule above applies. Promote a module back to a crate only when (1) fires — e.g.
   `crawl-desktop` needs it.
 - `crawm-ipc` is a **leaf** (no other `crawm-*` deps) and stays a crate: it has
   two in-tree consumers plus third-party tools.
@@ -641,7 +642,8 @@ Rules:
   standard protocol, it must.
 - Keep the `crawm-ipc` `Action` enum and `crawl-desktop`'s action names aligned
   so one keybind table can target both where possible.
-- The `crawl-desktop` boundary lint (`docs/decisions/0005`) still applies: the shell
+- The `crawl-desktop` boundary lint (their ADR-0005,
+  `docs/decisions/0005-crate-modularization.md`) still applies: the shell
   links `crawl-ui` + `crawl-ipc`, never the daemon — and never `crawm`'s internals.
 
 ---
