@@ -80,33 +80,40 @@ Goal: a nested compositor under an existing Wayland session that runs real apps,
 input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 
 ### 1.1 Event loop & state
-- [ ] One `calloop::EventLoop<State>` on the main thread; `State` is single-owner (principle §2.3).
-- [ ] Insert the **Wayland display fd** as a calloop source; client dispatch inside the loop.
+- [x] One `calloop::EventLoop<State>` on the main thread; `State` is single-owner (principle §2.3).
+- [x] Insert the **Wayland display fd** as a calloop source; client dispatch inside the loop.
 - [ ] `calloop::channel` for worker results (config parse, later: PipeWire, screenshot encode).
-- [ ] **Never block the loop**: no synchronous file IO, no D-Bus waits in handlers.
+- [x] **Never block the loop**: no synchronous file IO, no D-Bus waits in handlers.
 
 ### 1.2 Core globals (`handlers/`)
-- [ ] `wl_compositor` + `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output`, `wl_data_device_manager`.
-- [ ] `xdg-shell` — toplevels + popups (`XdgShellHandler`).
-- [ ] Client `commit`/`destroy` bookkeeping; map/unmap lifecycle; initial `configure`.
+- [x] `wl_compositor` + `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output`, `wl_data_device_manager`.
+- [x] `xdg-shell` — toplevels + popups (`XdgShellHandler`).
+- [x] Client `commit`/`destroy` bookkeeping; map/unmap lifecycle; initial `configure`.
 
 ### 1.3 Input basics
-- [ ] Keyboard (`xkbcommon`, keymap, modifiers, key repeat) — `KeyboardHandler`.
-- [ ] Pointer (motion, buttons, axis/scroll) — `PointerHandler`.
-- [ ] **Click-to-focus**; keyboard focus follows the focused surface.
+- [x] Keyboard (`xkbcommon`, keymap, modifiers, key repeat) — via `KeyboardHandle::input` with the default keymap (a `KeyboardHandler` impl lands when keybind interception does).
+- [x] Pointer (motion, buttons, axis/scroll) — `PointerHandle` events.
+- [x] **Click-to-focus**; keyboard focus follows the focused surface.
 - [ ] Cursor rendering (software cursor element first).
 
 ### 1.4 Render + frame pacing
-- [ ] GLES renderer (`GlesRenderer`) via the winit backend.
+- [x] GLES renderer (`GlesRenderer`) via the winit backend.
 - [ ] Per-output **redraw state machine**: `Idle → Queued → WaitingForVBlank → Idle` (`COMPOSITOR.md` §8.2).
-- [ ] Frame callbacks sent after present; only for surfaces actually shown.
-- [ ] Redraw only when something requested it (damage, animation, cursor move).
+- [x] Frame callbacks sent for surfaces actually shown (currently just before the swap; M2's frame clock moves them after present).
+- [x] Redraw only when something requested it (currently: dispatch, input, resize).
 
 ### 1.5 Placement
-- [ ] Fixed cascade placement for toplevels + popups positioned relative to parents.
+- [x] Fixed cascade placement for toplevels + popups positioned relative to parents.
 - [ ] Respect `min_size`/`max_size` hints; handle clients that ignore `configure`.
 
 **Exit criteria (phase):** `foot` and a GTK app run nested, accept keyboard/pointer input, and resize; idle CPU ~0% when nothing changes.
+*(`foot` runs nested and connects against the M1 globals; keyboard/pointer injection and a GTK app still to exercise. Idle CPU is ~0% because redraws are on demand.)*
+
+**Known M1 gaps** (from `foot`'s startup warnings — all later-milestone breadth, not bugs):
+`wp_primary_selection` (M6), `xdg_activation` (M6), fractional scaling (M4), `cursor_shape`
+(server-side cursors; client-side works), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
+`xdg_decoration` (client-side decorations work). Popup grabs and `xdg_popup.reposition`
+are TODO'd in `handlers/xdg_shell.rs`.
 
 ---
 

@@ -14,7 +14,20 @@
 
 mod backend;
 mod cli;
+// The compositor core is built by whichever backend actually uses it: M1's
+// winit backend builds the state, runs the handlers, and draws. The headless
+// path stays state-free, and the tty backend (M4) bails before it needs state,
+// so gating on `backend-winit` alone keeps every feature combination
+// warning-free; M4 widens this to `any(backend-winit, backend-tty)`.
+#[cfg(feature = "backend-winit")]
+mod handlers;
+#[cfg(feature = "backend-winit")]
+mod input;
 mod logging;
+#[cfg(feature = "backend-winit")]
+mod render;
+#[cfg(feature = "backend-winit")]
+mod state;
 
 use anyhow::Context as _;
 use clap::Parser as _;

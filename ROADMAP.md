@@ -444,14 +444,16 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] **Exit:** `cargo run` opens a winit window with a solid background.
 
 ### M1 — First windows *(2–3 weeks)*
-- [ ] Winit backend + `calloop` event loop (single-owner `State`).
-- [ ] Core globals: compositor, shm, seat, output, data-device.
-- [ ] `xdg-shell` toplevels + popups.
-- [ ] Keyboard + pointer input; click-to-focus.
+- [x] Winit backend + `calloop` event loop (single-owner `State`).
+- [x] Core globals: compositor, shm, seat, output, data-device.
+- [x] `xdg-shell` toplevels + popups *(placed/configured; grabs and `reposition` are TODO M3)*.
+- [x] Keyboard + pointer input; click-to-focus *(wired; needs a real session to exercise)*.
 - [ ] GLES render; frame callbacks; per-output redraw state machine
-      (Idle→Queued→WaitingForVBlank→Idle).
-- [ ] Fixed cascade placement.
-- [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize.
+      (Idle→Queued→WaitingForVBlank→Idle). *(GLES render + `wl_surface.frame` callbacks
+      landed in `src/render.rs`; the redraw state machine is M2.)*
+- [x] Fixed cascade placement.
+- [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize. *(`foot` verified
+      nested against the M1 globals; input/resize and a GTK app still to exercise.)*
 
 ### M2 — Spaces & layout core *(3–4 weeks)* — *the "best of mango+dwm" phase*
 - [ ] `src/core`: `WindowId`, `OutputId`, `TagMask`, `Rect`, `Window`, `Output`,
