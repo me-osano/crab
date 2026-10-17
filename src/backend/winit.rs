@@ -37,6 +37,18 @@ struct LoopData {
     socket: ListeningSocket,
 }
 
+/// Requests a frame, asking winit to deliver a `Redraw` only when the output
+/// was idle.
+///
+/// Requests that arrive while a frame is queued or being presented fold into
+/// it; `Output::finish_frame` then reports the follow-up frame, so no request
+/// is lost (`COMPOSITOR.md` §8.2).
+fn request_redraw(data: &mut LoopData) {
+    if data.state.output_state.queue_redraw() {
+        data.backend.window().request_redraw();
+    }
+}
+
 /// Runs the nested compositor until the window is closed.
 ///
 /// # Errors
@@ -61,6 +73,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     // cursor in `render` is the only one visible (TODO.md §1.3).
     backend.window().set_cursor_visible(false);
     state.set_size(backend.window_size());
+    // Seed the redraw state machine so every later frame takes the same path.
+    state.output_state.queue_redraw();
     backend.window().request_redraw();
 
     let mut event_loop: EventLoop<'static, LoopData> =
@@ -75,12 +89,24 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             move |event, _, data: &mut LoopData| match event {
                 WinitEvent::Resized { .. } => {
                     data.state.set_size(data.backend.window_size());
-                    data.backend.window().request_redraw();
+                    request_redraw(data);
                 }
-                WinitEvent::Redraw => render::render(&data.state, &mut data.backend),
+                WinitEvent::Redraw => {
+                    // winit's frame events are requests themselves (an expose or
+                    // a resize), so fold them in before starting the frame.
+                    data.state.output_state.queue_redraw();
+                    if data.state.output_state.begin_frame() {
+                        render::render(&data.state, &mut data.backend);
+                        // The swap in `render` waits for the vertical blank; a
+                        // request that arrived during it needs another frame.
+                        if data.state.output_state.finish_frame() {
+                            data.backend.window().request_redraw();
+                        }
+                    }
+                }
                 WinitEvent::Input(event) => {
                     input::handle(&mut data.state, event);
-                    data.backend.window().request_redraw();
+                    request_redraw(data);
                 }
                 WinitEvent::CloseRequested => signal.stop(),
                 _ => {}
@@ -146,7 +172,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     tracing::error!(?err, "failed to flush Wayland clients");
                 }
                 state.prune_dead();
-                backend.window().request_redraw();
+                if state.output_state.queue_redraw() {
+                    backend.window().request_redraw();
+                }
                 Ok(PostAction::Continue)
             },
         )

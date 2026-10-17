@@ -48,6 +48,30 @@ impl SpaceState {
 /// Number of spaces per output, as a `usize` for array indexing.
 const SPACE_SLOTS: usize = SpaceSet::COUNT as usize;
 
+/// The per-output redraw state machine (`COMPOSITOR.md` §8.2).
+///
+/// The compositor draws only when something asked it to, and never starts a
+/// frame while the previous one is still being presented:
+///
+/// ```text
+/// Idle ──queue_redraw──► Queued ──begin_frame──► WaitingForVBlank ──finish_frame──► Idle
+///                            ▲                              │
+///                            └──────── queue_redraw ────────┘
+/// ```
+///
+/// Backends own the scheduling (a `calloop` timer, winit's `Redraw` event, or a
+/// DRM vblank) and the pure model owns the transitions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RedrawState {
+    /// Nothing to draw.
+    #[default]
+    Idle,
+    /// A frame was requested and has not started yet.
+    Queued,
+    /// A frame is being presented; a request now schedules the next one.
+    WaitingForVBlank,
+}
+
 /// One monitor: geometry plus the space state it owns.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Output {
@@ -66,6 +90,8 @@ pub struct Output {
     pub view: SpaceView,
     /// Per-space layout state.
     pub space_states: [SpaceState; SPACE_SLOTS],
+    /// Where this output is in the redraw cycle (`COMPOSITOR.md` §8.2).
+    pub redraw: RedrawState,
 }
 
 impl Output {
@@ -89,6 +115,7 @@ impl Output {
             usable_area: geometry,
             view: SpaceView::new(SpaceSet::SPACE_1),
             space_states: core::array::from_fn(|_| default.clone()),
+            redraw: RedrawState::Idle,
         }
     }
 
@@ -161,6 +188,49 @@ impl Output {
         if !self.view.previous.is_empty() {
             self.view.toggle_back();
         }
+    }
+
+    /// Requests a frame.
+    ///
+    /// Returns `true` when the backend must schedule one right now, i.e. the
+    /// output was idle. A request that arrives while a frame is queued or being
+    /// presented is folded into it instead (`finish_frame` then reports the
+    /// follow-up frame).
+    pub fn queue_redraw(&mut self) -> bool {
+        match self.redraw {
+            RedrawState::Idle => {
+                self.redraw = RedrawState::Queued;
+                true
+            }
+            RedrawState::Queued => false,
+            RedrawState::WaitingForVBlank => {
+                self.redraw = RedrawState::Queued;
+                false
+            }
+        }
+    }
+
+    /// Starts a frame if one is queued, marking the output as presenting.
+    ///
+    /// Returns `false` for a spurious frame event (or a second call): nothing
+    /// was queued, so nothing has to be drawn.
+    pub fn begin_frame(&mut self) -> bool {
+        if self.redraw == RedrawState::Queued {
+            self.redraw = RedrawState::WaitingForVBlank;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Marks the presented frame as done, at the vertical blank that ends it.
+    ///
+    /// Returns `true` if another frame is due because something asked for a
+    /// redraw while this one was in flight.
+    pub fn finish_frame(&mut self) -> bool {
+        let due = self.redraw == RedrawState::Queued;
+        self.redraw = RedrawState::Idle;
+        due
     }
 
     /// Reduces `space` to a single-space mask, if it names exactly one space.
@@ -236,5 +306,47 @@ mod tests {
         assert_eq!(Output::slot_of(SpaceSet::empty()), None);
         assert_eq!(Output::slot_of(SpaceSet::SPACE_1 | SpaceSet::SPACE_2), None);
         assert_eq!(Output::slot_of(SpaceSet::SPACE_2), Some(1));
+    }
+
+    #[test]
+    fn redraws_coalesce_while_idle_or_queued() {
+        let mut out = output();
+        assert_eq!(out.redraw, RedrawState::Idle);
+        assert!(
+            out.queue_redraw(),
+            "the first request must schedule a frame"
+        );
+        assert_eq!(out.redraw, RedrawState::Queued);
+        assert!(!out.queue_redraw(), "a second request must not re-schedule");
+        assert!(out.begin_frame());
+        assert_eq!(out.redraw, RedrawState::WaitingForVBlank);
+        assert!(!out.begin_frame(), "a frame is already in flight");
+        assert!(!out.finish_frame(), "nothing was requested meanwhile");
+        assert_eq!(out.redraw, RedrawState::Idle);
+    }
+
+    #[test]
+    fn a_request_during_presentation_schedules_the_next_frame() {
+        let mut out = output();
+        out.queue_redraw();
+        assert!(out.begin_frame());
+        assert!(
+            !out.queue_redraw(),
+            "a presenting output must not be asked twice"
+        );
+        assert_eq!(out.redraw, RedrawState::Queued);
+        assert!(out.finish_frame(), "the folded request needs a frame");
+        assert_eq!(out.redraw, RedrawState::Idle);
+    }
+
+    #[test]
+    fn a_spurious_frame_event_draws_nothing() {
+        let mut out = output();
+        assert!(!out.begin_frame(), "nothing was queued");
+        assert_eq!(out.redraw, RedrawState::Idle);
+        assert!(
+            !out.finish_frame(),
+            "a frame that never began finishes nothing"
+        );
     }
 }

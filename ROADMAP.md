@@ -455,9 +455,10 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] Keyboard + pointer input; click-to-focus; software cursor *(wired; pointer
       motion, client cursor surfaces, and the named-icon fallback were exercised nested,
       keyboard routing still needs a real session).*
-- [ ] GLES render; frame callbacks; per-output redraw state machine
-      (Idle→Queued→WaitingForVBlank→Idle). *(GLES render + `wl_surface.frame` callbacks
-      landed in `src/render.rs`; the redraw state machine is M2.)*
+- [x] GLES render; frame callbacks; per-output redraw state machine
+      (Idle→Queued→WaitingForVBlank→Idle). *(Transitions are pure and unit-tested in
+      `src/core/output.rs`; the winit backend schedules them from `Redraw` events.
+      Damage-aware partial redraws and the vblank/presentation clock are M3.)*
 - [x] Fixed cascade placement.
 - [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize. *(`foot` and GTK
       apps (`pavucontrol`, `nautilus`) run nested against the M1 globals; pointer input

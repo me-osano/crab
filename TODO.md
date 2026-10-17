@@ -102,9 +102,13 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 
 ### 1.4 Render + frame pacing
 - [x] GLES renderer (`GlesRenderer`) via the winit backend.
-- [ ] Per-output **redraw state machine**: `Idle → Queued → WaitingForVBlank → Idle` (`COMPOSITOR.md` §8.2).
+- [x] Per-output **redraw state machine**: `Idle → Queued → WaitingForVBlank → Idle`
+  (`COMPOSITOR.md` §8.2) — the transitions live on the pure `Output` (unit-tested) and
+  the winit backend drives them from `Redraw` events; a request that lands while a frame
+  is presented queues the next one.
 - [x] Frame callbacks sent for surfaces actually shown (currently just before the swap; M2's frame clock moves them after present).
-- [x] Redraw only when something requested it (currently: dispatch, input, resize).
+- [x] Redraw only when something requested it — dispatch, input, resize, and the frame
+  event itself; repeated requests coalesce into one frame per loop iteration.
 
 ### 1.5 Placement
 - [x] Fixed cascade placement for toplevels + popups positioned relative to parents.

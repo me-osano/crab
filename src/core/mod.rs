@@ -26,7 +26,7 @@ pub use color::Color;
 pub use focus::{FocusStack, FocusTarget};
 pub use geometry::{Point, Rect, Size};
 pub use ids::{LayerId, OutputId, WindowId};
-pub use output::{Output, SpaceState};
+pub use output::{Output, RedrawState, SpaceState};
 pub use params::{
     Direction, LayoutCommand, LayoutFamily, LayoutKind, LayoutParams, ScrollState, TilePosition,
 };
