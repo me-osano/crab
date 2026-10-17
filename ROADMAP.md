@@ -433,13 +433,15 @@ supersede `COMPOSITOR.md` §22 where they differ.
 
 ### M0 — Foundations *(1–2 weeks)*
 - [x] Settle the **license** — **GPL-3.0-or-later** (ADR-0001, §10).
-- [ ] Create the workspace + the §5 layout (root `crawm` package + `crawm-ipc` /
+- [x] Create the workspace + the §5 layout (root `crawm` package + `crawm-ipc` /
       `crawm-cli`); `[workspace.dependencies]`.
-- [ ] Pin Smithay to a git rev (niri does this) or `0.7.x`+patch (cosmic does).
-- [ ] CI: build, clippy `-D warnings`, fmt, tests, `cargo-deny`.
-- [ ] `tracing` + panic hook to `$XDG_STATE_HOME`.
+- [x] Pin Smithay to a git rev (niri does this) or `0.7.x`+patch (cosmic does).
+      *(Took `0.7.0` from crates.io — reproducible and matches cosmic; the vendored
+      git rev arrives with HDR. See TODO 0.4.)*
+- [x] CI: build, clippy `-D warnings`, fmt, tests, `cargo-deny`.
+- [x] `tracing` + panic hook to `$XDG_STATE_HOME`.
 - [ ] Get Smithay `anvil` building locally as a reference.
-- [ ] **Exit:** `cargo run` opens a winit window with a solid background.
+- [x] **Exit:** `cargo run` opens a winit window with a solid background.
 
 ### M1 — First windows *(2–3 weeks)*
 - [ ] Winit backend + `calloop` event loop (single-owner `State`).
