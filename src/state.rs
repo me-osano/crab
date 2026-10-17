@@ -23,7 +23,7 @@ use crawm::core::{
 };
 use smithay::input::SeatState;
 use smithay::input::keyboard::KeyboardHandle;
-use smithay::input::pointer::PointerHandle;
+use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::DisplayHandle;
@@ -161,6 +161,13 @@ pub(crate) struct Crawm {
     pub(crate) start_time: Instant,
     /// Pointer position in logical compositor coordinates.
     pub(crate) pointer_location: Point<f64, Logical>,
+    /// Whether [`Self::pointer_location`] means anything yet. Backends report
+    /// nothing until the pointer moves (`wl_pointer` and winit both work this
+    /// way), and an arrow stuck in a corner is worse than no cursor.
+    pub(crate) pointer_seen: bool,
+    /// The image the pointer is drawn as, as last requested by a client with
+    /// `wl_pointer.set_cursor` (updated by `SeatHandler::cursor_image`).
+    pub(crate) cursor_image: CursorImageStatus,
     /// Logical size of the visible area; kept in sync by the backends.
     pub(crate) size: Size<i32, Logical>,
     /// Next window id to hand out (never reused, even after closes).
@@ -237,6 +244,8 @@ impl Crawm {
             super_held: false,
             start_time: Instant::now(),
             pointer_location: (0.0, 0.0).into(),
+            pointer_seen: false,
+            cursor_image: CursorImageStatus::default_named(),
             size: (0, 0).into(),
             next_window_id: 1,
         }

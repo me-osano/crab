@@ -18,9 +18,14 @@ impl SeatHandler for Crawm {
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {
-        // M1 shows the host compositor's cursor over the nested window; a
-        // software cursor element lands with the render rework in M2.
+    /// A client asked for a different pointer image with `wl_pointer.set_cursor`.
+    ///
+    /// [`crate::render`] draws it on top of the scene: a client's own cursor
+    /// surface, the built-in arrow for a named icon, or nothing at all when the
+    /// client asked for the pointer to be hidden.
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        tracing::trace!(?image, "the pointer's image changed");
+        self.cursor_image = image;
     }
 }
 

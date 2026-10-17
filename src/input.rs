@@ -203,6 +203,7 @@ fn motion_relative<B: InputBackend>(state: &mut Crawm, event: &B::PointerMotionE
 fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
     let position = state.clamp_to_output(position);
     state.pointer_location = position;
+    state.pointer_seen = true;
 
     // An active move/resize consumes motion; nothing is forwarded to clients.
     if state.update_interaction(position) {

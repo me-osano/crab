@@ -94,7 +94,11 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 - [x] Keyboard (`xkbcommon`, keymap, modifiers, key repeat) — via `KeyboardHandle::input` with the default keymap (a `KeyboardHandler` impl lands when keybind interception does).
 - [x] Pointer (motion, buttons, axis/scroll) — `PointerHandle` events.
 - [x] **Click-to-focus**; keyboard focus follows the focused surface.
-- [ ] Cursor rendering (software cursor element first).
+- [x] Cursor rendering (software cursor element first) — a client's `wl_pointer.set_cursor`
+  surface, the built-in arrow for named icons, and nothing for a hidden cursor; the backends
+  hide the host pointer so this is the only one drawn. *(The arrow is one fixed shape until
+  the icon set lands with `cursor_shape`; it also freezes at the last position when the host
+  pointer leaves the nested window, since winit does not forward `CursorLeft`.)*
 
 ### 1.4 Render + frame pacing
 - [x] GLES renderer (`GlesRenderer`) via the winit backend.
@@ -104,14 +108,17 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 
 ### 1.5 Placement
 - [x] Fixed cascade placement for toplevels + popups positioned relative to parents.
-- [ ] Respect `min_size`/`max_size` hints; handle clients that ignore `configure`.
+- [x] Respect `min_size`/`max_size` hints — read from the surface's cached state on
+  commit and clamped in the layout.
+- [ ] Handle clients that ignore `configure` (a buffer that does not match the
+  configured size is currently drawn as-is).
 
 **Exit criteria (phase):** `foot` and a GTK app run nested, accept keyboard/pointer input, and resize; idle CPU ~0% when nothing changes.
-*(`foot` runs nested and connects against the M1 globals; keyboard/pointer injection and a GTK app still to exercise. Idle CPU is ~0% because redraws are on demand.)*
+*(`foot` and GTK apps (`pavucontrol`, `nautilus`) run nested and connect against the M1 globals; pointer motion, client cursor surfaces, and `Named(Default)` fallback were exercised. Keyboard/pointer injection still has no test harness. Idle CPU is ~0% because redraws are on demand.)*
 
 **Known M1 gaps** (from `foot`'s startup warnings — all later-milestone breadth, not bugs):
 `wp_primary_selection` (M6), `xdg_activation` (M6), fractional scaling (M4), `cursor_shape`
-(server-side cursors; client-side works), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
+(every named icon draws as the built-in arrow until the icon set lands), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
 `xdg_decoration` (client-side decorations work). Popup grabs and `xdg_popup.reposition`
 are TODO'd in `handlers/xdg_shell.rs`.
 

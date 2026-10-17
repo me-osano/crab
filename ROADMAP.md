@@ -451,13 +451,17 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] Winit backend + `calloop` event loop (single-owner `State`).
 - [x] Core globals: compositor, shm, seat, output, data-device.
 - [x] `xdg-shell` toplevels + popups *(placed/configured; grabs and `reposition` are TODO M3)*.
-- [x] Keyboard + pointer input; click-to-focus *(wired; needs a real session to exercise)*.
+- [x] Keyboard + pointer input; click-to-focus; software cursor *(wired; pointer
+      motion, client cursor surfaces, and the named-icon fallback were exercised nested,
+      keyboard routing still needs a real session).*
 - [ ] GLES render; frame callbacks; per-output redraw state machine
       (Idle→Queued→WaitingForVBlank→Idle). *(GLES render + `wl_surface.frame` callbacks
       landed in `src/render.rs`; the redraw state machine is M2.)*
 - [x] Fixed cascade placement.
-- [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize. *(`foot` verified
-      nested against the M1 globals; input/resize and a GTK app still to exercise.)*
+- [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize. *(`foot` and GTK
+      apps (`pavucontrol`, `nautilus`) run nested against the M1 globals; pointer input
+      and cursor rendering were exercised, keyboard input and resize still need a real
+      session.)*
 
 ### M2 — Spaces & layout core *(3–4 weeks)* — *the "best of mango+dwm" phase*
 - [x] `src/core`: `WindowId`, `OutputId`, `SpaceSet`, `Rect`, `Window`, `Output`,
@@ -471,8 +475,8 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] Interactive move/resize for floating; float-tiled conversion.
 - [x] Unit + `proptest` invariants (no overlaps, in-area, deterministic).
 - [ ] **Exit:** a full day of tiling + floating dialogs works nested, with per-space
-      layouts remembered. *(Two `foot` windows verified tiled nested; a GTK app and a
-      full interactive day remain.)*
+      layouts remembered. *(Two `foot` windows and GTK apps verified tiled nested;
+      floating dialogs and a full interactive day remain.)*
 
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
 - [ ] `src/animation`: spring + easing + bezier; **one synced clock per kind**;

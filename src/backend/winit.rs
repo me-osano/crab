@@ -57,6 +57,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 
     let (backend, winit_source) = winit::init::<GlesRenderer>()
         .map_err(|err| anyhow::anyhow!("initialise the winit backend: {err:?}"))?;
+    // The host draws its own pointer over our window; hide it so the software
+    // cursor in `render` is the only one visible (TODO.md §1.3).
+    backend.window().set_cursor_visible(false);
     state.set_size(backend.window_size());
     backend.window().request_redraw();
 
