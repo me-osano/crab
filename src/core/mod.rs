@@ -1,18 +1,34 @@
-//! Pure data model for crawm: identifiers, geometry, colors, and tag state.
+//! Pure data model for crawm: identifiers, geometry, colors, spaces, windows,
+//! outputs, focus, and rules.
 //!
 //! This module has **no** Smithay or Wayland dependencies (see `ROADMAP.md` §5),
 //! so it is fast to test and can be re-promoted into its own crate if a future
 //! out-of-process consumer needs it (ADR 0005 in reverse).
+//!
+//! [`Window`] and [`Output`] implement the model from `COMPOSITOR.md` §6; the
+//! layout engine that arranges them lives in [`crate::layout`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod color;
+pub mod focus;
 pub mod geometry;
 pub mod ids;
-pub mod tags;
+pub mod output;
+pub mod params;
+pub mod rules;
+pub mod spaces;
+pub mod window;
 
 pub use color::Color;
+pub use focus::{FocusStack, FocusTarget};
 pub use geometry::{Point, Rect, Size};
 pub use ids::{LayerId, OutputId, WindowId};
-pub use tags::{TagMask, TagView};
+pub use output::{Output, SpaceState};
+pub use params::{
+    Direction, LayoutCommand, LayoutFamily, LayoutKind, LayoutParams, ScrollState, TilePosition,
+};
+pub use rules::WindowRule;
+pub use spaces::{SpaceSet, SpaceView};
+pub use window::{AppliedRules, Window};

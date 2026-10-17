@@ -25,8 +25,9 @@ impl CompositorHandler for Crawm {
     fn commit(&mut self, surface: &WlSurface) {
         // Keeps the buffer/viewport/subsurface bookkeeping the renderer reads.
         on_commit_buffer_handler::<Self>(surface);
-        // The first commit carrying a buffer is what makes a surface visible.
-        self.map_surface(surface);
+        // Refreshes size hints, marks the surface mapped, and re-lays out when
+        // something the layout cares about changed.
+        self.on_commit(surface);
     }
 }
 

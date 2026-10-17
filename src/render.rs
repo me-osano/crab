@@ -1,15 +1,23 @@
-//! Drawing one frame: clear, blit every mapped surface, send frame callbacks.
+//! Drawing one frame: clear, borders, blit every visible surface.
 //!
-//! M1 is exactly this: a full-surface redraw each frame with no damage tracking
-//! (the `damage` rectangle is always the whole window). The damage/render
-//! rework — elements, shaders, per-output redraw state — is M2's job;
-//! `COMPOSITOR.md` §5 already names `render/{elements,damage}`.
+//! M1 was a full-surface redraw with no damage tracking and no z-ordering. M2
+//! adds the parts of the scene the pure layout engine deliberately does not
+//! describe: **borders** around tiled and floating windows, the **z-order**
+//! (tiled below floating below fullscreen below popups), and skipping the
+//! windows the current view hides (`COMPOSITOR.md` §7.1). The frame-clock driver
+//! in `src/animation` and real damage tracking land later.
 
+use crawm::core::Color;
+use crawm::core::WindowId;
+use smithay::backend::renderer::Color32F;
+use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Frame as _, Renderer as _};
 use smithay::backend::winit::WinitGraphicsBackend;
@@ -19,7 +27,7 @@ use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_surface_tree_downward,
 };
 
-use crate::state::Crawm;
+use crate::state::{Crawm, ManagedWindow};
 
 /// Background color of the compositor (dark slate).
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
@@ -39,26 +47,67 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             }
         };
 
-        // Positions are logical; with M1's `Scale::Integer(1)` output they map
+        // Positions are logical; with M2's `Scale::Integer(1)` output they map
         // one-to-one onto the renderer's physical pixels.
-        //
-        // Popups draw over toplevels, so they are appended last. Collecting in
-        // two passes (rather than one chained iterator) lets the renderer be
-        // reborrowed for each call.
-        let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-        for toplevel in state.toplevels.iter().filter(|toplevel| toplevel.mapped) {
-            elements.extend(render_elements_from_surface_tree(
-                renderer,
-                toplevel.surface.wl_surface(),
-                toplevel.location.to_physical(1),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
-        }
+        let border_width = state
+            .output_state
+            .current_space_state()
+            .map_or(0.0, |space| space.params.border_width)
+            .max(0.0) as i32;
+        let focused = state.focused_id();
+
+        // Collect in stacking order: tiled, then floating, then fullscreen on
+        // top. Popups draw over everything. Borders are a separate pass so the
+        // window surfaces stay above their own frames.
+        let mut borders: Vec<SolidColorRenderElement> = Vec::new();
+        let mut surfaces: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+
+        let tiled = state.windows.iter().filter(|window| {
+            window.mapped && window.visible && window.window.is_tiled() && !window.window.maximized
+        });
+        let floating = state.windows.iter().filter(|window| {
+            window.mapped
+                && window.visible
+                && window.window.floating
+                && !window.window.fullscreen
+                && !window.window.maximized
+        });
+        let covering = state.windows.iter().filter(|window| {
+            window.mapped && window.visible && (window.window.fullscreen || window.window.maximized)
+        });
+
+        collect_pass(
+            state,
+            &mut *renderer,
+            border_width,
+            focused,
+            tiled,
+            &mut borders,
+            &mut surfaces,
+        );
+        collect_pass(
+            state,
+            &mut *renderer,
+            border_width,
+            focused,
+            floating,
+            &mut borders,
+            &mut surfaces,
+        );
+        collect_pass(
+            state,
+            &mut *renderer,
+            border_width,
+            focused,
+            covering,
+            &mut borders,
+            &mut surfaces,
+        );
+
+        // Popups last: they draw over every toplevel.
         for popup in state.popups.iter().filter(|popup| popup.mapped) {
-            elements.extend(render_elements_from_surface_tree(
-                renderer,
+            surfaces.extend(render_elements_from_surface_tree(
+                &mut *renderer,
                 popup.surface.wl_surface(),
                 popup.location.to_physical(1),
                 1.0,
@@ -72,7 +121,17 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
                 if let Err(err) = frame.clear(BACKGROUND.into(), &[damage]) {
                     tracing::error!(?err, "failed to clear the frame");
                 }
-                if let Err(err) = draw_render_elements(&mut frame, 1.0, &elements, &[damage]) {
+                if let Err(err) =
+                    draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &borders, &[damage])
+                {
+                    tracing::error!(?err, "failed to draw the borders");
+                }
+                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
+                    &mut frame,
+                    1.0,
+                    &surfaces,
+                    &[damage],
+                ) {
                     tracing::error!(?err, "failed to draw the scene");
                 }
                 if let Err(err) = frame.finish() {
@@ -83,8 +142,12 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
         }
 
         let time = state.start_time.elapsed().as_millis() as u32;
-        for toplevel in state.toplevels.iter().filter(|toplevel| toplevel.mapped) {
-            send_frame_callbacks(toplevel.surface.wl_surface(), time);
+        for window in state
+            .windows
+            .iter()
+            .filter(|window| window.mapped && window.visible)
+        {
+            send_frame_callbacks(window.wl_surface(), time);
         }
         for popup in state.popups.iter().filter(|popup| popup.mapped) {
             send_frame_callbacks(popup.surface.wl_surface(), time);
@@ -97,9 +160,73 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
     }
 }
 
+/// Appends one pass of windows: their borders, then their surfaces.
+#[allow(clippy::too_many_arguments)]
+fn collect_pass<'a>(
+    state: &Crawm,
+    renderer: &mut GlesRenderer,
+    border_width: i32,
+    focused: Option<WindowId>,
+    windows: impl Iterator<Item = &'a ManagedWindow>,
+    borders: &mut Vec<SolidColorRenderElement>,
+    surfaces: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+) {
+    for window in windows {
+        // A fullscreen or maximized window covers the screen, so a border would
+        // only clip it.
+        if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
+            let color = if focused == Some(window.id()) {
+                border_color(state.config.border_color)
+            } else {
+                border_color(state.config.unfocused_border_color)
+            };
+            borders.extend(borders_for(window, border_width, color));
+        }
+        surfaces.extend(render_elements_from_surface_tree(
+            renderer,
+            window.wl_surface(),
+            window.location.to_physical(1),
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        ));
+    }
+}
+
+/// Converts a config color into the renderer's representation.
+fn border_color(color: Color) -> Color32F {
+    Color32F::new(color.r, color.g, color.b, color.a)
+}
+
+/// Four solid rectangles that frame `window`'s border width, in physical pixels.
+fn borders_for(window: &ManagedWindow, bw: i32, color: Color32F) -> Vec<SolidColorRenderElement> {
+    let x = window.location.x;
+    let y = window.location.y;
+    let width = window.size.w;
+    let height = window.size.h;
+    let rects = [
+        Rectangle::new((x - bw, y - bw).into(), (width + 2 * bw, bw).into()),
+        Rectangle::new((x - bw, y + height).into(), (width + 2 * bw, bw).into()),
+        Rectangle::new((x - bw, y).into(), (bw, height).into()),
+        Rectangle::new((x + width, y).into(), (bw, height).into()),
+    ];
+    rects
+        .into_iter()
+        .map(|geometry| {
+            SolidColorRenderElement::new(
+                Id::new(),
+                geometry,
+                CommitCounter::default(),
+                color,
+                Kind::Unspecified,
+            )
+        })
+        .collect()
+}
+
 /// Fires `wl_surface.frame` callbacks for a surface and its children.
 ///
-/// Copied from Smithay's `minimal` example; M2 replaces this with the
+/// Copied from Smithay's `minimal` example; M3 replaces this with the
 /// frame-clock driver in `src/animation`.
 fn send_frame_callbacks(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(

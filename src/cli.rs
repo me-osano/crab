@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-/// A Wayland compositor merging mango tags, niri scrolling, and cosmic breadth.
+/// A Wayland compositor merging mango-style spaces, niri scrolling, and cosmic breadth.
 #[derive(Debug, Parser)]
 #[command(name = "crawm", version, about, long_about = None)]
 pub struct Args {

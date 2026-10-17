@@ -5,7 +5,7 @@
 //! that can be pure lives here so it is **testable without graphics** and
 //! reusable (ADR-0005 "modules first"; ROADMAP.md §5):
 //!
-//! * [`core`] — identifiers, geometry, colors, tags, window model;
+//! * [`core`] — identifiers, geometry, colors, spaces, window model;
 //! * [`config`] — TOML parsing, validation, and defaults;
 //! * [`layout`] — the [`layout::Layout`] trait and its implementations;
 //! * [`animation`] — springs, easings, and animated scalars.

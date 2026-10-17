@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::Color;
+use crate::core::{Color, LayoutKind, LayoutParams};
 use serde::Deserialize;
 
 /// The compositor configuration.
@@ -31,7 +31,13 @@ pub struct Config {
     pub border_width: i32,
     /// Border color of the focused window.
     pub border_color: Color,
-    /// Default layout name for new tags.
+    /// Border color of unfocused windows.
+    pub unfocused_border_color: Color,
+    /// Default number of windows in the master area.
+    pub master_count: i32,
+    /// Default master-area fraction, within `LayoutParams::MIN_RATIO..=MAX_RATIO`.
+    pub master_ratio: f64,
+    /// Default layout name for new spaces.
     pub layout: String,
     /// Whether animations are enabled (also toggled at runtime by IPC).
     pub animations: bool,
@@ -43,7 +49,10 @@ impl Default for Config {
             gaps: 8,
             border_width: 2,
             border_color: Color::from_hex("#7aa2f7").expect("static color is valid"),
-            layout: "monocle".to_owned(),
+            unfocused_border_color: Color::from_hex("#3b4261").expect("static color is valid"),
+            master_count: 1,
+            master_ratio: 0.6,
+            layout: "tile".to_owned(),
             animations: true,
         }
     }
@@ -80,6 +89,9 @@ struct RawConfig {
     gaps: Option<i64>,
     border_width: Option<i64>,
     border_color: Option<String>,
+    unfocused_border_color: Option<String>,
+    master_count: Option<i64>,
+    master_ratio: Option<f64>,
     layout: Option<String>,
     animations: Option<RawAnimations>,
 }
@@ -104,6 +116,16 @@ impl RawConfig {
         if let Some(hex) = self.border_color {
             config.border_color = Color::from_hex(&hex)
                 .map_err(|err| ConfigError::Parse(format!("`border_color`: {err}")))?;
+        }
+        if let Some(hex) = self.unfocused_border_color {
+            config.unfocused_border_color = Color::from_hex(&hex)
+                .map_err(|err| ConfigError::Parse(format!("`unfocused_border_color`: {err}")))?;
+        }
+        if let Some(count) = self.master_count {
+            config.master_count = checked_i32(count, "master_count")?;
+        }
+        if let Some(ratio) = self.master_ratio {
+            config.master_ratio = ratio;
         }
         if let Some(layout) = self.layout {
             config.layout = layout;
@@ -152,10 +174,23 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
             "`border_width` must be >= 0".to_owned(),
         ));
     }
-    if config.layout.trim().is_empty() {
+    if config.master_count < 0 {
         return Err(ConfigError::Invalid(
-            "`layout` must not be empty".to_owned(),
+            "`master_count` must be >= 0".to_owned(),
         ));
+    }
+    if !(LayoutParams::MIN_RATIO..=LayoutParams::MAX_RATIO).contains(&config.master_ratio) {
+        return Err(ConfigError::Invalid(format!(
+            "`master_ratio` must be within {}..={}",
+            LayoutParams::MIN_RATIO,
+            LayoutParams::MAX_RATIO
+        )));
+    }
+    if LayoutKind::from_name(&config.layout).is_none() {
+        return Err(ConfigError::Invalid(format!(
+            "`layout` must be one of {:?}",
+            LayoutKind::ALL.map(LayoutKind::name)
+        )));
     }
     Ok(())
 }
@@ -180,6 +215,9 @@ mod tests {
             gaps = 4
             border_width = 3
             border_color = "#ff0000"
+            unfocused_border_color = "#222222"
+            master_count = 2
+            master_ratio = 0.4
             layout = "floating"
 
             [animations]
@@ -190,6 +228,10 @@ mod tests {
         assert_eq!(cfg.gaps, 4);
         assert_eq!(cfg.border_width, 3);
         assert_eq!(cfg.border_color, Color::rgb(1.0, 0.0, 0.0));
+        let grey = 0x22 as f32 / 255.0;
+        assert_eq!(cfg.unfocused_border_color, Color::rgb(grey, grey, grey));
+        assert_eq!(cfg.master_count, 2);
+        assert!((cfg.master_ratio - 0.4).abs() < 1e-9);
         assert_eq!(cfg.layout, "floating");
         assert!(!cfg.animations);
     }
@@ -219,6 +261,26 @@ mod tests {
     #[test]
     fn rejects_negative_gaps() {
         let cfg = parse("gaps = -1").unwrap();
+        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn rejects_unknown_layout() {
+        let cfg = parse("layout = \"spiral\"").unwrap();
+        let err = validate(&cfg).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        assert!(err.to_string().contains("layout"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_ratio() {
+        let cfg = parse("master_ratio = 1.5").unwrap();
+        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn rejects_negative_master_count() {
+        let cfg = parse("master_count = -1").unwrap();
         assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
     }
 }

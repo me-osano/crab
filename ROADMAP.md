@@ -32,7 +32,7 @@
 An **independent Wayland compositor + window manager in Rust on Smithay** that
 merges the three strongest compositor designs into one coherent whole:
 
-- **mango** — dwm/dwl-style **tags** with per-tag layouts, many layouts, runtime
+- **mango** — dwm/dwl-style **spaces** with per-space layouts, many layouts, runtime
   plain-text config, scenefx-quality effects.
 - **niri** — **scrollable tiling**, a rigorous **animation system**, typed IPC +
   event stream, typed text config, excellent protocol coverage.
@@ -90,21 +90,21 @@ Ordered by where the idea comes from, with the reason we want it.
 | **Named workspaces + `on-overflow` centering** | Persistent, scriptable spaces rather than only dynamic ones |
 | **Fractional-layout discipline** (single logical→physical rounding path) | Prevents blurry/misaligned borders at fractional scale |
 
-### From mango (tags + layouts + effects)
+### From mango (spaces + layouts + effects)
 
 | Take | Why |
 |---|---|
-| **Tag model** (per-monitor, multi-tag view, **multiple tags per window**) | More expressive than workspaces; `comboview` (several tags at once) is genuinely useful |
-| **Per-tag layout state** (`Pertag`: layout + master count/factor + scroller proportion + dwindle tree) | Each tag remembers *how* it was arranged; rare and valuable |
-| **14 layouts** incl. `dwindle`, `fair`, `center_tile`, `vertical_*`, `deck`, `grid`, `scroller` | Broad coverage from one enum |
-| **Special workspace (tag 0) as a tiling overlay** with background dim | A better scratchpad: a full tiled surface over the current space |
+| **Space model** (per-monitor, multi-space view, **multiple spaces per window**) | More expressive than workspaces; `comboview` (several spaces at once) is genuinely useful |
+| **Per-space layout state** (`Pertag`: layout + master count/factor + scroller proportion + dwindle tree) | Each space remembers *how* it was arranged; rare and valuable |
+| **Layout modes** incl. `dwindle`, `fair`, `center_tile`, `vertical_*`, `deck`, `grid`, `scroll` | Broad coverage, grouped into families (ADR-0004) |
+| **Special workspace (space 0) as a tiling overlay** with background dim | A better scratchpad: a full tiled surface over the current space |
 | **Runtime plain-text/TOML config** with variables, `source` includes, `auto_reload`, and an **error-nag bar** | Zero-recompile iteration; errors never kill the session |
 | **Per-event animation config with cubic-bezier curves** | Fine-grained motion control (niri gives springs; mango gives per-event tuning) |
 | **scenefx-quality effects** (blur, shadows, radius, opacity, dim) with **per-window overrides** and **wallpaper-cached blur** | The effects feature set users actually ask for, plus the performance trick that makes blur affordable |
 | **Named scratchpads** + standard scratchpad + minimize/restore | Everyday workflow |
 | **Window groups + auto tab bars** | Grouping without a separate compositor |
 | **Rich window states** (`is_global` sticky, `is_overlay`, `fakefullscreen`, terminal **swallow**, `is_unmanaged_global`) | The long tail of real desktop behaviour |
-| **Monitor rules** by name/make/model/serial regex; per-monitor tags; primary-output flag | Flexible multi-monitor without config sprawl |
+| **Monitor rules** by name/make/model/serial regex; per-monitor spaces; primary-output flag | Flexible multi-monitor without config sprawl |
 | **IPC `get` / `watch` / `dispatch`** + `ext-workspace` + first-party bar | Ergonomic scripting and bar integration |
 | **Overview (hycov-style) with jump labels**, overcircle, thumbnail switcher | Fast navigation; labels rescue non-Latin keyboard layouts |
 | **Virtual outputs** (headless) and **DRM lease** (VR) | Streaming (Sunshine/Moonlight) and VR support |
@@ -133,7 +133,7 @@ Ordered by where the idea comes from, with the reason we want it.
 - **mango's C/wlroots + scenefx coupling** — we are on Smithay; we re-implement the
   *effects ideas*, we do not take a wlroots renderer dependency.
 - **niri's lack of output mirroring** — we will provide mirroring (cosmic has it).
-- **Global-tag coupling across monitors** as a default — we adopt mango's
+- **Global-space coupling across monitors** as a default — we adopt mango's
   `synctag` *option*, not its assumption.
 - **A built-in bar/panel** — that is `crawl-desktop`'s job.
 
@@ -152,7 +152,7 @@ provenance, priority, target milestone, and how to verify it. Priority:
 |---|---|---|---|---|
 | Tiling windows, master/stack | mango/dwm | P0 | M2 | N windows tile without overlap |
 | Per-window floating toggle; mixed tiled+floating on one space | mango + cosmic | P0 | M2 | Dialog floats over tiled windows |
-| Tags: per-output, multi-tag **view**, multiple tags per window | mango | P0 | M2 | `view 1+3`, `tag` a window onto 2 tags |
+| Spaces: per-output, multi-space **view**, multiple spaces per window | mango | P0 | M2 | `view 1+3`, `space` a window onto 2 spaces |
 | Named spaces / persistent workspaces | niri | P1 | M3 | Named space survives output unplug |
 | Special workspace (tiling overlay + dim) | mango | P1 | M7 | Overlay tiles over current space |
 | Window groups + tabbed/stacked containers | cosmic | P1 | M7 | Two windows stack in one slot |
@@ -167,19 +167,23 @@ provenance, priority, target milestone, and how to verify it. Priority:
 
 ### B. Layouts
 
-| Layout | Source | Prio | MS |
-|---|---|---|---|
-| `Tile` (master/stack, ratio+count, left/right/top/bottom) | mango/dwm | P0 | M2 |
-| `Floating` (cascade, mixed) | classic | P0 | M2 |
-| `Monocle` | dwm/mango | P0 | M2 |
-| `Scroller` (infinite columns, focus/center/overspread, presets) | niri + mango | P0 | M3 |
-| `Grid` | mango | P1 | M7 |
-| `Deck` (master + top-of-stack) | mango/dwl | P1 | M7 |
-| `Dwindle`/spiral (smart split, preserve, manual split) | mango/Hypr | P1 | M7 |
-| `Fair` + `VerticalFair` | mango | P1 | M7 |
-| `CenterTile`, `VerticalTile`, `RightTile` | mango | P2 | M7 |
-| `VerticalScroller`, `VerticalGrid`, `VerticalDeck` | mango | P2 | M7 |
-| Grouped/Stacked slots | cosmic | P1 | M7 |
+Layouts are grouped into **families** with **modes** (ADR-0004). Family = broad
+strategy; mode = concrete arrangement. Two cycle actions address the two axes
+(`cycle-layout-mode`, `cycle-layout-family`).
+
+| Family | Mode | Source | Prio | MS |
+|---|---|---|---|---|
+| `Stack` | `floating` (cascade, mixed) | classic | P0 | M2 |
+| `Stack` | `monocle` | dwm/mango | P0 | M2 |
+| `Tile` | `tile` (master/stack, ratio+count, left/right/top/bottom) | mango/dwm | P0 | M2 |
+| `Scroll` | `scroll` (infinite columns, focus/center/overspread, presets) | niri + mango | P0 | M3 |
+| `Tile` | `grid` | mango | P1 | M7 |
+| `Tile` | `deck` (master + top-of-stack) | mango/dwl | P1 | M7 |
+| `Tile` | `dwindle` (smart split, preserve, manual split) | mango/Hypr | P1 | M7 |
+| `Tile` | `fair`, `vertical-fair` | mango | P1 | M7 |
+| `Tile` | `center-tile`, `vertical-tile`, `right-tile` | mango | P2 | M7 |
+| `Scroll` | `vertical-scroll` | mango/niri | P2 | M7 |
+| `Stack` | `tabbed` (grouped slots) | cosmic | P1 | M7 |
 | Per-space layout memory + params restore | mango (`Pertag`) | P0 | M2/M3 |
 | Per-layout directional `neighbor()` | niri | P1 | M2 |
 
@@ -226,7 +230,7 @@ property-testable.
 | User variables (`$name`) | mango | P2 | M5 |
 | Per-key live reload where cheap | cosmic | P2 | M5 |
 | Default config shipped + documented | all | P0 | M5 |
-| Window / tag / layer / monitor / device **rules** | mango | P0 | M5 |
+| Window / space / layer / monitor / device **rules** | mango | P0 | M5 |
 | Dynamic rule re-evaluation on title/app-id change | mango | P2 | M5 |
 
 ### F. IPC
@@ -369,7 +373,7 @@ crawm/
 ├── ROADMAP.md                 # this file
 ├── src/                     # the compositor: Smithay glue, backends, handlers, render, input
 │   ├── lib.rs                 # library surface: the pure modules only (reusable, testable)
-│   ├── core/                  # pure data: ids, geometry, spaces/tags, window model — no Smithay
+│   ├── core/                  # pure data: ids, geometry, spaces/spaces, window model — no Smithay
 │   ├── config/                # TOML parsing, validation, defaults, schema, rules (pure)
 │   ├── layout/                # pure Layout trait + all layouts (unit/property-tested, no Smithay)
 │   └── animation/             # springs/easing/curves + animated scalars (pure, no Smithay)
@@ -456,29 +460,31 @@ supersede `COMPOSITOR.md` §22 where they differ.
       nested against the M1 globals; input/resize and a GTK app still to exercise.)*
 
 ### M2 — Spaces & layout core *(3–4 weeks)* — *the "best of mango+dwm" phase*
-- [ ] `src/core`: `WindowId`, `OutputId`, `TagMask`, `Rect`, `Window`, `Output`,
-      `TagView`, `FocusTarget`.
-- [ ] `src/layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
-- [ ] Layouts: `Tile`, `Monocle`, `Floating`. Mixed tiled+floating on one space.
-- [ ] Tags: `view`, `move-to-tag`, `toggle-tag`, **multi-tag view**, multi-tag windows.
-- [ ] **Per-space layout memory + params** (`Pertag` equivalent).
-- [ ] Cycle layout; master ratio/count; gaps/borders.
-- [ ] Interactive move/resize for floating; float-tiled conversion.
-- [ ] Unit + `proptest` invariants (no overlaps, in-area, deterministic).
-- [ ] **Exit:** a full day of tiling + floating dialogs works nested, with per-tag
-      layouts remembered.
+- [x] `src/core`: `WindowId`, `OutputId`, `SpaceSet`, `Rect`, `Window`, `Output`,
+      `SpaceView`, `FocusTarget`.
+- [x] `src/layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
+- [x] Layout families: `Stack` (`floating`, `monocle`) + `Tile` (`tile`). Mixed
+      tiled+floating on one space.
+- [x] Spaces: `view`, `move-to-space`, `toggle-space`, **multi-space view**, multi-space windows.
+- [x] **Per-space layout memory + params** (`Pertag` equivalent).
+- [x] Cycle layout **family** and **mode** (two actions); master ratio/count; gaps/borders.
+- [x] Interactive move/resize for floating; float-tiled conversion.
+- [x] Unit + `proptest` invariants (no overlaps, in-area, deterministic).
+- [ ] **Exit:** a full day of tiling + floating dialogs works nested, with per-space
+      layouts remembered. *(Two `foot` windows verified tiled nested; a GTK app and a
+      full interactive day remain.)*
 
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
 - [ ] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
       interruptible retargeting; `is_animating()`.
-- [ ] `Scroller` layout (columns, focus/center/overspread, proportion presets,
+- [ ] `Scroll` family `scroll` mode (columns, focus/center/overspread, proportion presets,
       per-column width, vertical variant).
 - [ ] Named spaces + `on-overflow` centering; `default-column-display normal|tabbed`.
 - [ ] Animate open/close/move/resize/space-switch/layout-switch.
 - [ ] Resize: configure immediately, draw last buffer scaled/cropped until commit.
       Close: snapshot last buffer.
 - [ ] Clock = vblank/`wp_presentation`, not `Instant::now()`.
-- [ ] **Exit:** tag/space switches and layout changes are smooth and interruptible,
+- [ ] **Exit:** space/space switches and layout changes are smooth and interruptible,
       no pops.
 
 ### M4 — Bare-metal backend *(3–4 weeks)*
@@ -490,7 +496,7 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [ ] `linux-dmabuf`, `viewporter`, `presentation-time`, **fractional-scale**.
 - [ ] **10-bit SDR scanout** (`RGB10A2`) + `max_bpc=10`, with a **per-format** probe
       (some formats fail to bind on some GPUs — ADR-0002, §3H).
-- [ ] Output hotplug; per-output tag views; transform.
+- [ ] Output hotplug; per-output space views; transform.
 - [ ] `.desktop` + session wrapper + env import.
 - [ ] **Exit:** boot from a TTY and use `crawm` on real hardware.
 
@@ -500,11 +506,11 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [ ] Binds: keyboard (+`Mod` remap), mouse, axis, gesture, switch; flags
       (`repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass);
       **key modes/submaps**.
-- [ ] Rules: window, tag, layer, monitor, device (match + actions from §3E).
+- [ ] Rules: window, space, layer, monitor, device (match + actions from §3E).
 - [ ] `crawm-ipc` + socket + `event-stream` + `version`; `crawm-cli`
       `get`/`watch`/`dispatch`; bind and IPC share **one `Action` enum**.
 - [ ] Per-event animation curves/durations; reduce-motion switch.
-- [ ] **Exit:** a bar shows tags/windows over IPC; config edits apply live; bad
+- [ ] **Exit:** a bar shows spaces/windows over IPC; config edits apply live; bad
       config never crashes.
 
 ### M6 — Protocol breadth P0/P1 *(4–6 weeks)* — *the "cosmic breadth" phase*
@@ -721,8 +727,10 @@ attribution — including the HDR/colour-management work — while keeping the
   on GLES (never Vulkan). ✅ *decided 2026-10-16*
 - **ADR-0003 — Config format:** **TOML** (via `serde` + the `toml` crate; keys are
   `snake_case`). ✅ *decided 2026-10-16*
-- **ADR-0004 — Space model** *(open)*: pure tags (mango), pure named workspaces
-  (niri), or the unified "space" hybrid proposed here.
+- **ADR-0004 — Space model:** unified **numbered spaces** (a `SpaceSet` bitset per
+  output; multi-space view and multi-space windows) with **layout families + modes**;
+  "workspace" is a protocol/IPC projection (`ext-workspace-v1`), not a core type.
+  ✅ *decided 2026-10-17*
 - **ADR-0005 — IPC** *(open)*: reuse niri's `niri-ipc` schema shape, or a fresh
   schema; and whether to expose `ext-workspace` as the primary bar interface
   (recommended).
@@ -736,7 +744,7 @@ attribution — including the HDR/colour-management work — while keeping the
 - **Edition 2024 + `resolver = "3"`**, workspace `rust-version = "1.85"` — to match
   `crawl`/`crawl-desktop` and get MSRV-aware resolution.
 - **Smithay `0.7.0` from crates.io** (not a git rev): no unreleased patches are
-  needed yet, and a released tag is reproducible; the vendored git rev arrives with
+  needed yet, and a released space is reproducible; the vendored git rev arrives with
   HDR (ADR-0002). `backend_vulkan` is off (ADR-0002); `xwayland` is deferred to M9.
 
 ---
@@ -786,6 +794,6 @@ attribution — including the HDR/colour-management work — while keeping the
 **Ecosystem / specs**
 - Smithay + `anvil` example · `calloop` book · `wayland-protocols` (stable,
   staging, unstable) · `wlr-protocols` · `xdg-desktop-portal`
-- Reference compositors to study: dwl/dwm (tags), sway/i3 (containers + IPC),
+- Reference compositors to study: dwl/dwm (spaces), sway/i3 (containers + IPC),
   Hyprland (effects config ideas), labwc/Wayfire (stacking + plugins),
   river (out-of-process layouts), `xwayland-satellite`

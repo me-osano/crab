@@ -46,7 +46,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let display: Display<Crawm> =
         Display::new().map_err(|err| anyhow::anyhow!("create the Wayland display: {err:?}"))?;
     let dh = display.handle();
-    let mut state = Crawm::new(&dh);
+    let mut state = Crawm::new(&dh, config);
 
     let socket = ListeningSocket::bind_auto(SOCKET_BASENAME, 0..32)
         .map_err(|err| anyhow::anyhow!("bind a Wayland socket: {err:?}"))?;

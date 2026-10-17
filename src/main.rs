@@ -1,4 +1,4 @@
-//! crawm — a Wayland compositor merging mango tags, niri scrolling, and cosmic
+//! crawm — a Wayland compositor merging mango-style spaces, niri scrolling, and cosmic
 //! protocol breadth.
 //!
 //! This binary is the thin Smithay entry point: it owns backends, handlers,
@@ -23,6 +23,8 @@ mod cli;
 mod handlers;
 #[cfg(feature = "backend-winit")]
 mod input;
+#[cfg(feature = "backend-winit")]
+mod layout_glue;
 mod logging;
 #[cfg(feature = "backend-winit")]
 mod render;

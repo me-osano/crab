@@ -38,7 +38,7 @@ locally as the canonical reference.
 - [x] `docs/decisions/0001-license.md` — **GPL-3.0-or-later**.
 - [x] `docs/decisions/0002-renderer-and-hdr.md` — **GLES**, phased HDR.
 - [x] `docs/decisions/0003-config-format.md` — **TOML** (accepted; via `serde` + the `toml` crate, `snake_case` keys).
-- [ ] `docs/decisions/0004-space-model.md` — tags only vs named workspaces vs **unified "space" hybrid**.
+- [x] `docs/decisions/0004-space-model.md` — **unified numbered spaces** + **layout families** (accepted 2026-10-17).
 - [ ] `docs/decisions/0005-ipc-schema.md` — niri-`ipc` shape vs fresh; `ext-workspace` as primary bar interface.
 - [ ] `docs/decisions/0006-xwayland.md` — **`xwayland-satellite`** (recommended) vs in-process.
 - [ ] `docs/decisions/0007-effects.md` — own GLES implementation vs a scenefx-like crate.
@@ -47,7 +47,7 @@ locally as the canonical reference.
 **Exit criteria:** `docs/decisions/README.md` index current; every framework-level choice has an ADR or a written rationale.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
-- [x] `src/core/` — pure data: ids, logical geometry, colors, tags (no Smithay; folded in from the former `crawm-core` crate).
+- [x] `src/core/` — pure data: ids, logical geometry, colors, spaces (no Smithay; folded in from the former `crawm-core` crate).
 - [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crawm-layout` crate).
 - [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crawm-anim` crate).
 - [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crawm-config` crate).
@@ -61,7 +61,7 @@ locally as the canonical reference.
 - [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code or an upward/sideways `crate::` dependency, if `src/lib.rs` exposes a non-pure module, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
 
 ### 0.4 Smithay baseline
-- [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released tag is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
+- [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released space is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
 - [ ] Clone and build `anvil` locally; walk its `state.rs`, backend selection, and handler wiring.
 - [x] Confirmed the toolchain builds `smithay` + `calloop` + `input` + `drm`/`gbm`/`egl`/`udev`/`libseat` on the target distro: the backends are cargo features (`backend-tty` pulls the DRM/session/input stack) and CI runs `cargo clippy --all-features`, so the whole stack keeps building. `renderer_multi` on (under `backend-tty`), `backend_vulkan` off (ADR-0002), `xwayland` deferred to M9.
 
@@ -119,56 +119,57 @@ are TODO'd in `handlers/xdg_shell.rs`.
 
 ## Phase 2 — Spaces & layout core (M2) *(~3–4 weeks)* — *"best of mango + dwm"*
 
-Goal: a real tiling model with per-output tags, per-tag layout, mixed tiling/floating,
-and per-tag layout memory. Everything here is pure and unit-testable.
+Goal: a real tiling model with per-output spaces, per-space layout, mixed tiling/floating,
+and per-space layout memory. Everything here is pure and unit-testable.
 
 ### 2.1 `src/core` data model (`COMPOSITOR.md` §6)
-- [ ] Newtypes `WindowId`, `OutputId`, `TagMask(u32)`, `LayerId`; logical `f64` `Rect`/`Point`/`Size`.
-- [ ] `Window` (id, app_id, title, `tags: TagMask`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
-- [ ] `Output` (name, geometry, scale, `usable_area`, `view: TagView`, `tag_states: [TagState; 32]`).
-- [ ] `TagView { visible, previous }`; `TagState { layout, params, scroll, focus_history }`.
-- [ ] `FocusTarget { Window | LayerSurface | LockSurface | None }`; per-output MRU stack + `last_focused_output`.
-- [ ] **One** focus function that updates keyboard focus, activation (`xdg_toplevel`), border-color targets, and IPC events.
-- [ ] Document the **multi-tag-view rule**: combined set uses the lowest-numbered visible tag's layout (dwm behavior).
+- [x] Newtypes `WindowId`, `OutputId`, `SpaceSet(u32)`, `LayerId`; logical `f64` `Rect`/`Point`/`Size`.
+- [x] `Window` (id, app_id, title, `spaces: SpaceSet`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
+- [x] `Output` (name, geometry, scale, `usable_area`, `view: SpaceView`, `space_states: [SpaceState; 32]`).
+- [x] `SpaceView { visible, previous }`; `SpaceState { layout, params, scroll, focus_history }`.
+- [x] `FocusTarget { Window | LayerSurface | LockSurface | None }`; per-output MRU stack + `last_focused_output`.
+- [x] **One** focus function that updates keyboard focus, activation (`xdg_toplevel`), border-color targets, and IPC events.
+- [x] Document the **multi-space-view rule**: combined set uses the lowest-numbered visible space's layout (dwm behavior).
 
 ### 2.2 `src/layout` engine (`COMPOSITOR.md` §7.1)
-- [ ] `LayoutInput`, `Placement { window, rect, visible, z_hint }`, `LayoutParams`, `ScrollState`.
-- [ ] `trait Layout { kind; arrange; neighbor?; command? }` — **pure functions**, no globals.
-- [ ] `layout_glue.rs` in the binary: bridge Smithay windows → layout input; map `Placement` back.
-- [ ] **Floating windows are excluded from `arrange`** and drawn above tiled windows with per-window raise.
+- [x] `LayoutInput`, `Placement { window, rect, visible, z_hint }`, `LayoutParams`, `ScrollState`.
+- [x] `trait Layout { kind; arrange; neighbor?; command? }` — **pure functions**, no globals.
+- [x] `layout_glue.rs` in the binary: bridge Smithay windows → layout input; map `Placement` back.
+- [x] **Floating windows are excluded from `arrange`** and drawn above tiled windows with per-window raise.
 
-### 2.3 Layouts: `Tile`, `Monocle`, `Floating`
-- [ ] `Tile` — master/stack, `master_count`, `master_ratio`, left/right/top/bottom variants.
-- [ ] `Monocle` — focused fills area; others `visible=false`.
-- [ ] `Floating` — no automatic placement; cascade initial position.
-- [ ] `neighbor()` directional focus for each.
+### 2.3 Layout families (ADR-0004)
+- [x] `LayoutFamily` (`Stack`, `Tile`) + `LayoutKind` modes; `family()`, `modes_in()`, `is_free()`.
+- [x] `Tile` — master/stack, `master_count`, `master_ratio`, left/right/top/bottom variants.
+- [x] `Monocle` — focused fills area; others `visible=false`.
+- [x] `Floating` — no automatic placement; a `floating`-mode space floats every window.
+- [x] `neighbor()` directional focus for each.
 
 ### 2.4 Mixing tiling & floating (`COMPOSITOR.md` §7.3)
-- [ ] Per-window `floating` toggle; un-float re-enters layout after the focused window.
-- [ ] Rules force floating (dialogs, fixed min/max size, transient parent) — wire to §5 later, allow predicates now.
-- [ ] Floating windows: **pin** (all tags) and **always-on-top**.
+- [x] Per-window `floating` toggle; un-float re-enters layout after the focused window.
+- [x] Rules force floating (dialogs, fixed min/max size, transient parent) — pure model now, wired to config in §5.
+- [x] Floating windows: **pin** (all spaces) and **always-on-top**.
 
-### 2.5 Tags (`dwm`/mango semantics)
-- [ ] `view-tag`, `toggle-tag-view`, `view-tags 1+3` (multi-view), `move-to-tag`, `toggle-tag` (on window).
-- [ ] Multiple tags **per window**; `toggle-back` via `TagView.previous`.
-- [ ] Per-output tag views; moving windows/output focus between tags.
+### 2.5 Spaces (`dwm`/mango semantics)
+- [x] `view-space`, `toggle-space-view`, `view-spaces 1+3` (multi-view), `move-to-space`, `toggle-space` (on window).
+- [x] Multiple spaces **per window**; `toggle-back` via `SpaceView.previous`.
+- [x] Per-output space views; moving windows/output focus between spaces.
 
 ### 2.6 Layout params, switching, memory
-- [ ] `cycle-layout`; set layout per tag (bind + IPC later); `Pertag`-style **per-tag layout memory + params restore** (§7.4).
-- [ ] Gaps (inner/outer), border width, focus ring color (static for now).
+- [x] `cycle-layout-mode` + `cycle-layout-family` (two actions); set layout per space; `Pertag`-style **per-space layout memory + params restore** (§7.4).
+- [x] Gaps (inner/outer), border width, focus ring color (`border_color` / `unfocused_border_color`).
 - [ ] Switching layout animates rects (stub animation now; real in Phase 3).
 
 ### 2.7 Interactive move/resize
-- [ ] `Super+drag` move, `Super+right-drag` resize for floating windows.
-- [ ] Tiled window drag → auto-float (default) or reorder (config option, §7.3).
+- [x] `Super+drag` move, `Super+right-drag` resize for floating windows.
+- [x] Tiled window drag → auto-float (default); reorder-in-layout is the config option (§7.3).
 - [ ] Snap-to-edge for floating (basic).
 
 ### 2.8 Tests
-- [ ] Unit tests: golden `Placement` lists per layout for 1..12 windows.
-- [ ] `proptest` invariants: no overlaps (non-floating), all rects inside area, deterministic.
-- [ ] Snapshot tests per layout.
+- [x] Unit tests: golden `Placement` lists per layout for 1..12 windows.
+- [x] `proptest` invariants: no overlaps (non-floating), all rects inside area, deterministic.
+- [x] Snapshot-style golden rect tests per layout.
 
-**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-tag layouts and params are remembered; `cargo test -p crawm layout` green.
+**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crawm layout` green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
 
 ---
 
@@ -188,7 +189,7 @@ are smooth, interruptible, and free of pops.
 - [ ] Redraw machine keeps requesting frames while `is_animating()`; stops when settled.
 - [ ] The frame-clock driver in `src/animation` bridges the primitives ↔ placements/elements.
 
-### 3.3 `Scroller` layout (niri)
+### 3.3 `Scroll` family: `scroll` mode (niri)
 - [ ] Infinite horizontal strip of columns; focused column centered / edge-aligned (`center`, `overspread`).
 - [ ] Per-column width (proportion/fixed), `preset-column-widths`; column display `normal | tabbed`.
 - [ ] Vertical variant; `focus/center` commands; `neighbor()` for left/right/up/down.
@@ -203,13 +204,13 @@ are smooth, interruptible, and free of pops.
 - [ ] Open: alpha, scale, offset.
 - [ ] Close: alpha, scale — **snapshot the last buffer** into a texture after unmap (`COMPOSITOR.md` §9 resize handling).
 - [ ] Move/resize: x/y/w/h; on resize **crop/scale the last buffer** until the client commits.
-- [ ] Tag/space switch: per-output slide of window groups; layout switch: per-window rect.
-- [ ] Scroller view offset; border/focus-ring color blend.
+- [ ] Space switch: per-output slide of window groups; layout switch: per-window rect.
+- [ ] Scroll view offset; border/focus-ring color blend.
 
 ### 3.6 Gesture plumbing (touchpad gestures land in M6)
 - [ ] Gesture values write directly into animation targets 1:1 while fingers are down; hand velocity to a spring on release (§9).
 
-**Exit criteria (phase):** tag/space switches and layout changes are smooth and interruptible with no pops; opening a window in `Scroller` does not disturb existing columns.
+**Exit criteria (phase):** space/space switches and layout changes are smooth and interruptible with no pops; opening a window in the `scroll` mode does not disturb existing columns.
 
 ---
 
@@ -254,7 +255,7 @@ Goal: boot `crawm` from a TTY and use it as the real session on one machine.
 
 ## Phase 5 — Config, rules, IPC (M5) *(~4–6 weeks)*
 
-Goal: a bar can display tags/windows via IPC, config edits apply live, and a bad config
+Goal: a bar can display spaces/windows via IPC, config edits apply live, and a bad config
 never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 
 ### 5.1 `src/config`
@@ -274,30 +275,32 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] **Hotkey overlay** listing active binds.
 
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
-- [ ] Window rules: match `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `tag`, X11-vs-Wayland.
-- [ ] Actions: initial tag, floating, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
-- [ ] Tag rules, layer rules, monitor rules (name/make/model/serial regex), device rules.
+- [ ] Window rules: match `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11-vs-Wayland.
+- [ ] Actions: initial space, floating, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
+- [ ] Space rules, layer rules, monitor rules (name/make/model/serial regex), device rules.
 - [ ] Apply at map time; **re-evaluate on title/app-id change** for rules marked `dynamic`.
 
 ### 5.5 `crawm-ipc` + socket (`COMPOSITOR.md` §14)
 - [ ] Unix socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; export `CRAWM_SOCKET`.
 - [ ] Newline-delimited JSON; request/response + `version` handshake; **versioned schema, additive-only**.
-- [ ] Requests: `version`, `outputs`, `tags`, `windows`, `focused-window`, `layouts`, `action <A>`, `set-layout`, `config reload|validate`, `event-stream`.
+- [ ] Requests: `version`, `outputs`, `spaces`, `windows`, `focused-window`, `layouts`, `action <A>`, `set-layout`, `config reload|validate`, `event-stream`.
+- [ ] `set-layout` takes a **mode** name; a **family** name is accepted as an alias for the family's default mode (ADR-0004). `layouts` reports both families and modes.
+- [ ] **`ext-workspace-v1` projects spaces as "workspaces"**; the socket and protocol never expose `SpaceSet` directly (ADR-0004).
 - [ ] **One `Action` enum** shared by binds and IPC (serialized both ways).
-- [ ] Event stream: `WindowOpened/Closed/Changed/Focused`, `TagViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
+- [ ] Event stream: `WindowOpened/Closed/Changed/Focused`, `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
 - [ ] Robust parsing: unknown event names/fields are skipped, never fatal.
 
 ### 5.6 `crawm-cli`
 - [ ] `get <query>`, `watch <event-stream>`, `dispatch <action>`, `validate`; `--json` machine output.
 
 ### 5.7 Animation config surface
-- [ ] Per-event curves/durations (open, close, move/resize, tag switch, layout switch, overview, focus ring).
+- [ ] Per-event curves/durations (open, close, move/resize, space switch, layout switch, overview, focus ring).
 - [ ] `reduce-motion` config flag **and** IPC toggle (sets all durations to zero).
 
 ### 5.8 Docs
 - [ ] Config reference, IPC reference (for bar authors: waybar/eww modules), default config explained.
 
-**Exit criteria (phase):** a bar shows tags/windows over IPC; config edits (including error cases) apply live without crashes; `Action` names identical between binds and IPC.
+**Exit criteria (phase):** a bar shows spaces/windows over IPC; config edits (including error cases) apply live without crashes; `Action` names identical between binds and IPC.
 
 ---
 
@@ -327,7 +330,7 @@ protocol with real clients. (Matrix: `ROADMAP.md` §4, `COMPOSITOR.md` §12.)
 - [ ] `pointer-constraints`, `relative-pointer`; `text-input-v3` / `input-method-v2`.
 
 ### 6.7 Touchpad gestures
-- [ ] 3-finger horizontal → tag/space switch; 4-finger → overview; **live preview** driven by the animation targets from Phase 3.
+- [ ] 3-finger horizontal → space/space switch; 4-finger → overview; **live preview** driven by the animation targets from Phase 3.
 
 ### 6.8 Ecosystem verification
 - [ ] waybar, fuzzel, swaybg, swaylock/gtklock, swayidle, wl-clipboard, a Qt app, an Electron app.
@@ -341,12 +344,14 @@ protocol with real clients. (Matrix: `ROADMAP.md` §4, `COMPOSITOR.md` §12.)
 
 Goal: every layout in `ROADMAP.md` §3B works; grouping and scratchpads feel native.
 
-### 7.1 More layouts
-- [ ] `Grid`, `Deck`, `Dwindle`/spiral (smart split, preserve, manual split), `Fair` + `VerticalFair`.
-- [ ] `CenterTile`, `VerticalTile`, `RightTile`, `VerticalScroller`, `VerticalGrid`, `VerticalDeck`.
-- [ ] Per-layout params + presets; per-tag memory for every layout.
+### 7.1 More layout modes
+Modes slot into the M2 families (ADR-0004), not a flat list.
+- [ ] `Tile` family: `Grid`, `Deck`, `Dwindle`/spiral (smart split, preserve, manual split), `Fair` + `VerticalFair`, `CenterTile`, `VerticalTile`, `RightTile`.
+- [ ] `Scroll` family: `VerticalScroller`, `VerticalGrid`, `VerticalDeck`.
+- [ ] `Stack` family: `Tabbed`.
+- [ ] Per-mode params + presets; per-space memory for every mode.
 
-### 7.2 Special workspace (mango tag 0)
+### 7.2 Special workspace (mango space 0)
 - [ ] Full **tiling overlay** over the current space with background dim; per-app auto-assign.
 
 ### 7.3 Groups & stacks (cosmic)
@@ -362,7 +367,7 @@ Goal: every layout in `ROADMAP.md` §3B works; grouping and scratchpads feel nat
 - [ ] `WorkspaceMode::{OutputBound, Global}`, vertical/horizontal nav, **wraparound**.
 - [ ] Pinned spaces matched by **EDID**.
 
-**Exit criteria (phase):** all layouts work; grouping, special workspace, and scratchpads behave like natives; per-tag layout memory verified for each.
+**Exit criteria (phase):** all layouts work; grouping, special workspace, and scratchpads behave like natives; per-space layout memory verified for each.
 
 ---
 
@@ -516,10 +521,10 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 | Overview / screencast / gestures | **niri** | zoom grid, PipeWire path, gesture→animation |
 | Mixed tiling/floating + groups | **cosmic-comp** `src/shell/`, `src/state.rs` | id-tree, groups/stacks, orientation, edge-snap |
 | XWayland knobs | **cosmic-comp** | descaling, eavesdropping |
-| Tags + 14 layouts + per-tag params | **mango** (C) | **port the algorithms** (Pertag, special workspace, `mmsg`/`get`/`watch`/`dispatch`) |
+| Spaces + layout families + per-space params | **mango** (C) | **port the algorithms** (Pertag, special workspace, `mmsg`/`get`/`watch`/`dispatch`) |
 | Effects feature set + wallpaper-cached blur | **mango** / `scenefx` (C) | reimplement ideas on GLES |
 | HDR | `franzjeger/cosmic-hdr-reference` (glue MIT; cosmic GPL, smithay MIT) + niri HDR forks (`dividebysandwich`, `losnoco`, GPL-3.0) | atomic KMS colour state, F16 compositing, format-aware 10-bit probe |
-| Tag semantics | **dwl/dwm** (GPL/MIT) | view/toggle/multi-tag rules |
+| Space semantics | **dwl/dwm** (GPL/MIT) | view/toggle/multi-space rules |
 | Layout-as-process | **river** (GPL) | only if you ever want out-of-process layouts |
 
 **Pitfalls to avoid**
@@ -538,7 +543,7 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 ```
 crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
                  · lib target (src/lib.rs) exposes the pure modules only:
-                   src/core       → (ids, geometry, colors, tags)
+                   src/core       → (ids, geometry, colors, spaces)
                    src/config     → core, serde, toml, thiserror
                    src/layout     → core
                    src/animation  → core            (curves; geometry via core)

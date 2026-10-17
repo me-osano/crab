@@ -1,6 +1,6 @@
 # crawm — Compositor design
 
-> Design document and roadmap for a Rust Wayland compositor + window manager that mixes **tag-based layouts** (mango), **scrollable tiling and engineering quality** (niri), and **broad protocol coverage and floating/tiling mixing** (COSMIC).
+> Design document and roadmap for a Rust Wayland compositor + window manager that mixes **space-based layouts** (mango), **scrollable tiling and engineering quality** (niri), and **broad protocol coverage and floating/tiling mixing** (COSMIC).
 >
 > Name: `crawm`. Status: **pre-alpha design**.
 > Notes on upstream projects are from memory; verify against current repos before copying any design decision.
@@ -39,15 +39,15 @@
 
 A compositor that treats **layout as a swappable strategy**, not an identity. Users should be able to:
 
-- Tile (master/stack, grid, deck, monocle) on one tag.
+- Tile or stack (master/stack, grid, deck, monocle) on one space.
 - Scroll (niri-style infinite strip) on another.
-- Float freely on a third, or **mix floating and tiled windows on the same tag**.
-- Switch layout per tag at runtime with a keybind or IPC call, with smooth animation between states.
+- Float freely on a third, or **mix floating and tiled windows on the same space**.
+- Switch layout per space at runtime with a keybind or IPC call, with smooth animation between states.
 
 ### Goals
 
 - Correct, fast, tear-free Wayland compositor on bare metal (DRM/KMS) and nested (winit).
-- Multiple layouts behind one trait; per-tag layout state.
+- Multiple layouts behind one trait; per-space layout state.
 - Modern UX: spring animations, gestures, blur/shadow/rounded corners as optional passes.
 - First-class scripting surface: hot-reloaded config, JSON IPC, event stream.
 - Works with the ecosystem: bars (waybar, ironbar, eww), launchers (fuzzel, rofi-wayland), lockers, screen sharing via portals, notifications.
@@ -68,7 +68,7 @@ A compositor that treats **layout as a swappable strategy**, not an identity. Us
 3. **State is single-owner.** One `State` struct driven by `calloop`; no `Arc<Mutex<_>>` soup. Cross-thread work (screencast, config parsing, asset loading) communicates through channels.
 4. **Everything animatable is a value with a target.** Do not mutate positions directly; set targets and let the animation system interpolate (interruptibly).
 5. **Config is validated, never trusted.** A bad config reload must never crash or lose the current config. Show an error overlay/notification and keep the last good config.
-6. **Make invariants unrepresentable.** Use newtypes (`TagMask`, `OutputId`, `WindowId`), enums for focus targets, and exhaustive matches.
+6. **Make invariants unrepresentable.** Use newtypes (`SpaceSet`, `OutputId`, `WindowId`), enums for focus targets, and exhaustive matches.
 7. **Observable by default.** `tracing` spans around frame, layout, and protocol handlers; an optional debug overlay (frame time, damage, direct-scanout status).
 8. **Modular effects.** Each effect is a render pass behind a feature flag and a config switch, and can be disabled per window rule.
 
@@ -96,7 +96,7 @@ A compositor that treats **layout as a swappable strategy**, not an identity. Us
         ┌───────▼──────────────────────────────────────────────────┐
         │                         State                            │
         │  ┌────────────┐ ┌────────────┐ ┌──────────┐ ┌─────────┐  │
-        │  │  Outputs   │ │ Tags/Space │ │ Windows  │ │  Input  │  │
+        │  │  Outputs   │ │ Spaces │ │ Windows  │ │  Input  │  │
         │  └─────┬──────┘ └─────┬──────┘ └────┬─────┘ └────┬────┘  │
         │        │              │             │            │       │
         │  ┌─────▼──────────────▼─────────────▼────────────▼────┐  │
@@ -117,9 +117,9 @@ A compositor that treats **layout as a swappable strategy**, not an identity. Us
 ### Data flow per frame (simplified)
 
 1. Event arrives (input, client commit, timer, IPC).
-2. Handler mutates `State` (focus, window set, tag membership, layout params).
-3. If layout inputs changed, mark the tag **layout-dirty**.
-4. On the next frame callback for an output: run layout for dirty tags, retarget animations, advance animations to the frame's presentation time, build render elements, submit via backend, then send `frame` callbacks and `wp_presentation` feedback.
+2. Handler mutates `State` (focus, window set, space membership, layout params).
+3. If layout inputs changed, mark the space **layout-dirty**.
+4. On the next frame callback for an output: run layout for dirty spaces, retarget animations, advance animations to the frame's presentation time, build render elements, submit via backend, then send `frame` callbacks and `wp_presentation` feedback.
 
 ---
 
@@ -162,7 +162,7 @@ crawm/
 ├── COMPOSITOR.md               # this file
 ├── src/                        # the compositor: Smithay glue, backends, render, handlers
 │   ├── lib.rs                  # library surface: the pure modules only (reusable, testable)
-│   ├── core/                   # pure data: ids, geometry, tags, window model, no Smithay
+│   ├── core/                   # pure data: ids, geometry, spaces, window model, no Smithay
 │   ├── config/                 # parsing, validation, defaults, schema (pure)
 │   ├── layout/                 # Layout trait + implementations (pure, unit-tested)
 │   └── animation/              # spring/easing curves, animated scalars (pure)
@@ -233,9 +233,9 @@ pub struct WindowId(pub u64);
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct OutputId(pub u32);
 
-/// Bitmask of tags. Up to 32 tags is plenty (mango uses 9).
+/// Bitmask of spaces. Up to 32 spaces is plenty (mango uses 9).
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
-pub struct TagMask(pub u32);
+pub struct SpaceSet(pub u32);
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Rect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
@@ -250,7 +250,7 @@ pub struct Window {
     pub id: WindowId,
     pub app_id: Option<String>,
     pub title: Option<String>,
-    pub tags: TagMask,            // can belong to multiple tags
+    pub spaces: SpaceSet,            // can belong to multiple spaces
     pub floating: bool,           // per-window override
     pub fullscreen: bool,
     pub maximized: bool,
@@ -262,9 +262,9 @@ pub struct Window {
 }
 ```
 
-### Output and tag state
+### Output and space state
 
-Two viable models. **Recommendation: tags per output** (each monitor has its own tag view), as in mango/dwl.
+Two viable models. **Recommendation: spaces per output** (each monitor has its own space view), as in mango/dwl.
 
 ```rust
 pub struct Output {
@@ -273,24 +273,31 @@ pub struct Output {
     pub geometry: Rect,           // logical, after scale/transform
     pub scale: f64,
     pub usable_area: Rect,        // after layer-shell exclusive zones
-    pub view: TagView,            // which tags are visible and how
-    pub tag_states: [TagState; 32],
+    pub view: SpaceView,            // which spaces are visible and how
+    pub space_states: [SpaceState; 32],
 }
 
-pub struct TagView {
-    pub visible: TagMask,         // can show multiple tags at once (union)
-    pub previous: TagMask,        // for "toggle back"
+pub struct SpaceView {
+    pub visible: SpaceSet,         // can show multiple spaces at once (union)
+    pub previous: SpaceSet,        // for "toggle back"
 }
 
-pub struct TagState {
-    pub layout: LayoutKind,       // Tile, Scroller, Monocle, Grid, Deck, Floating...
+pub struct SpaceState {
+    pub layout: LayoutKind,       // a family + a mode (see §7.2)
     pub params: LayoutParams,     // master ratio, master count, gaps, etc.
     pub scroll: ScrollState,      // for scroller: focused column, view offset
     pub focus_history: Vec<WindowId>,
 }
 ```
 
-Rule for **multi-tag view**: when several tags are visible, the layout of the *lowest-numbered visible tag* is used for the combined window set (dwm behavior). Document this clearly; it is the one place where tag models confuse people.
+A space's layout is a **mode inside a family** (ADR-0004): `Stack` (`floating`,
+`monocle`, later `tabbed`), `Tile` (M2 `tile`; later `grid`, `deck`, `dwindle`,
+…), and `Scroll` (M3 `scroll`). Two cycle actions address the two axes:
+`cycle-layout-mode` (within the family) and `cycle-layout-family` (to the next
+family's default mode). Config and IPC name a mode; a family name is an alias for
+that family's default mode.
+
+Rule for **multi-space view**: when several spaces are visible, the layout of the *lowest-numbered visible space* is used for the combined window set (dwm behavior). Document this clearly; it is the one place where space models confuse people.
 
 ### Focus model
 
@@ -339,39 +346,47 @@ pub trait Layout {
 }
 ```
 
-Floating windows are **not** passed to `arrange`; they keep their `float_geometry` and are drawn above tiled windows (with per-window raise on focus). This is what lets one tag mix both.
+Floating windows are **not** passed to `arrange`; they keep their `float_geometry` and are drawn above tiled windows (with per-window raise on focus). This is what lets one space mix both.
 
-### 7.2 Built-in layouts (planned)
+### 7.2 Built-in layouts: families and modes
 
-| Layout | Description | Source of idea |
-|---|---|---|
-| `Tile` | Master/stack, configurable master count and ratio, left/right/top/bottom variants | dwm/mango |
-| `Monocle` | One window fills the area; others hidden | dwm |
-| `Deck` | Master + stack where only the top of the stack is visible | mango/dwl patches |
-| `Grid` | Even grid | mango |
-| `Scroller` | Infinite horizontal strip of columns; focused column centered or edge-aligned | niri |
-| `Spiral/Dwindle` | Recursive splits | bspwm/Hyprland |
-| `Floating` | No automatic placement; cascading initial position | classic stacking |
-| `Tabbed/Stacked groups` (later) | Windows in a group share a rect with a tab bar | COSMIC/i3 |
+Layouts are grouped into **families**, and each family has **modes** (ADR-0004).
+The family is the broad strategy; the mode is a concrete arrangement. A family's
+first mode is its default, and the family name is accepted as an alias for it.
+
+| Family | Mode | Description | Source | MS |
+|---|---|---|---|---|
+| `Stack` | `floating` | No automatic placement; cascading initial position | classic stacking | M2 |
+| `Stack` | `monocle` | One window fills the area; others hidden | dwm | M2 |
+| `Stack` | `tabbed` | Grouped windows share a rect with a tab bar | COSMIC/i3 | M7 |
+| `Tile` | `tile` | Master/stack, master count+ratio, left/right/top/bottom | dwm/mango | M2 |
+| `Tile` | `grid` | Even grid | mango | M7 |
+| `Tile` | `deck` | Master + stack where only the top of the stack is visible | mango/dwl | M7 |
+| `Tile` | `dwindle` | Recursive splits (smart/manual), with preserve | bspwm/Hyprland | M7 |
+| `Tile` | `fair`, `vertical-*` | Fair splits and vertical variants | mango | M7 |
+| `Scroll` | `scroll` | Infinite horizontal strip of columns; focus/center/overspread | niri | M3 |
+| `Scroll` | `vertical-scroll` | Same, on the vertical axis | niri/mango | M7 |
 
 ### 7.3 Mixing tiling and floating
 
 - Each window has `floating: bool`; toggling moves it between the layout's input set and the free set.
+- A space whose layout is the `Stack` family's `floating` mode has **no tiled input** at all: every window on it is placed as floating, whether or not it is individually floated.
 - When un-floating, the window re-enters the layout at a sensible position (after the focused window).
 - Window rules can force floating (dialogs, `app_id` matches, windows with fixed min/max size, transient parents).
-- Floating windows can be **pinned** (visible on all tags) and **always-on-top**.
+- Floating windows can be **pinned** (visible on all spaces) and **always-on-top**.
 - Interactive move/resize with the mouse on a tiled window can either auto-float it (default) or reorder in the layout (config option).
 
 ### 7.4 Layout switching
 
-- Switching the layout of a tag does **not** change window state; it only changes how `arrange` is computed.
+- Switching the layout of a space does **not** change window state; it only changes how `arrange` is computed.
+- Two actions: `cycle-layout-mode` walks the modes **within** the current family; `cycle-layout-family` jumps to the next family's default mode.
 - Animate each window's rect from old to new placement (see [section 9](#9-animation-system)).
-- Remember per-layout params so switching back restores master ratio, scroll offset, etc.
+- Remember per-mode params so switching back restores master ratio, scroll offset, etc.
 
 ### 7.5 Fullscreen, maximized, and special cases
 
 - Fullscreen windows are removed from layout input and placed at the full output geometry above layer-shell `Top` (but below `Overlay`), per protocol expectations.
-- Maximize in a tiled layout means "fill the usable area" without leaving the tag's window ordering.
+- Maximize in a tiled layout means "fill the usable area" without leaving the space's window ordering.
 - Respect client min/max size hints; layouts treat them as soft constraints and clamp placements. Clients that ignore configure sizes need a "clip to rect" fallback.
 
 ### 7.6 Testing layouts
@@ -459,7 +474,7 @@ pub struct Animated<T> {
 - **Interruptible:** retargeting mid-animation keeps current value and velocity (springs make this natural).
 - **Gesture-driven:** touchpad swipe controls the value 1:1 while fingers are down, then hands velocity to a spring on release.
 - **Clock-driven:** animations advance using the frame time passed in; the system reports `is_animating()` so the redraw machine knows whether to keep going.
-- **Per-event curves** configurable: window open/close, window move/resize, tag switch, layout switch, workspace overview, focus ring/border color.
+- **Per-event curves** configurable: window open/close, window move/resize, space switch, layout switch, workspace overview, focus ring/border color.
 - **Reduce-motion switch:** one config flag and one IPC toggle that sets all durations to zero.
 
 ### What gets animated
@@ -469,7 +484,7 @@ pub struct Animated<T> {
 | Window open | alpha, scale, offset |
 | Window close | alpha, scale (render a snapshot texture after the client unmaps) |
 | Move/resize in layout | x, y, w, h (render at animated rect; for resize, crop/scale the last buffer until the client catches up) |
-| Tag switch | per-output horizontal/vertical slide of window groups |
+| Space switch | per-output horizontal/vertical slide of window groups |
 | Layout switch | per-window rect |
 | Scroller | view offset |
 | Border/focus ring | color blend |
@@ -530,7 +545,7 @@ All effects are optional render passes with a performance budget and a kill swit
 
 ### Gestures
 
-- Touchpad: 3-finger horizontal swipe for tag switch, 4-finger for overview (configurable).
+- Touchpad: 3-finger horizontal swipe for space switch, 4-finger for overview (configurable).
 - Touchscreen: edge swipes (later).
 - Gestures write into animation targets directly (see section 9).
 
@@ -566,7 +581,7 @@ Priority: **P0** (needed to boot a usable session), **P1** (needed for a good da
 | `wlr-output-management` | P1 | `wlr-randr`, kanshi |
 | `wlr-output-power-management` | P1 | DPMS control |
 | `ext-foreign-toplevel-list` / `wlr-foreign-toplevel-management` | P1 | Taskbars |
-| `ext-workspace` | P1 | Workspace/tag widgets in bars |
+| `ext-workspace` | P1 | Workspace/space widgets in bars |
 | `xdg-output` | P1 | Output names and logical geometry |
 | `wlr-screencopy` / `ext-image-copy-capture` | P1 | Screenshots, recording |
 | `xdg-desktop-portal` (ScreenCast, Screenshot) | P1 | Browser and OBS screen sharing via PipeWire |
@@ -615,21 +630,21 @@ gaps = 8
 border_width = 2
 focus_follows_mouse = false
 
-[tags]
+[spaces]
 default_layout = "tile"
 
-# Per-tag defaults
-[[tags.tag]]
+# Per-space defaults
+[[spaces.space]]
 index = 1
-layout = "scroller"
+layout = "scroll"
 
-[[tags.tag]]
+[[spaces.space]]
 index = 2
 layout = "tile"
 master_ratio = 0.55
 master_count = 1
 
-[[tags.tag]]
+[[spaces.space]]
 index = 3
 layout = "floating"
 
@@ -639,7 +654,7 @@ spring = { damping = 1.0, stiffness = 800 }
 [animations.window_move]
 spring = { damping = 1.0, stiffness = 1000 }
 
-[animations.tag_switch]
+[animations.space_switch]
 easing = { kind = "ease-out-cubic", duration_ms = 220 }
 
 [effects]
@@ -686,11 +701,12 @@ blur = false
 # Keybinds: chord = action
 [binds]
 "Mod+Return" = { spawn = ["foot"] }
-"Mod+Space" = { cycle_layout = {} }
+"Mod+Space" = { cycle_layout_mode = {} }
+"Mod+Ctrl+Space" = { cycle_layout_family = {} }
 "Mod+F" = { toggle_floating = {} }
-"Mod+Shift+1" = { move_to_tag = 1 }
-"Mod+1" = { view_tag = 1 }
-"Mod+Ctrl+1" = { toggle_tag_view = 1 }
+"Mod+Shift+1" = { move_to_space = 1 }
+"Mod+1" = { view_space = 1 }
+"Mod+Ctrl+1" = { toggle_space_view = 1 }
 "Mod+H" = { focus = "left" }
 "Mod+L" = { focus = "right" }
 "Mod+Shift+Q" = { close_window = {} }
@@ -698,7 +714,7 @@ blur = false
 
 ### 13.4 Window rules
 
-Matching on `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `tag`, X11 vs Wayland. Actions: initial tag, floating, size, position, opacity, blur/shadow/corner overrides, `no-focus`, `pinned`, `always-on-top`, `block-out-from` (screencast privacy), default column width (scroller).
+Matching on `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11 vs Wayland. Actions: initial space, floating, size, position, opacity, blur/shadow/corner overrides, `no-focus`, `pinned`, `always-on-top`, `block-out-from` (screencast privacy), default column width (scroller).
 
 Apply rules **at map time** and **re-evaluate on title/app-id change** for rules marked `dynamic`.
 
@@ -715,16 +731,16 @@ Apply rules **at map time** and **re-evaluate on title/app-id change** for rules
 ### Requests (initial set)
 
 ```
-version | outputs | tags | windows | focused-window | layouts
+version | outputs | spaces | windows | focused-window | layouts
 action <Action>                  # same actions as keybinds
-set-layout --tag N --output X <layout>
+set-layout --space N --output X <layout>
 config reload | validate
 event-stream
 ```
 
 ### Events
 
-`WindowOpened/Closed/Changed/Focused`, `TagViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
+`WindowOpened/Closed/Changed/Focused`, `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
 
 ### Rules
 
@@ -748,7 +764,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 
 ## 16. Outputs, scaling, and color
 
-- Hotplug via udev; output add/remove updates tag views and migrates windows from removed outputs to a fallback output.
+- Hotplug via udev; output add/remove updates space views and migrates windows from removed outputs to a fallback output.
 - Modes: parse `WxH@Hz`, support custom modes later, VRR (adaptive sync) toggle.
 - **Fractional scaling:** use `wp_fractional_scale` + `wp_viewporter`; layout in logical coordinates; round buffer positions to physical pixels consistently to avoid blurry borders.
 - Transform (rotation/flip) support early, since it affects the coordinate pipeline everywhere.
@@ -798,7 +814,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 | Animation curves | Unit tests with deterministic clocks |
 | Config | Parse/validate tests, golden error messages, fuzzing the parser |
 | Protocol handlers | Headless backend plus a test Wayland client (e.g., `wayland-client` based harness) |
-| State machine | Scripted scenarios: open N windows, switch tags, unplug output, assert focus and placements |
+| State machine | Scripted scenarios: open N windows, switch spaces, unplug output, assert focus and placements |
 | Visual regression | Headless render to PNG; compare with tolerance (later) |
 | Real hardware | Manual matrix: AMD, Intel, NVIDIA; multi-monitor; mixed DPI |
 
@@ -851,6 +867,10 @@ Measure continuously; regressions block merges once benchmarks exist.
 
 ## 22. Roadmap
 
+> `ROADMAP.md` §6 is the **authoritative** milestone plan (M0–M9). The sketches below
+> are kept for the design narrative and may lag; where they disagree, `ROADMAP.md`
+> wins.
+
 Each milestone ends with something **runnable and demoable**. Checkboxes are the working task list. Time estimates assume part-time solo work and are rough; treat order as more important than dates.
 
 ### Milestone 0: Foundations (1-2 weeks)
@@ -872,13 +892,13 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] Simple fixed placement (cascade)
 - **Exit criteria:** `foot` and a GTK app run inside the nested compositor, accept input, resize
 
-### Milestone 2: Layout core (2-3 weeks)
+### Milestone 2: Spaces & layout core (3-4 weeks)
 
 - [ ] `Layout` trait, `Placement`, pure `src/layout` module
-- [ ] Layouts: `Tile`, `Monocle`, `Floating`
-- [ ] Per-window `floating` flag; mixed tiled+floating on one tag
-- [ ] Tags: `TagMask`, view tag, move-to-tag, toggle-tag
-- [ ] Layout params: master ratio/count, gaps, cycle layout
+- [ ] Layout families `Stack` (`floating`, `monocle`) + `Tile` (`tile`)
+- [ ] Per-window `floating` flag; mixed tiled+floating on one space
+- [ ] Spaces: `SpaceSet`, view space, move-to-space, toggle-space
+- [ ] Layout params: master ratio/count, gaps; `cycle-layout-mode` / `cycle-layout-family`
 - [ ] Interactive move/resize for floating windows
 - [ ] Unit + property tests for layouts
 - **Exit criteria:** daily workflow of tiling plus floating dialogs works nested
@@ -891,7 +911,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] Hardware cursor plane
 - [ ] VT switching and session pause/resume
 - [ ] `linux-dmabuf`, `viewporter`, `presentation-time`
-- [ ] Output hotplug basics; per-output tag views
+- [ ] Output hotplug basics; per-output space views
 - **Exit criteria:** boot into the compositor from a TTY and use it for real on one machine
 
 ### Milestone 4: Desktop essentials, P0/P1 protocols (4-6 weeks)
@@ -911,20 +931,20 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] TOML config parser with validation and good error messages
 - [ ] Hot reload with atomic apply and error banner
 - [ ] Keybinds (keyboard, mouse, modes), hotkey overlay
-- [ ] Window rules (app-id/title match, floating, tag, size, opacity, focus)
+- [ ] Window rules (app-id/title match, floating, space, size, opacity, focus)
 - [ ] IPC socket, JSON protocol, event stream, `crawm-cli`
 - [ ] Documentation of config and IPC; default config shipped
-- **Exit criteria:** bars can show tags/windows via IPC; config edits apply live
+- **Exit criteria:** bars can show spaces/windows via IPC; config edits apply live
 
 ### Milestone 6: Layout variety, scroller, and animation (4-6 weeks)
 
 - [ ] `src/animation`: spring + easing, interruptible, clock-driven
-- [ ] Animate window open/close/move/resize, tag switch, layout switch
+- [ ] Animate window open/close/move/resize, space switch, layout switch
 - [ ] Layouts: `Scroller` (niri-style), `Grid`, `Deck`, `Spiral`
-- [ ] Per-tag layout memory and params restore
-- [ ] Touchpad gestures (tag switch, scroll) bound to animation targets
+- [ ] Per-space layout memory and params restore
+- [ ] Touchpad gestures (space switch, scroll) bound to animation targets
 - [ ] Reduce-motion switch
-- **Exit criteria:** switching layouts and tags feels smooth and interruptible, with no visual pops
+- **Exit criteria:** switching layouts and spaces feels smooth and interruptible, with no visual pops
 
 ### Milestone 7: Effects (3-5 weeks)
 
@@ -969,7 +989,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - Scripting layer (Rhai/Lua) on top of IPC
 - Embedded XWayland WM if satellite proves insufficient
 - Accessibility: screen reader hooks, high-contrast borders, magnifier
-- Session persistence (restore windows to tags after compositor restart where clients allow it)
+- Session persistence (restore windows to spaces after compositor restart where clients allow it)
 - Plugin API for custom layouts (WASM or dynamic loading) once the `Layout` trait is stable
 
 ### Versioning and stability promises
@@ -984,10 +1004,10 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 **Projects to study**
 
 - **niri**: scrollable tiling, animation system, rendering, IPC, screencast. Rust + Smithay.
-- **MangoWC / mango (`mangowm`)**: tags, many layouts, scenefx effects, plain-text config. C + wlroots.
+- **MangoWC / mango (`mangowm`)**: spaces, many layouts, scenefx effects, plain-text config. C + wlroots.
 - **COSMIC (`cosmic-comp`)**: mixed tiling/floating, protocol breadth, desktop integration. Rust + Smithay.
 - **Smithay `anvil`**: canonical Smithay usage.
-- **dwl / dwm**: tag semantics and minimal layout model.
+- **dwl / dwm**: space semantics and minimal layout model.
 - **Sway / i3**: containers and IPC conventions.
 - **Hyprland**: effects and animation configuration ideas (C++).
 - **labwc / Wayfire**: stacking behavior and plugin architecture references.

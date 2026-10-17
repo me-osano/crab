@@ -46,6 +46,11 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# Property testing for the pure layout/space invariants (TODO §2.8). `fork` and
+# `regex` are off: they pull `rusty-fork`/`tempfile` and `regex-syntax`, which
+# crawm does not need, keeping the dev-dependency tree small.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 # Smithay is pinned to 0.7 (ADR-0002: GLES only, never Vulkan; xwayland in M9).
 # Only the renderer and frontend are unconditional — the backend stacks are
 # enabled by the `backend-*` features below, so a default build does not pull the
@@ -71,6 +76,9 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [features]
 default = ["backend-winit"]

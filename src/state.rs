@@ -6,42 +6,83 @@
 //! Protocol handling is split per protocol under [`crate::handlers`]; input
 //! lives in [`crate::input`] and drawing in [`crate::render`].
 //!
-//! This is binary-only glue, so it may depend on Smithay freely. The
-//! Smithay-free rule applies to `src/lib.rs`'s four modules (`core`, `config`,
-//! `layout`, `animation`), which `scripts/check-boundaries.sh` keeps pure.
+//! The pure model — windows, spaces, layouts, focus — lives in the `crawm`
+//! library ([`crawm::core`], [`crawm::layout`]); this file is the glue that
+//! keeps a Smithay `ToplevelSurface` next to its [`Window`] and applies the
+//! layout. That glue is binary-only, so it may depend on Smithay freely; the
+//! library's four modules stay pure (`scripts/check-boundaries.sh`).
 
+use std::collections::HashSet;
 use std::time::Instant;
 
+use crawm::config::Config;
+use crawm::core::{
+    Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
+    Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
+    Window, WindowId,
+};
 use smithay::input::SeatState;
 use smithay::input::keyboard::KeyboardHandle;
 use smithay::input::pointer::PointerHandle;
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size, Transform};
-use smithay::wayland::compositor::{CompositorClientState, CompositorState};
+use smithay::wayland::compositor::{CompositorClientState, CompositorState, with_states};
 use smithay::wayland::selection::data_device::DataDeviceState;
-use smithay::wayland::shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellState};
+use smithay::wayland::shell::xdg::{
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellState,
+    XdgToplevelSurfaceData,
+};
 use smithay::wayland::shm::ShmState;
 
-/// Size every new toplevel is configured to, in logical pixels (M1 only — real
-/// placement asks the client and lives with the layout engine in M2).
-pub(crate) const TOPLEVEL_SIZE: (i32, i32) = (800, 600);
+use crate::layout_glue;
 
-/// Gap between two cascaded windows, in logical pixels (M1 fixed placement).
-pub(crate) const CASCADE_STEP: i32 = 32;
+/// Size a new toplevel is configured to before the layout first sizes it, in
+/// logical pixels. Floating windows pick their own size instead.
+pub(crate) const DEFAULT_WINDOW_SIZE: (i32, i32) = (800, 600);
 
-/// One managed toplevel and where it sits on screen.
-pub(crate) struct Toplevel {
+/// How much of a window must stay on screen when it is dragged, in pixels.
+const MIN_VISIBLE: f64 = 32.0;
+
+/// One managed toplevel: the protocol object and its pure model.
+pub(crate) struct ManagedWindow {
+    /// The xdg toplevel this describes.
     pub(crate) surface: ToplevelSurface,
+    /// Its place in the space/layout model.
+    pub(crate) window: Window,
     /// Top-left corner in logical compositor coordinates.
     pub(crate) location: Point<i32, Logical>,
-    /// Logical size this window was configured to; M1 placement and hit-testing
-    /// both rely on it until the layout engine lands (M2).
+    /// Logical size the window is drawn at.
     pub(crate) size: Size<i32, Logical>,
+    /// Whether the layout currently shows this window.
+    pub(crate) visible: bool,
     /// Set once the client commits a buffer; unmapped windows are not drawn.
     pub(crate) mapped: bool,
+}
+
+impl ManagedWindow {
+    /// The window's model id.
+    pub(crate) fn id(&self) -> WindowId {
+        self.window.id
+    }
+
+    /// The underlying `wl_surface`.
+    pub(crate) fn wl_surface(&self) -> &WlSurface {
+        self.surface.wl_surface()
+    }
+
+    /// Current rectangle in logical coordinates.
+    pub(crate) fn rect(&self) -> Rect {
+        Rect::new(
+            f64::from(self.location.x),
+            f64::from(self.location.y),
+            f64::from(self.size.w),
+            f64::from(self.size.h),
+        )
+    }
 }
 
 /// One xdg popup (menus, tooltips), resolved to a global position at creation.
@@ -50,6 +91,28 @@ pub(crate) struct Popup {
     pub(crate) location: Point<i32, Logical>,
     pub(crate) size: Size<i32, Logical>,
     pub(crate) mapped: bool,
+}
+
+/// What a pointer grab is doing to a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrabMode {
+    /// Moving the window around.
+    Move,
+    /// Resizing it from its bottom-right corner.
+    Resize,
+}
+
+/// An in-progress interactive move/resize started from a keybind.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Interaction {
+    /// The window being manipulated.
+    pub(crate) id: WindowId,
+    /// Whether this is a move or a resize.
+    pub(crate) mode: GrabMode,
+    /// Where the grab started.
+    pub(crate) grab: Point<f64, Logical>,
+    /// The window's rectangle when the grab started.
+    pub(crate) origin: Rect,
 }
 
 /// Per-client state carried through wayland-server's `ClientData` API.
@@ -75,17 +138,33 @@ pub(crate) struct Crawm {
     pub(crate) keyboard: KeyboardHandle<Self>,
     pub(crate) pointer: PointerHandle<Self>,
     pub(crate) output: Output,
+    /// The loaded configuration.
+    pub(crate) config: Config,
+    /// The pure output/space model for the single nested output.
+    pub(crate) output_state: OutputModel,
+    /// Managed toplevels, in layout order (first = first tile).
+    pub(crate) windows: Vec<ManagedWindow>,
+    /// Popups always draw above every toplevel.
+    pub(crate) popups: Vec<Popup>,
+    /// What currently holds keyboard focus.
+    pub(crate) focus: FocusTarget,
+    /// Most-recently-used focus order, used for stacking and fallback focus.
+    pub(crate) focus_stack: FocusStack,
+    /// Keycodes swallowed by a keybind, so the matching release is swallowed
+    /// too (the M2 hardcoded binds; config binds land in M5).
+    pub(crate) bound_keys: HashSet<u32>,
+    /// An in-progress interactive move/resize, if any.
+    pub(crate) interaction: Option<Interaction>,
+    /// Whether Super is currently held (drives pointer grabs).
+    pub(crate) super_held: bool,
     /// Time of the first frame, used for `wl_surface.frame` timestamps.
     pub(crate) start_time: Instant,
     /// Pointer position in logical compositor coordinates.
     pub(crate) pointer_location: Point<f64, Logical>,
     /// Logical size of the visible area; kept in sync by the backends.
     pub(crate) size: Size<i32, Logical>,
-    /// Managed toplevels, in stacking order (first = bottom).
-    pub(crate) toplevels: Vec<Toplevel>,
-    /// Popups always draw above every toplevel (M1 has no z-ordering beyond
-    /// this).
-    pub(crate) popups: Vec<Popup>,
+    /// Next window id to hand out (never reused, even after closes).
+    next_window_id: u64,
 }
 
 impl Crawm {
@@ -94,7 +173,7 @@ impl Crawm {
     /// The globals registered here (compositor, xdg-shell, shm, data-device,
     /// wl_seat, wl_output) are M1's core set; M3 adds the layer shell and the
     /// protocol breadth from `crawm-protocols`.
-    pub(crate) fn new(display: &DisplayHandle) -> Self {
+    pub(crate) fn new(display: &DisplayHandle, config: &Config) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "crawm");
         // Focus is pointless without a keyboard, and adding it can only fail if
@@ -104,7 +183,7 @@ impl Crawm {
             .expect("failed to add the default keyboard to the seat");
         let pointer = seat.add_pointer();
 
-        // Physical size comes from the backend once it exists; M1 starts at
+        // Physical size comes from the backend once it exists; M2 starts at
         // zero and lets `set_size` correct it on the first resize.
         let output = Output::new(
             "crawm-0".to_owned(),
@@ -117,6 +196,27 @@ impl Crawm {
         );
         output.create_global::<Self>(display);
 
+        // Every space starts with the configured layout and tunables; a space then
+        // remembers its own as the user cycles it (per-space layout memory).
+        let params = LayoutParams {
+            master_count: u32::try_from(config.master_count.max(0)).unwrap_or(0),
+            master_ratio: config.master_ratio,
+            gaps: f64::from(config.gaps),
+            border_width: f64::from(config.border_width),
+            position: TilePosition::Left,
+        };
+        let space_state = SpaceState::new(
+            LayoutKind::from_name(&config.layout).unwrap_or_default(),
+            params,
+        );
+        let output_state = OutputModel::new(
+            OutputId::new(0),
+            "crawm-0",
+            Rect::default(),
+            1.0,
+            space_state,
+        );
+
         Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
@@ -126,17 +226,25 @@ impl Crawm {
             keyboard,
             pointer,
             output,
+            config: config.clone(),
+            output_state,
+            windows: Vec::new(),
+            popups: Vec::new(),
+            focus: FocusTarget::None,
+            focus_stack: FocusStack::new(),
+            bound_keys: HashSet::new(),
+            interaction: None,
+            super_held: false,
             start_time: Instant::now(),
             pointer_location: (0.0, 0.0).into(),
             size: (0, 0).into(),
-            toplevels: Vec::new(),
-            popups: Vec::new(),
+            next_window_id: 1,
         }
     }
 
-    /// Advertises the backend's current size to clients.
+    /// Advertises the backend's current size to clients and re-lays out.
     ///
-    /// M1 keeps the logical size equal to the physical size (the output is
+    /// M2 keeps the logical size equal to the physical size (the output is
     /// `Scale::Integer(1)`); fractional scale arrives with HDR and the render
     /// rework (post-0.1).
     pub(crate) fn set_size(&mut self, physical: Size<i32, Physical>) {
@@ -152,17 +260,54 @@ impl Crawm {
             None,
         );
         self.output.set_preferred(mode);
+        self.output_state.set_geometry(Rect::new(
+            0.0,
+            0.0,
+            f64::from(physical.w),
+            f64::from(physical.h),
+        ));
+        self.relayout();
     }
 
-    /// Adds a newly configured toplevel at its cascaded position.
+    /// Recomputes every window's rectangle for the current view and layout.
+    pub(crate) fn relayout(&mut self) {
+        layout_glue::arrange(self);
+    }
+
+    /// Registers a newly created toplevel with the space/layout model.
+    ///
+    /// A toplevel with a parent is a transient dialog: it floats immediately
+    /// (`COMPOSITOR.md` §7.5). Everything else enters the tiled layout.
     pub(crate) fn add_toplevel(&mut self, surface: ToplevelSurface) {
-        let offset = CASCADE_STEP * self.toplevels.len() as i32;
-        self.toplevels.push(Toplevel {
+        let id = WindowId::new(self.next_window_id);
+        self.next_window_id += 1;
+
+        let spaces = self.output_state.view.visible;
+        let mut window = Window::new(id, spaces);
+        let (title, app_id) = read_toplevel_info(&surface);
+        window.title = title;
+        window.app_id = app_id;
+        window.floating = surface.parent().is_some();
+
+        // Tiled windows get a starting size; floating ones choose their own.
+        surface.with_pending_state(|state| {
+            if !window.floating {
+                state.size = Some(DEFAULT_WINDOW_SIZE.into());
+            }
+        });
+        surface.send_configure();
+
+        self.windows.push(ManagedWindow {
             surface,
-            location: (offset, offset).into(),
-            size: TOPLEVEL_SIZE.into(),
+            window,
+            location: (0, 0).into(),
+            size: DEFAULT_WINDOW_SIZE.into(),
+            visible: false,
             mapped: false,
         });
+
+        self.focus_window(Some(id));
+        self.relayout();
     }
 
     /// Adds a popup at the position its positioner asks for, clamped to the
@@ -194,39 +339,211 @@ impl Crawm {
         });
     }
 
-    /// Marks `surface` mapped once it has committed a real buffer.
-    pub(crate) fn map_surface(&mut self, surface: &WlSurface) {
-        for toplevel in &mut self.toplevels {
-            if !toplevel.mapped && toplevel.surface.wl_surface() == surface {
-                toplevel.mapped = true;
+    /// Handles a surface commit: refresh hints, mark it mapped, and re-lay out
+    /// when something the layout cares about changed.
+    pub(crate) fn on_commit(&mut self, surface: &WlSurface) {
+        let mut relayout = false;
+
+        let (min_size, max_size) = read_size_hints(surface);
+        let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
+        for window in &mut self.windows {
+            if window.wl_surface() != surface {
+                continue;
+            }
+            if window.window.min_size != min_size || window.window.max_size != max_size {
+                window.window.min_size = min_size;
+                window.window.max_size = max_size;
+                relayout = true;
+            }
+            if !window.mapped {
+                window.mapped = true;
+                relayout = true;
+            }
+            // A floating window owns its size; adopt whatever it committed.
+            if window.window.floating && bbox.size.w > 0 && bbox.size.h > 0 {
+                if window.size != bbox.size {
+                    window.size = bbox.size;
+                    relayout = true;
+                }
+                let rect = window.rect();
+                window.window.float_geometry = Some(rect);
             }
         }
+
         for popup in &mut self.popups {
             if !popup.mapped && popup.surface.wl_surface() == surface {
                 popup.mapped = true;
+                relayout = true;
             }
+        }
+
+        if relayout {
+            self.relayout();
         }
     }
 
     /// Drops entries whose client object is gone.
     pub(crate) fn prune_dead(&mut self) {
-        self.toplevels.retain(|toplevel| toplevel.surface.alive());
+        if self.windows.iter().any(|window| !window.surface.alive()) {
+            let dead: Vec<WindowId> = self
+                .windows
+                .iter()
+                .filter(|window| !window.surface.alive())
+                .map(ManagedWindow::id)
+                .collect();
+            self.windows.retain(|window| window.surface.alive());
+            self.forget_windows(&dead);
+        }
         self.popups.retain(|popup| popup.surface.alive());
+    }
+
+    /// Removes the window owning `surface` (from `toplevel_destroyed`).
+    pub(crate) fn remove_window(&mut self, surface: &WlSurface) {
+        let Some(index) = self
+            .windows
+            .iter()
+            .position(|window| window.wl_surface() == surface)
+        else {
+            return;
+        };
+        let id = self.windows[index].window.id;
+        self.windows.remove(index);
+        self.forget_windows(&[id]);
+    }
+
+    /// The id of the window whose toplevel is `surface`.
+    pub(crate) fn window_id_for(&self, surface: &WlSurface) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|window| window.wl_surface() == surface)
+            .map(ManagedWindow::id)
+    }
+
+    /// Re-reads the `xdg_toplevel` title and app id into the window model.
+    pub(crate) fn update_toplevel_info(&mut self, surface: &ToplevelSurface) {
+        let (title, app_id) = read_toplevel_info(surface);
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.wl_surface() == surface.wl_surface())
+        {
+            window.window.title = title;
+            window.window.app_id = app_id;
+        }
+    }
+
+    /// Drops a popup whose toplevel is `surface` (from `popup_destroyed`).
+    pub(crate) fn remove_popup(&mut self, surface: &WlSurface) {
+        self.popups
+            .retain(|popup| popup.surface.wl_surface() != surface);
+    }
+
+    /// Drops `ids` from the focus stack and per-space history and refocuses.
+    fn forget_windows(&mut self, ids: &[WindowId]) {
+        for &id in ids {
+            self.focus_stack.remove(FocusTarget::Window(id));
+            for space in &mut self.output_state.space_states {
+                space.forget(id);
+            }
+        }
+        self.refocus_after_view_change();
+        self.relayout();
     }
 
     /// Top-left corner of the toplevel or popup owning `surface`, if any.
     fn location_of(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
-        if let Some(toplevel) = self
-            .toplevels
+        if let Some(window) = self
+            .windows
             .iter()
-            .find(|toplevel| toplevel.surface.wl_surface() == surface)
+            .find(|window| window.wl_surface() == surface)
         {
-            return Some(toplevel.location);
+            return Some(window.location);
         }
         self.popups
             .iter()
             .find(|popup| popup.surface.wl_surface() == surface)
             .map(|popup| popup.location)
+    }
+
+    /// The managed window with this id.
+    pub(crate) fn window(&self, id: WindowId) -> Option<&ManagedWindow> {
+        self.windows.iter().find(|window| window.window.id == id)
+    }
+
+    /// The managed window with this id, mutably.
+    pub(crate) fn window_mut(&mut self, id: WindowId) -> Option<&mut ManagedWindow> {
+        self.windows
+            .iter_mut()
+            .find(|window| window.window.id == id)
+    }
+
+    /// The focused window id, if the focused window still exists.
+    pub(crate) fn focused_id(&self) -> Option<WindowId> {
+        self.focus.window().filter(|id| self.window(*id).is_some())
+    }
+
+    /// Focuses `id` (or nothing), updating activation and keyboard focus.
+    ///
+    /// Every focus change goes through here (`COMPOSITOR.md` §6) so the
+    /// protocol state, the focus stack, and the space history stay in step.
+    pub(crate) fn focus_window(&mut self, id: Option<WindowId>) {
+        let previous = self.focus;
+        let target = id.map_or(FocusTarget::None, FocusTarget::Window);
+        self.focus = target;
+
+        if let Some(old) = previous.window() {
+            if Some(old) != id {
+                self.set_activated(old, false);
+            }
+        }
+        if let Some(new) = id {
+            self.set_activated(new, true);
+            self.focus_stack.focus(target);
+            if let Some(space) = self.output_state.current_space_state_mut() {
+                space.note_focus(new);
+            }
+        }
+
+        let surface = id.and_then(|id| self.window(id).map(|w| w.surface.wl_surface().clone()));
+        self.keyboard.clone().set_focus(self, surface, 0.into());
+    }
+
+    /// Sets the xdg `activated` state for a window.
+    fn set_activated(&mut self, id: WindowId, activated: bool) {
+        let Some(window) = self.window_mut(id) else {
+            return;
+        };
+        window.surface.with_pending_state(|state| {
+            if activated {
+                state.states.set(xdg_toplevel::State::Activated);
+            } else {
+                state.states.unset(xdg_toplevel::State::Activated);
+            }
+        });
+        window.surface.send_configure();
+    }
+
+    /// The top-most visible window covering `position`.
+    pub(crate) fn window_at(&self, position: Point<f64, Logical>) -> Option<WindowId> {
+        let point = crawm::core::Point::new(position.x, position.y);
+        let hits = |window: &ManagedWindow| {
+            window.mapped && window.visible && window.rect().contains(point)
+        };
+        // Floating windows stack by focus, most recent on top.
+        for target in self.focus_stack.iter() {
+            if let Some(id) = target.window() {
+                if let Some(window) = self.window(id) {
+                    if window.window.floating && hits(window) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        self.windows
+            .iter()
+            .rev()
+            .find(|window| hits(window))
+            .map(ManagedWindow::id)
     }
 
     /// Returns the top-most mapped surface covering `position`, with the
@@ -249,18 +566,359 @@ impl Crawm {
                 return Some((popup.surface.wl_surface().clone(), popup.location));
             }
         }
-        for toplevel in self.toplevels.iter().rev() {
-            if toplevel.mapped && hit(toplevel.location, toplevel.size) {
-                return Some((toplevel.surface.wl_surface().clone(), toplevel.location));
-            }
-        }
-        None
+        let id = self.window_at(position)?;
+        let window = self.window(id)?;
+        Some((window.wl_surface().clone(), window.location))
     }
 
-    /// Gives keyboard focus to the surface under `position` (click-to-focus).
+    /// Focuses the window under `position` (click-to-focus).
     pub(crate) fn focus_at(&mut self, position: Point<f64, Logical>) {
-        let focus = self.surface_under(position).map(|(surface, _)| surface);
-        self.keyboard.clone().set_focus(self, focus, 0.into());
+        if let Some(id) = self.window_at(position) {
+            self.focus_window(Some(id));
+        } else if self.surface_under(position).is_none() {
+            // Clicking empty space clears focus; clicking a popup does not.
+            self.focus_window(None);
+        }
+    }
+
+    /// Focuses the next/previous visible window in list order.
+    pub(crate) fn focus_cycle(&mut self, forward: bool) {
+        let view = self.output_state.view.visible;
+        let ids: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|window| window.mapped && window.window.is_on(view))
+            .map(ManagedWindow::id)
+            .collect();
+        if ids.is_empty() {
+            self.focus_window(None);
+            return;
+        }
+        let index = self
+            .focused_id()
+            .and_then(|id| ids.iter().position(|&x| x == id));
+        let next = match index {
+            Some(i) if forward => ids[(i + 1) % ids.len()],
+            Some(i) => ids[(i + ids.len() - 1) % ids.len()],
+            None => ids[0],
+        };
+        self.focus_window(Some(next));
+        self.relayout();
+    }
+
+    /// Directional focus within the current layout (`MOD+arrow`).
+    pub(crate) fn focus_direction(&mut self, direction: Direction) {
+        let Some(current) = self.focused_id() else {
+            return;
+        };
+        if let Some(next) = layout_glue::directional_target(self, current, direction) {
+            self.focus_window(Some(next));
+            self.relayout();
+        }
+    }
+
+    /// Views a single space by 1-based index.
+    pub(crate) fn view_space(&mut self, index: u8) {
+        let Some(mask) = SpaceSet::from_index(index) else {
+            return;
+        };
+        self.output_state.view_space(mask);
+        self.refocus_after_view_change();
+        self.relayout();
+    }
+
+    /// Toggles a space in the view (`MOD+ctrl+N`).
+    pub(crate) fn toggle_view_space(&mut self, index: u8) {
+        let Some(mask) = SpaceSet::from_index(index) else {
+            return;
+        };
+        self.output_state.toggle_view(mask);
+        self.refocus_after_view_change();
+        self.relayout();
+    }
+
+    /// Swaps to the previously-viewed space set.
+    pub(crate) fn toggle_back(&mut self) {
+        self.output_state.toggle_back();
+        self.refocus_after_view_change();
+        self.relayout();
+    }
+
+    /// Moves the focused window to a space by 1-based index.
+    pub(crate) fn move_to_space(&mut self, index: u8) {
+        let (Some(mask), Some(id)) = (SpaceSet::from_index(index), self.focused_id()) else {
+            return;
+        };
+        if let Some(window) = self.window_mut(id) {
+            window.window.move_to_space(mask);
+        }
+        self.refocus_after_view_change();
+        self.relayout();
+    }
+
+    /// Toggles a space on the focused window (`MOD+shift+ctrl+N`).
+    pub(crate) fn toggle_space(&mut self, index: u8) {
+        let (Some(mask), Some(id)) = (SpaceSet::from_index(index), self.focused_id()) else {
+            return;
+        };
+        if let Some(window) = self.window_mut(id) {
+            window.window.toggle_space(mask);
+        }
+        self.refocus_after_view_change();
+        self.relayout();
+    }
+
+    /// Re-focuses something sensible after the visible set changed.
+    ///
+    /// Prefers the space's own focus history, then any mapped window on the view;
+    /// clears focus if the new view is empty.
+    fn refocus_after_view_change(&mut self) {
+        let view = self.output_state.view.visible;
+        let on_screen = |window: &ManagedWindow| window.mapped && window.window.is_on(view);
+        if self
+            .focused_id()
+            .and_then(|id| self.window(id))
+            .is_some_and(on_screen)
+        {
+            return;
+        }
+        let next = self
+            .output_state
+            .current_space_state()
+            .and_then(|space| {
+                space
+                    .focus_history
+                    .iter()
+                    .copied()
+                    .find(|id| self.window(*id).is_some_and(on_screen))
+            })
+            .or_else(|| {
+                self.windows
+                    .iter()
+                    .find(|w| on_screen(w))
+                    .map(ManagedWindow::id)
+            });
+        self.focus_window(next);
+    }
+
+    /// Cycles the current space to the next mode within its layout family.
+    pub(crate) fn cycle_layout_mode(&mut self) {
+        if let Some(space) = self.output_state.current_space_state_mut() {
+            space.layout = space.layout.next_mode();
+        }
+        self.relayout();
+    }
+
+    /// Cycles the current space to the next layout family's default mode.
+    pub(crate) fn cycle_layout_family(&mut self) {
+        if let Some(space) = self.output_state.current_space_state_mut() {
+            space.layout = space.layout.next_family();
+        }
+        self.relayout();
+    }
+
+    /// Applies a layout command (master ratio/count) to the current space.
+    pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
+        if let Some(space) = self.output_state.current_space_state_mut() {
+            command.apply(&mut space.params);
+        }
+        self.relayout();
+    }
+
+    /// Flips the focused window between tiled and floating.
+    pub(crate) fn toggle_floating(&mut self) {
+        let Some(id) = self.focused_id() else {
+            return;
+        };
+        let Some(rect) = self.window(id).map(ManagedWindow::rect) else {
+            return;
+        };
+        let now_floating = self
+            .window_mut(id)
+            .is_some_and(|window| window.window.toggle_floating(rect));
+        if !now_floating {
+            // Re-enter the layout right after the previously focused tile.
+            if let Some(index) = self
+                .windows
+                .iter()
+                .position(|window| window.window.id == id)
+            {
+                let mut window = self.windows.remove(index);
+                let insert = self.tiled_insert_index(id).min(self.windows.len());
+                window.window.floating = false;
+                self.windows.insert(insert, window);
+            }
+        }
+        self.relayout();
+    }
+
+    /// Where an un-floated window should re-enter the tiling order.
+    fn tiled_insert_index(&self, id: WindowId) -> usize {
+        for target in self.focus_stack.iter() {
+            if let Some(other) = target.window() {
+                if other != id {
+                    if let Some(position) = self
+                        .windows
+                        .iter()
+                        .position(|w| w.window.id == other && w.window.is_tiled())
+                    {
+                        return position + 1;
+                    }
+                }
+            }
+        }
+        self.windows.len()
+    }
+
+    /// Flips fullscreen for the focused window.
+    pub(crate) fn toggle_fullscreen(&mut self) {
+        let Some(id) = self.focused_id() else {
+            return;
+        };
+        let to = self.window(id).is_some_and(|w| !w.window.fullscreen);
+        self.set_fullscreen(id, to);
+        self.relayout();
+    }
+
+    /// Sets the fullscreen state of a window (also used by the client request).
+    pub(crate) fn set_fullscreen(&mut self, id: WindowId, fullscreen: bool) {
+        let Some(window) = self.window_mut(id) else {
+            return;
+        };
+        if window.window.fullscreen == fullscreen {
+            return;
+        }
+        window.window.fullscreen = fullscreen;
+        window.surface.with_pending_state(|state| {
+            if fullscreen {
+                state.states.set(xdg_toplevel::State::Fullscreen);
+            } else {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+            }
+        });
+        window.surface.send_configure();
+    }
+
+    /// Sets the maximized state of a window.
+    pub(crate) fn set_maximized(&mut self, id: WindowId, maximized: bool) {
+        let Some(window) = self.window_mut(id) else {
+            return;
+        };
+        if window.window.maximized == maximized {
+            return;
+        }
+        window.window.maximized = maximized;
+        window.surface.with_pending_state(|state| {
+            if maximized {
+                state.states.set(xdg_toplevel::State::Maximized);
+            } else {
+                state.states.unset(xdg_toplevel::State::Maximized);
+            }
+        });
+        window.surface.send_configure();
+    }
+
+    /// Asks the focused window to close.
+    pub(crate) fn close_focused(&mut self) {
+        if let Some(id) = self.focused_id() {
+            if let Some(window) = self.window(id) {
+                window.surface.send_close();
+            }
+        }
+    }
+
+    /// Starts an interactive move/resize of the window under the pointer.
+    ///
+    /// Returns whether the grab was taken (so the caller can swallow the button
+    /// that triggered it). A tiled window is floated first, which is what makes
+    /// `MOD+drag` work on tiled windows.
+    pub(crate) fn begin_interaction(
+        &mut self,
+        mode: GrabMode,
+        position: Point<f64, Logical>,
+    ) -> bool {
+        let Some(id) = self.window_at(position) else {
+            return false;
+        };
+        let rect = self.window(id).map(ManagedWindow::rect).unwrap_or_default();
+        if let Some(window) = self.window_mut(id) {
+            if window.window.is_tiled() {
+                window.window.set_floating(true, rect);
+            }
+        }
+        self.focus_window(Some(id));
+        self.interaction = Some(Interaction {
+            id,
+            mode,
+            grab: position,
+            origin: rect,
+        });
+        self.relayout();
+        true
+    }
+
+    /// Updates an in-progress interaction for a new pointer position.
+    ///
+    /// Returns whether a grab is active (so motion is not forwarded).
+    pub(crate) fn update_interaction(&mut self, position: Point<f64, Logical>) -> bool {
+        let Some(interaction) = self.interaction else {
+            return false;
+        };
+        let dx = position.x - interaction.grab.x;
+        let dy = position.y - interaction.grab.y;
+        let origin = interaction.origin;
+        let (rect, resize) = match interaction.mode {
+            GrabMode::Move => (origin.translated(dx, dy), false),
+            GrabMode::Resize => (
+                Rect::new(
+                    origin.x,
+                    origin.y,
+                    (origin.w + dx).max(1.0),
+                    (origin.h + dy).max(1.0),
+                ),
+                true,
+            ),
+        };
+        let rect = self.clamp_rect(rect);
+
+        if let Some(window) = self.window_mut(interaction.id) {
+            window.window.float_geometry = Some(rect);
+            window.location = point_i32(rect.x, rect.y);
+            if resize {
+                let size = size_i32(rect.w, rect.h);
+                if window.size != size {
+                    window.size = size;
+                    window
+                        .surface
+                        .with_pending_state(|state| state.size = Some(size));
+                    window.surface.send_configure();
+                }
+            }
+        }
+        self.relayout();
+        true
+    }
+
+    /// Ends an in-progress interaction, if any. Returns whether one was active.
+    pub(crate) fn end_interaction(&mut self) -> bool {
+        let active = self.interaction.is_some();
+        if active {
+            self.interaction = None;
+            self.relayout();
+        }
+        active
+    }
+
+    /// Keeps a dragged/resized window partly on screen.
+    fn clamp_rect(&self, rect: Rect) -> Rect {
+        let area = self.output_state.usable_area;
+        let x = rect
+            .x
+            .clamp(area.x, (area.right() - MIN_VISIBLE).max(area.x));
+        let y = rect
+            .y
+            .clamp(area.y, (area.bottom() - MIN_VISIBLE).max(area.y));
+        Rect::new(x, y, rect.w, rect.h)
     }
 
     /// Clamps `position` into the visible area.
@@ -269,4 +927,43 @@ impl Crawm {
         let max_y = f64::from(self.size.h.max(1) - 1);
         (position.x.clamp(0.0, max_x), position.y.clamp(0.0, max_y)).into()
     }
+}
+
+/// Rounds a logical x/y pair to a compositor-space point.
+pub(crate) fn point_i32(x: f64, y: f64) -> Point<i32, Logical> {
+    let point: Point<i32, Logical> = (x.round() as i32, y.round() as i32).into();
+    point
+}
+
+/// Rounds a logical size to compositor-space, keeping at least one pixel.
+pub(crate) fn size_i32(w: f64, h: f64) -> Size<i32, Logical> {
+    let size: Size<i32, Logical> = ((w.round() as i32).max(1), (h.round() as i32).max(1)).into();
+    size
+}
+
+/// The `xdg_toplevel` title and app id, once the client has set them.
+fn read_toplevel_info(surface: &ToplevelSurface) -> (Option<String>, Option<String>) {
+    with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .map(|data| {
+                let attributes = data.lock().unwrap();
+                (attributes.title.clone(), attributes.app_id.clone())
+            })
+            .unwrap_or((None, None))
+    })
+}
+
+/// The client's min/max size hints, as logical sizes (`None` = unconstrained).
+fn read_size_hints(surface: &WlSurface) -> (Option<CoreSize>, Option<CoreSize>) {
+    with_states(surface, |states| {
+        let mut lookup = states.cached_state.get::<SurfaceCachedState>();
+        let cached = lookup.current();
+        let convert = |size: Size<i32, Logical>| {
+            (size.w > 0 || size.h > 0)
+                .then(|| CoreSize::new(f64::from(size.w.max(0)), f64::from(size.h.max(0))))
+        };
+        (convert(cached.min_size), convert(cached.max_size))
+    })
 }

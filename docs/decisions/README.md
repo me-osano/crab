@@ -9,10 +9,10 @@ a new ADR.
 | [0001](0001-license.md) | License: GPL-3.0-or-later | Accepted | 2026-10-16 |
 | [0002](0002-renderer-and-hdr.md) | Renderer (GLES) and HDR strategy | Accepted | 2026-10-16 |
 | [0003](0003-config-format.md) | Configuration format: TOML | Accepted | 2026-10-16 |
+| [0004](0004-space-model.md) | Space model: numbered spaces + layout families | Accepted | 2026-10-17 |
 
 **Open / next**
 
-- 0004 — Space model (tags vs named workspaces vs unified "space")
 - 0005 — IPC schema (niri-style vs fresh; `ext-workspace` as primary bar interface)
 - 0006 — XWayland (`xwayland-satellite` vs in-process)
 - 0007 — Effects (own GLES implementation vs a scenefx-like crate)

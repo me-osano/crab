@@ -25,7 +25,7 @@ the IPC types stay a crate (shared with the CLI and with third-party tools):
         │    src/config     → core, serde, toml, thiserror                  │
         │    src/layout     → core                                          │
         │    src/animation  → core                                          │
-        │    src/core       → (ids, geometry, colors, tags, window model)   │
+        │    src/core       → (ids, geometry, colors, spaces, window model) │
         └──────────────────────────────┬─────────────────────────────────────┘
                                        │ depends on
                                        ▼
