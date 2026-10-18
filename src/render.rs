@@ -111,16 +111,20 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             &mut surfaces,
         );
 
-        // Popups last: they draw over every toplevel.
-        for popup in state.popups.iter().filter(|popup| popup.mapped) {
-            surfaces.extend(render_elements_from_surface_tree(
-                &mut *renderer,
-                popup.surface.wl_surface(),
-                popup.location.to_physical(1),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
+        // Popups last: they draw over every toplevel. Each popup belongs to a
+        // toplevel (`PopupManager` tracks the tree), so they are gathered per
+        // window; a popup without a buffer yet yields no elements.
+        for window in state.windows.iter().filter(|w| w.mapped && w.visible) {
+            for (popup, offset) in crate::state::popup_offsets(window) {
+                surfaces.extend(render_elements_from_surface_tree(
+                    &mut *renderer,
+                    popup.wl_surface(),
+                    (window.location + offset).to_physical(1),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
         }
 
         // And the cursor on top of all of it. A client's own cursor surface and
@@ -215,9 +219,9 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             .filter(|window| window.mapped && window.visible)
         {
             send_frame_callbacks(window.wl_surface(), time);
-        }
-        for popup in state.popups.iter().filter(|popup| popup.mapped) {
-            send_frame_callbacks(popup.surface.wl_surface(), time);
+            for (popup, _) in crate::state::popup_offsets(window) {
+                send_frame_callbacks(popup.wl_surface(), time);
+            }
         }
         // A client's cursor surface animates like any other (busy spinners).
         if let CursorImageStatus::Surface(surface) = &state.cursor_image {

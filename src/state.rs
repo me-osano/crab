@@ -21,6 +21,8 @@ use crawm::core::{
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
     Window, WindowId,
 };
+use smithay::desktop::utils::under_from_surface_tree;
+use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
 use smithay::input::SeatState;
 use smithay::input::keyboard::KeyboardHandle;
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
@@ -85,14 +87,6 @@ impl ManagedWindow {
     }
 }
 
-/// One xdg popup (menus, tooltips), resolved to a global position at creation.
-pub(crate) struct Popup {
-    pub(crate) surface: PopupSurface,
-    pub(crate) location: Point<i32, Logical>,
-    pub(crate) size: Size<i32, Logical>,
-    pub(crate) mapped: bool,
-}
-
 /// What a pointer grab is doing to a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GrabMode {
@@ -144,8 +138,12 @@ pub(crate) struct Crawm {
     pub(crate) output_state: OutputModel,
     /// Managed toplevels, in layout order (first = first tile).
     pub(crate) windows: Vec<ManagedWindow>,
-    /// Popups always draw above every toplevel.
-    pub(crate) popups: Vec<Popup>,
+    /// The xdg popup trees, one per toplevel, plus their grabs.
+    ///
+    /// Smithay's manager is the source of truth: it descends each popup's
+    /// parent chain, so popups of popups (submenus) resolve correctly, and
+    /// keeps the `xdg_popup.grab` state that input is redirected through.
+    pub(crate) popup_manager: PopupManager,
     /// What currently holds keyboard focus.
     pub(crate) focus: FocusTarget,
     /// Most-recently-used focus order, used for stacking and fallback focus.
@@ -236,7 +234,7 @@ impl Crawm {
             config: config.clone(),
             output_state,
             windows: Vec::new(),
-            popups: Vec::new(),
+            popup_manager: PopupManager::default(),
             focus: FocusTarget::None,
             focus_stack: FocusStack::new(),
             bound_keys: HashSet::new(),
@@ -319,33 +317,68 @@ impl Crawm {
         self.relayout();
     }
 
-    /// Adds a popup at the position its positioner asks for, clamped to the
-    /// output, and sends the initial configure so it can map.
+    /// Places a new popup: computes the geometry its positioner asks for
+    /// (clamped to the output), hands it to the [`PopupManager`] so its tree
+    /// and grabs are tracked, and sends the initial configure so it can map.
     pub(crate) fn add_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
-        let parent_location = surface
-            .get_parent_surface()
-            .and_then(|parent| self.location_of(&parent))
-            .unwrap_or_else(|| (0, 0).into());
+        let geometry = self.popup_geometry(&surface, positioner);
+        tracing::trace!(?geometry, "placed a new popup");
+        surface.with_pending_state(|state| {
+            state.positioner = positioner;
+            state.geometry = geometry;
+        });
 
-        // `get_geometry` is relative to the parent's window geometry; the
-        // output expressed in that same space is the constraint target.
-        let geometry = if self.size.w > 0 && self.size.h > 0 {
-            let target = Rectangle::new((-parent_location.x, -parent_location.y).into(), self.size);
-            positioner.get_unconstrained_geometry(target)
-        } else {
-            positioner.get_geometry()
-        };
-
+        if let Err(err) = self
+            .popup_manager
+            .track_popup(PopupKind::Xdg(surface.clone()))
+        {
+            tracing::debug!(?err, "failed to track a new popup");
+        }
         if let Err(err) = surface.send_configure() {
             tracing::debug!(?err, "failed to configure a new popup");
         }
+    }
 
-        self.popups.push(Popup {
-            surface,
-            location: parent_location + geometry.loc,
-            size: geometry.size,
-            mapped: false,
+    /// Replaces the geometry a popup was placed with, from a fresh positioner
+    /// (an `xdg_popup.reposition` request), and acknowledges the token.
+    pub(crate) fn reposition_popup(
+        &mut self,
+        surface: &PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
+        let geometry = self.popup_geometry(surface, positioner);
+        tracing::trace!(?geometry, "re-placed a popup");
+        surface.with_pending_state(|state| {
+            state.positioner = positioner;
+            state.geometry = geometry;
         });
+        surface.send_repositioned(token);
+    }
+
+    /// The geometry a positioner asks for, after constraint adjustment against
+    /// the output.
+    ///
+    /// [`PositionerState::get_unconstrained_geometry`] works in the parent's
+    /// *window geometry* space, so the output is translated into that space
+    /// first; a parent we do not track (or an output with no size yet) falls
+    /// back to the unconstrained placement.
+    fn popup_geometry(
+        &self,
+        surface: &PopupSurface,
+        positioner: PositionerState,
+    ) -> Rectangle<i32, Logical> {
+        let origin = surface
+            .get_parent_surface()
+            .and_then(|parent| self.window_geometry_origin(&parent));
+        match origin {
+            Some(origin) if self.size.w > 0 && self.size.h > 0 => positioner
+                .get_unconstrained_geometry(Rectangle::new(
+                    (-origin.x, -origin.y).into(),
+                    self.size,
+                )),
+            _ => positioner.get_geometry(),
+        }
     }
 
     /// Handles a surface commit: refresh hints, mark it mapped, and re-lay out
@@ -379,12 +412,9 @@ impl Crawm {
             }
         }
 
-        for popup in &mut self.popups {
-            if !popup.mapped && popup.surface.wl_surface() == surface {
-                popup.mapped = true;
-                relayout = true;
-            }
-        }
+        // Popups change trees and map through the manager (it needs every
+        // commit to move an unmapped popup into its tree).
+        self.popup_manager.commit(surface);
 
         if relayout {
             self.relayout();
@@ -403,7 +433,7 @@ impl Crawm {
             self.windows.retain(|window| window.surface.alive());
             self.forget_windows(&dead);
         }
-        self.popups.retain(|popup| popup.surface.alive());
+        self.popup_manager.cleanup();
     }
 
     /// Removes the window owning `surface` (from `toplevel_destroyed`).
@@ -441,12 +471,6 @@ impl Crawm {
         }
     }
 
-    /// Drops a popup whose toplevel is `surface` (from `popup_destroyed`).
-    pub(crate) fn remove_popup(&mut self, surface: &WlSurface) {
-        self.popups
-            .retain(|popup| popup.surface.wl_surface() != surface);
-    }
-
     /// Drops `ids` from the focus stack and per-space history and refocuses.
     fn forget_windows(&mut self, ids: &[WindowId]) {
         for &id in ids {
@@ -459,19 +483,31 @@ impl Crawm {
         self.relayout();
     }
 
-    /// Top-left corner of the toplevel or popup owning `surface`, if any.
-    fn location_of(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
+    /// The origin of the *window geometry* of the toplevel or popup owning
+    /// `surface`, in output coordinates, if we track it.
+    ///
+    /// Popups are positioned against their parent's window geometry (the
+    /// rectangle set with `xdg_surface.set_window_geometry`), while the layout
+    /// places windows by their surface origin, so the two differ by whatever
+    /// client-side decorations the client reports.
+    fn window_geometry_origin(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
         if let Some(window) = self
             .windows
             .iter()
             .find(|window| window.wl_surface() == surface)
         {
-            return Some(window.location);
+            return Some(window.location + surface_geometry_loc(surface));
         }
-        self.popups
-            .iter()
-            .find(|popup| popup.surface.wl_surface() == surface)
-            .map(|popup| popup.location)
+        for window in &self.windows {
+            for (popup, offset) in popup_offsets(window) {
+                if popup.wl_surface() == surface {
+                    // `offset` is the popup's surface origin; its geometry
+                    // origin is that plus whatever the popup itself reports.
+                    return Some(window.location + offset + popup.geometry().loc);
+                }
+            }
+        }
+        None
     }
 
     /// The managed window with this id.
@@ -561,18 +597,20 @@ impl Crawm {
         &self,
         position: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<i32, Logical>)> {
-        let (x, y) = (position.x.floor(), position.y.floor());
-        let hit = |location: Point<i32, Logical>, size: Size<i32, Logical>| {
-            x >= f64::from(location.x)
-                && y >= f64::from(location.y)
-                && x < f64::from(location.x + size.w)
-                && y < f64::from(location.y + size.h)
-        };
-
-        // Popups draw above toplevels (see `Crawm::popups`).
-        for popup in self.popups.iter().rev() {
-            if popup.mapped && hit(popup.location, popup.size) {
-                return Some((popup.surface.wl_surface().clone(), popup.location));
+        // A popup floats above every toplevel, so its tree gets first refusal:
+        // this is what keeps the pointer on an open menu (and lets its grab see
+        // that the pointer is still on the right client).
+        for window in self.windows.iter().rev().filter(|w| w.mapped && w.visible) {
+            for (popup, offset) in popup_offsets(window) {
+                let origin = window.location + offset;
+                if let Some((surface, location)) = under_from_surface_tree(
+                    popup.wl_surface(),
+                    position - origin.to_f64(),
+                    (0, 0),
+                    WindowSurfaceType::ALL,
+                ) {
+                    return Some((surface, origin + location));
+                }
             }
         }
         let id = self.window_at(position)?;
@@ -948,6 +986,36 @@ pub(crate) fn point_i32(x: f64, y: f64) -> Point<i32, Logical> {
 pub(crate) fn size_i32(w: f64, h: f64) -> Size<i32, Logical> {
     let size: Size<i32, Logical> = ((w.round() as i32).max(1), (h.round() as i32).max(1)).into();
     size
+}
+
+/// Every popup hanging off `window`, with the popup's *surface* origin relative
+/// to the top-left of the window's surface.
+///
+/// Popups are placed against their parent's window geometry, which clients inset
+/// from the surface by their decorations (and their own geometry, for a popup),
+/// so the offset has to add the parent's inset and subtract the popup's:
+/// `parent_geometry + location - popup_geometry`, exactly how Smithay's own
+/// `Window` element computes it.
+pub(crate) fn popup_offsets(
+    window: &ManagedWindow,
+) -> impl Iterator<Item = (PopupKind, Point<i32, Logical>)> {
+    let parent = surface_geometry_loc(window.wl_surface());
+    PopupManager::popups_for_surface(window.wl_surface()).map(move |(popup, location)| {
+        let offset = parent + location - popup.geometry().loc;
+        (popup, offset)
+    })
+}
+
+/// `xdg_surface.set_window_geometry`'s origin, or the surface origin if unset.
+fn surface_geometry_loc(surface: &WlSurface) -> Point<i32, Logical> {
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceCachedState>()
+            .current()
+            .geometry
+            .map_or((0, 0).into(), |geometry| geometry.loc)
+    })
 }
 
 /// The `xdg_toplevel` title and app id, once the client has set them.

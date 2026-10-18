@@ -5,7 +5,11 @@
 //! destroying a toplevel is a layout change rather than a bookkeeping one.
 
 use smithay::delegate_xdg_shell;
+use smithay::desktop::{PopupKeyboardGrab, PopupKind, PopupPointerGrab, find_popup_root_surface};
+use smithay::input::Seat;
+use smithay::input::pointer::Focus;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::reexports::wayland_server::Resource as _;
 use smithay::reexports::wayland_server::protocol::wl_output;
 use smithay::reexports::wayland_server::protocol::wl_seat;
 use smithay::reexports::wayland_server::protocol::wl_surface;
@@ -31,18 +35,61 @@ impl XdgShellHandler for Crawm {
         self.add_popup(surface, positioner);
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO(M3): implement popup grabs so menus dismiss on an outside click.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let popup = PopupKind::Xdg(surface);
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            tracing::debug!("ignored a popup grab on a seat we do not own");
+            return;
+        };
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            return;
+        };
+
+        // xdg-shell lets the compositor refuse a grab, and a popup grab takes
+        // the keyboard: deny one from a client that does not hold it, so popups
+        // cannot steal focus. (With nothing focused there is nothing to steal.)
+        let popup_client = root.client();
+        if let Some(focused) = self.keyboard.current_focus() {
+            if focused.client() != popup_client {
+                tracing::debug!("denied a popup grab that would steal focus");
+                return;
+            }
+        }
+
+        // A menu belongs to the window that opened it: focus it, so the popup's
+        // keyboard grab starts from the right client (`COMPOSITOR.md` §7.5).
+        if let Some(id) = self.window_id_for(&root) {
+            self.focus_window(Some(id));
+        }
+
+        let grab = match self.popup_manager.grab_popup(root, popup, &seat, serial) {
+            Ok(grab) => grab,
+            Err(err) => {
+                tracing::debug!(?err, "denied a popup grab");
+                return;
+            }
+        };
+
+        // The grab dismisses the popup on an outside click and keeps the
+        // keyboard on the topmost menu until it ends (the xdg-shell defaults).
+        tracing::trace!("granted a popup grab");
+        if let Some(keyboard) = seat.get_keyboard() {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
     }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
-        // TODO(M3): re-place reactive popups on `xdg_popup.reposition`, then
-        // acknowledge with `send_repositioned(token)`.
+        // The client moved its anchor (a window moved under an open menu, or a
+        // submenu flipped): re-place it and confirm with the token.
+        self.reposition_popup(&surface, positioner, token);
     }
 
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
@@ -111,10 +158,6 @@ impl XdgShellHandler for Crawm {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.remove_window(surface.wl_surface());
-    }
-
-    fn popup_destroyed(&mut self, surface: PopupSurface) {
-        self.remove_popup(surface.wl_surface());
     }
 
     fn title_changed(&mut self, surface: ToplevelSurface) {

@@ -451,7 +451,9 @@ supersede `COMPOSITOR.md` §22 where they differ.
 ### M1 — First windows *(2–3 weeks)*
 - [x] Winit backend + `calloop` event loop (single-owner `State`).
 - [x] Core globals: compositor, shm, seat, output, data-device.
-- [x] `xdg-shell` toplevels + popups *(placed/configured; grabs and `reposition` are TODO M3)*.
+- [x] `xdg-shell` toplevels + popups *(placed/configured, drawn from the
+      `PopupManager` tree; grabs and `xdg_popup.reposition` landed with M3's
+      protocol breadth, verified nested with GTK3 menus and GTK4 popovers)*.
 - [x] Keyboard + pointer input; click-to-focus; software cursor *(wired; pointer
       motion, client cursor surfaces, and the named-icon fallback were exercised nested,
       keyboard routing still needs a real session).*

@@ -112,6 +112,14 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 
 ### 1.5 Placement
 - [x] Fixed cascade placement for toplevels + popups positioned relative to parents.
+- [x] Popup grabs + `xdg_popup.reposition`: Smithay's `PopupManager` tracks the
+  popup trees (so submenus resolve), `xdg_popup.grab` is answered with the
+  `PopupPointerGrab`/`PopupKeyboardGrab` defaults (a grab from a client without
+  the keyboard is refused, so popups cannot steal focus), and a reposition
+  request is re-placed against the output and acknowledged. *Verified nested:
+  GTK3 menus and GTK4 popovers configure, grab, re-place on resize, and an
+  unfocused client's grab is denied. Dismissal on an outside click and menu
+  keyboard navigation still need a hand (no input injection here).*
 - [x] Respect `min_size`/`max_size` hints — read from the surface's cached state on
   commit and clamped in the layout.
 - [ ] Handle clients that ignore `configure` (a buffer that does not match the
@@ -124,7 +132,8 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 `wp_primary_selection` (M6), `xdg_activation` (M6), fractional scaling (M4), `cursor_shape`
 (every named icon draws as the built-in arrow until the icon set lands), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
 `xdg_decoration` (client-side decorations work). Popup grabs and `xdg_popup.reposition`
-are TODO'd in `handlers/xdg_shell.rs`.
+landed in `handlers/xdg_shell.rs` (M3 scope, done early) and render from the
+`PopupManager` tree in `src/render.rs`.
 
 ---
 

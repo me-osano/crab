@@ -229,9 +229,14 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
 ///
 /// With Super held, the left button starts an interactive move and the right
 /// button a resize; both are swallowed rather than sent to the client.
+///
+/// When a client holds a pointer grab (an open menu, `xdg_popup.grab`), the grab
+/// owns the button instead: it dismisses the popup on a click outside of it and
+/// forwards the rest, so crawm stays out of the way.
 fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
     let pressed = event.state();
-    if pressed == ButtonState::Pressed {
+    let grabbed = state.pointer.is_grabbed();
+    if pressed == ButtonState::Pressed && !grabbed {
         let position = state.pointer_location;
         if state.super_held {
             let mode = match event.button_code() {
@@ -246,7 +251,7 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
             }
         }
         state.focus_at(position);
-    } else if state.end_interaction() {
+    } else if !grabbed && state.end_interaction() {
         // The release ends a compositor grab; do not forward it either.
         return;
     }
