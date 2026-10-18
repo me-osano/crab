@@ -257,10 +257,13 @@ fn collect_pass<'a>(
             };
             borders.extend(borders_for(window, border_width, color));
         }
+        // The toplevel is drawn from its geometry origin pulled back out by the
+        // client's own decoration inset, so the *window geometry* — what the
+        // layout placed and what `borders_for` frames — lands on the rect.
         surfaces.extend(render_elements_from_surface_tree(
             renderer,
             window.wl_surface(),
-            window.location.to_physical(1),
+            window.surface_origin().to_physical(1),
             1.0,
             1.0,
             Kind::Unspecified,
@@ -314,44 +317,88 @@ fn hotspot_of(surface: &WlSurface) -> Point<i32, Logical> {
     .unwrap_or_else(|| (0, 0).into())
 }
 
-/// Height of the built-in pointer's head, where its belly meets the stem.
-const HEAD_H: i32 = 15;
-/// Width of the built-in pointer's stem, in pixels.
-const STEM_W: i32 = 4;
-/// Total height of the built-in pointer: head plus stem.
-const CURSOR_H: i32 = 24;
-/// Widest part of the built-in pointer (the belly of its head).
-const CURSOR_W: i32 = HEAD_H;
+/// Width of the built-in pointer's bounding box.
+const CURSOR_W: i32 = 12;
+/// Height of the built-in pointer, from its tip to the end of its tail.
+const CURSOR_H: i32 = 19;
+/// How thick the black edge around the arrow is drawn, in pixels.
+const EDGE_W: f64 = 1.0;
+
+/// Outline of the built-in pointer: the classic arrow, tip at the origin.
+///
+/// From the tip the back edge runs straight down, the tail notches in and juts
+/// back out, and the barb comes up to meet the hypotenuse — the silhouette
+/// every cursor theme draws, and the reason a bare triangle reads as a smudge.
+/// Drawn at the same size as the arrow inside a 24×24 icon set.
+const ARROW: [(f64, f64); 7] = [
+    (0.0, 0.0),
+    (0.0, 16.0),
+    (4.5, 12.5),
+    (7.5, 19.0),
+    (10.0, 17.5),
+    (6.5, 11.5),
+    (12.0, 11.5),
+];
 
 /// Outline and fill of the built-in pointer.
 const OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const FILL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
+/// Whether the point `(px, py)` is inside the arrow, by the even-odd rule.
+fn inside_arrow(px: f64, py: f64) -> bool {
+    let mut inside = false;
+    // Walking each edge against the vertex before it, back edge included.
+    let mut previous = ARROW[ARROW.len() - 1];
+    for &(xi, yi) in &ARROW {
+        let (xj, yj) = previous;
+        if (yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        previous = (xi, yi);
+    }
+    inside
+}
+
+/// Distance from `(px, py)` to the arrow's outline.
+fn outline_distance(px: f64, py: f64) -> f64 {
+    let mut best = f64::INFINITY;
+    let mut previous = ARROW[ARROW.len() - 1];
+    for &point in &ARROW {
+        best = best.min(segment_distance(px, py, previous, point));
+        previous = point;
+    }
+    best
+}
+
+/// Distance from `(px, py)` to the segment `a`–`b`.
+fn segment_distance(px: f64, py: f64, a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 {
+        0.0
+    } else {
+        ((px - ax) * dx + (py - ay) * dy) / len2
+    }
+    .clamp(0.0, 1.0);
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
 /// The built-in pointer at one pixel: `None` off the shape, `Some(true)` on
 /// its fill, `Some(false)` on its outline.
 ///
-/// The shape is the classic arrow: a triangular head with a vertical back and
-/// a 45° belly, then a stem of the same thickness stepping down and right.
-const fn pointer_pixel(x: i32, y: i32) -> Option<bool> {
-    if y < HEAD_H {
-        // The head is the half of its bounding square below the diagonal.
-        if x < 0 || x > y {
-            return None;
-        }
-        // The underside stays open where the stem continues it, so head and
-        // stem read as one shape.
-        let outline = x == 0 || x == y || y == 0 || (y == HEAD_H - 1 && x >= STEM_W);
-        return Some(!outline);
+/// Whatever lies within [`EDGE_W`] of the outline stays black, so the arrow
+/// comes out as the black rim with a white core that the classic bitmap
+/// cursors draw, thin tail included.
+fn pointer_pixel(x: i32, y: i32) -> Option<bool> {
+    // Sample pixel centres so whole-pixel measurements land on whole pixels.
+    let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+    if !inside_arrow(px, py) {
+        return None;
     }
-    if y < CURSOR_H {
-        let left = y - HEAD_H;
-        if x < left || x >= left + STEM_W {
-            return None;
-        }
-        let outline = x == left || x == left + STEM_W - 1 || y == CURSOR_H - 1;
-        return Some(!outline);
-    }
-    None
+    Some(outline_distance(px, py) >= EDGE_W)
 }
 
 /// The built-in pointer as merged horizontal runs of solid color.
@@ -425,31 +472,75 @@ mod tests {
     }
 
     #[test]
-    fn the_head_widens_at_forty_five_degrees() {
-        for y in 1..HEAD_H {
-            assert_eq!(pointer_pixel(y, y), Some(false), "the belly at y={y}");
+    fn the_arrow_stays_inside_its_bounding_box() {
+        for y in 0..CURSOR_H {
             assert!(
-                pointer_pixel(y + 1, y).is_none(),
-                "beyond the belly at y={y}"
+                pointer_pixel(-1, y).is_none(),
+                "nothing left of the back edge at y={y}"
+            );
+            assert!(
+                pointer_pixel(CURSOR_W, y).is_none(),
+                "nothing past the barb at y={y}"
+            );
+        }
+        for x in -1..=CURSOR_W {
+            assert!(
+                pointer_pixel(x, -1).is_none(),
+                "nothing above the tip at x={x}"
+            );
+            assert!(
+                pointer_pixel(x, CURSOR_H).is_none(),
+                "nothing below the tail at x={x}"
             );
         }
     }
 
     #[test]
-    fn the_stem_is_four_pixels_wide_and_steps_right() {
-        for y in HEAD_H..CURSOR_H {
-            let left = y - HEAD_H;
-            assert!(pointer_pixel(left, y).is_some(), "the stem at y={y}");
-            assert!(
-                pointer_pixel(left - 1, y).is_none(),
-                "left of the stem at y={y}"
-            );
-            assert!(
-                pointer_pixel(left + STEM_W, y).is_none(),
-                "right of the stem at y={y}"
-            );
+    fn the_back_edge_is_straight_from_the_tip() {
+        for y in 0..16 {
+            assert_eq!(pointer_pixel(0, y), Some(false), "the back edge at y={y}");
         }
-        assert!(pointer_pixel(0, CURSOR_H).is_none(), "below the stem");
+        assert!(
+            pointer_pixel(0, 16).is_none(),
+            "the back edge ends at (0,16)"
+        );
+    }
+
+    #[test]
+    fn the_tail_notches_in_below_the_head() {
+        // Below the head's belly the back edge keeps going while the tail has
+        // already stepped right, leaving the notch empty between them.
+        assert!(pointer_pixel(0, 14).is_some(), "the back edge continues");
+        assert!(pointer_pixel(2, 14).is_none(), "the notch under the head");
+        assert!(pointer_pixel(6, 14).is_some(), "the tail past the notch");
+        assert!(pointer_pixel(7, CURSOR_H - 1).is_some(), "the tail's tip");
+        assert!(pointer_pixel(9, CURSOR_H - 1).is_none(), "and no wider");
+    }
+
+    #[test]
+    fn the_barb_is_the_widest_row() {
+        // The barb is level with where the tail leaves the head, and nothing
+        // else reaches that far right.
+        assert_eq!(pointer_pixel(10, 10), Some(false));
+        assert!(pointer_pixel(11, 10).is_none());
+        assert!(pointer_pixel(10, 0).is_none());
+    }
+
+    #[test]
+    fn the_body_is_filled_inside_a_black_edge() {
+        let mut fill = 0;
+        let mut edge = 0;
+        for y in 0..CURSOR_H {
+            for x in 0..CURSOR_W {
+                match pointer_pixel(x, y) {
+                    Some(true) => fill += 1,
+                    Some(false) => edge += 1,
+                    None => {}
+                }
+            }
+        }
+        assert!(fill > 20, "a white core, got {fill} pixels");
+        assert!(edge > 20, "a black edge around it, got {edge} pixels");
     }
 
     #[test]
@@ -457,9 +548,18 @@ mod tests {
         use smithay::backend::renderer::element::Element as _;
 
         let rects = arrow_cursor((3.4, -2.6).into());
-        // Three runs per row at most (back, belly, fill), so far fewer rects
-        // than pixels, and rounding lands the tip on the nearest pixel.
-        assert!(rects.len() <= usize::try_from(3 * CURSOR_H).unwrap());
+        let drawn = (0..CURSOR_H)
+            .flat_map(|y| (0..CURSOR_W).map(move |x| (x, y)))
+            .filter(|&(x, y)| pointer_pixel(x, y).is_some())
+            .count();
+        // Rows merge same-colored runs, so far fewer rects than pixels, and at
+        // most six runs per row (back edge, head, notch, tail, barb, tip).
+        assert!(
+            rects.len() < drawn,
+            "{} rects for {drawn} pixels",
+            rects.len()
+        );
+        assert!(rects.len() <= usize::try_from(6 * CURSOR_H).unwrap());
         assert_eq!(
             rects[0].geometry(1.0.into()).loc,
             Point::<i32, Physical>::from((3, -3))

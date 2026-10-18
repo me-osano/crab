@@ -96,7 +96,8 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 - [x] **Click-to-focus**; keyboard focus follows the focused surface.
 - [x] Cursor rendering (software cursor element first) — a client's `wl_pointer.set_cursor`
   surface, the built-in arrow for named icons, and nothing for a hidden cursor; the backends
-  hide the host pointer so this is the only one drawn. *(The arrow is one fixed shape until
+  hide the host pointer so this is the only one drawn. *(The arrow is a fixed classic-pointer
+  outline — black rim, white core, tip at the hotspot — until
   the icon set lands with `cursor_shape`; it also freezes at the last position when the host
   pointer leaves the nested window, since winit does not forward `CursorLeft`.)*
 
@@ -122,6 +123,14 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
   keyboard navigation still need a hand (no input injection here).*
 - [x] Respect `min_size`/`max_size` hints — read from the surface's cached state on
   commit and clamped in the layout.
+- [x] Place windows by their **window geometry** (`xdg_surface.set_window_geometry`)
+  rather than by their buffer. Client-side decorations draw their shadow margins
+  outside the geometry, so with the buffer's origin on the tile the content sat inset
+  from its placement with the shadows spilling past the border, and popups anchored off
+  it. `ManagedWindow` now carries the geometry, the surface is drawn at its origin minus
+  the client's inset, and popups offset from the geometry origin. *Verified nested:
+  `nautilus` reports `geometry=(25,25)` on a 412×1030 tile with a 462×1080 buffer, and
+  `foot` `geometry=(0,-26)`; both content rects land on their placement.*
 - [ ] Handle clients that ignore `configure` (a buffer that does not match the
   configured size is currently drawn as-is).
 

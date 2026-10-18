@@ -388,6 +388,7 @@ first mode is its default, and the family name is accepted as an alias for it.
 - Fullscreen windows are removed from layout input and placed at the full output geometry above layer-shell `Top` (but below `Overlay`), per protocol expectations.
 - Maximize in a tiled layout means "fill the usable area" without leaving the space's window ordering.
 - Respect client min/max size hints; layouts treat them as soft constraints and clamp placements. Clients that ignore configure sizes need a "clip to rect" fallback.
+- Windows are placed by their **window geometry** (`xdg_surface.set_window_geometry`), not by their buffer: client-side decorations draw their shadow margins outside the geometry, so the geometry is what the layout arranges, what the border frames, and what popups anchor to. The surface is drawn from its own origin, which is the geometry origin pulled back out by whatever inset the client reported; a client that never sets a geometry falls back to its surface bounding box.
 
 ### 7.6 Testing layouts
 

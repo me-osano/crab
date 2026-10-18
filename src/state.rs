@@ -55,10 +55,20 @@ pub(crate) struct ManagedWindow {
     pub(crate) surface: ToplevelSurface,
     /// Its place in the space/layout model.
     pub(crate) window: Window,
-    /// Top-left corner in logical compositor coordinates.
+    /// Top-left corner of the *window geometry* in logical compositor
+    /// coordinates: where the layout put the window.
     pub(crate) location: Point<i32, Logical>,
-    /// Logical size the window is drawn at.
+    /// Logical size of the window geometry, which is what the layout arranges
+    /// and what clients are configured to.
     pub(crate) size: Size<i32, Logical>,
+    /// The client's window geometry (`xdg_surface.set_window_geometry`, clamped
+    /// to the surface tree's bounding box) in *surface* coordinates.
+    ///
+    /// This is the rectangle the layout places: `location` is its origin, while
+    /// the surface itself usually extends past it on every side, since
+    /// client-side decorations draw their shadow margins outside the geometry.
+    /// Popups and the pointer anchor to the geometry, not to the surface.
+    pub(crate) geometry: Rectangle<i32, Logical>,
     /// Whether the layout currently shows this window.
     pub(crate) visible: bool,
     /// Set once the client commits a buffer; unmapped windows are not drawn.
@@ -76,7 +86,13 @@ impl ManagedWindow {
         self.surface.wl_surface()
     }
 
-    /// Current rectangle in logical coordinates.
+    /// Where the toplevel's `wl_surface` origin sits, which is the geometry
+    /// origin shifted back out by the client's decoration inset.
+    pub(crate) fn surface_origin(&self) -> Point<i32, Logical> {
+        self.location - self.geometry.loc
+    }
+
+    /// Current window geometry in logical coordinates.
     pub(crate) fn rect(&self) -> Rect {
         Rect::new(
             f64::from(self.location.x),
@@ -309,6 +325,7 @@ impl Crawm {
             window,
             location: (0, 0).into(),
             size: DEFAULT_WINDOW_SIZE.into(),
+            geometry: Rectangle::default(),
             visible: false,
             mapped: false,
         });
@@ -388,9 +405,19 @@ impl Crawm {
 
         let (min_size, max_size) = read_size_hints(surface);
         let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
+        let geometry = window_geometry(surface, bbox);
         for window in &mut self.windows {
             if window.wl_surface() != surface {
                 continue;
+            }
+            if window.geometry != geometry {
+                tracing::trace!(
+                    ?geometry,
+                    title = ?window.window.title,
+                    "window geometry changed"
+                );
+                window.geometry = geometry;
+                relayout = true;
             }
             if window.window.min_size != min_size || window.window.max_size != max_size {
                 window.window.min_size = min_size;
@@ -401,10 +428,12 @@ impl Crawm {
                 window.mapped = true;
                 relayout = true;
             }
-            // A floating window owns its size; adopt whatever it committed.
-            if window.window.floating && bbox.size.w > 0 && bbox.size.h > 0 {
-                if window.size != bbox.size {
-                    window.size = bbox.size;
+            // A floating window owns its size; adopt whatever it committed,
+            // measured by its window geometry rather than by its buffer (which
+            // carries client-side decoration margins the layout must not see).
+            if window.window.floating && geometry.size.w > 0 && geometry.size.h > 0 {
+                if window.size != geometry.size {
+                    window.size = geometry.size;
                     relayout = true;
                 }
                 let rect = window.rect();
@@ -486,17 +515,16 @@ impl Crawm {
     /// The origin of the *window geometry* of the toplevel or popup owning
     /// `surface`, in output coordinates, if we track it.
     ///
-    /// Popups are positioned against their parent's window geometry (the
-    /// rectangle set with `xdg_surface.set_window_geometry`), while the layout
-    /// places windows by their surface origin, so the two differ by whatever
-    /// client-side decorations the client reports.
+    /// The layout places windows by their window geometry and popups are
+    /// positioned against their parent's, so this is the reference frame every
+    /// placed rectangle is expressed in.
     fn window_geometry_origin(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
         if let Some(window) = self
             .windows
             .iter()
             .find(|window| window.wl_surface() == surface)
         {
-            return Some(window.location + surface_geometry_loc(surface));
+            return Some(window.location);
         }
         for window in &self.windows {
             for (popup, offset) in popup_offsets(window) {
@@ -615,7 +643,7 @@ impl Crawm {
         }
         let id = self.window_at(position)?;
         let window = self.window(id)?;
-        Some((window.wl_surface().clone(), window.location))
+        Some((window.wl_surface().clone(), window.surface_origin()))
     }
 
     /// Focuses the window under `position` (click-to-focus).
@@ -989,33 +1017,36 @@ pub(crate) fn size_i32(w: f64, h: f64) -> Size<i32, Logical> {
 }
 
 /// Every popup hanging off `window`, with the popup's *surface* origin relative
-/// to the top-left of the window's surface.
+/// to the top-left of the window's window geometry.
 ///
-/// Popups are placed against their parent's window geometry, which clients inset
-/// from the surface by their decorations (and their own geometry, for a popup),
-/// so the offset has to add the parent's inset and subtract the popup's:
-/// `parent_geometry + location - popup_geometry`, exactly how Smithay's own
-/// `Window` element computes it.
+/// Popups are placed against their parent's window geometry, so the manager's
+/// location needs only the popup's own geometry subtracted to get back out to
+/// its surface origin — the popup's buffer carries its own decoration margins,
+/// exactly like a toplevel's does.
 pub(crate) fn popup_offsets(
     window: &ManagedWindow,
 ) -> impl Iterator<Item = (PopupKind, Point<i32, Logical>)> {
-    let parent = surface_geometry_loc(window.wl_surface());
-    PopupManager::popups_for_surface(window.wl_surface()).map(move |(popup, location)| {
-        let offset = parent + location - popup.geometry().loc;
+    PopupManager::popups_for_surface(window.wl_surface()).map(|(popup, location)| {
+        let offset = location - popup.geometry().loc;
         (popup, offset)
     })
 }
 
-/// `xdg_surface.set_window_geometry`'s origin, or the surface origin if unset.
-fn surface_geometry_loc(surface: &WlSurface) -> Point<i32, Logical> {
+/// The client's window geometry, clamped to the surface tree's bounding box.
+///
+/// `xdg_surface.set_window_geometry` is what the client considers its window:
+/// for client-side decorations it excludes the shadow margins drawn around the
+/// content. The bounding box is the fallback for clients that never set one.
+fn window_geometry(surface: &WlSurface, bbox: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
     with_states(surface, |states| {
         states
             .cached_state
             .get::<SurfaceCachedState>()
             .current()
             .geometry
-            .map_or((0, 0).into(), |geometry| geometry.loc)
     })
+    .and_then(|geometry| geometry.intersection(bbox))
+    .unwrap_or(bbox)
 }
 
 /// The `xdg_toplevel` title and app id, once the client has set them.
