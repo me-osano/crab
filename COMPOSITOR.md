@@ -455,20 +455,40 @@ Goal: niri-quality motion with mango-level configurability.
 
 ### Primitives
 
+Implemented in `src/animation` (TODO.md §3.1); the shapes below are the real
+API, not a sketch.
+
 ```rust
 pub enum Curve {
-    Spring { damping_ratio: f64, stiffness: f64, epsilon: f64 },
-    Easing { duration_ms: u32, kind: EasingKind },
-    Bezier { duration_ms: u32, p1: (f64, f64), p2: (f64, f64) },
+    Spring(SpringParams),                        // { stiffness, damping, epsilon }
+    Easing { duration_ms: u32, kind: Easing },
+    Bezier { duration_ms: u32, control: CubicBezier },
 }
 
-pub struct Animated<T> {
-    current: T,
-    target: T,
-    velocity: T,         // preserved on retarget for interruptibility
+pub struct Animated<T: Animatable> {
+    from: T,             // the current segment's start
+    to: T,               // its target: the value at rest
+    velocity: T,         // handed over on retarget (springs only)
+    start: f64,          // frame time the segment began at
     curve: Curve,
+    kind: Kind,          // the event that last moved it
 }
 ```
+
+`Animated<T>` is **sampled, not stepped**: its value is a pure function of the
+frame time `Clocks` reports, so reading it never changes it and two values moved
+by one event stay in phase however many frames each of them missed. Springs are
+evaluated analytically (the closed-form damped oscillator, expressed as scalar
+weights so a rectangle springs as happily as a scalar); `is_animating()` is
+then just "is the segment younger than its settle time".
+
+The clock is **one per animation `Kind`** — `WindowOpen`, `WindowClose`,
+`WindowMove`, `WindowResize`, `SpaceSwitch`, `LayoutSwitch`, `Scroll`, `Border`
+— all re-timed from the same frame instant, so no window can drift from another.
+Each kind carries its own reduce-motion flag, which is what per-event config and
+the global reduce-motion switch both act on. A kind flagged
+`complete_instantly` (or a zero-duration curve) reports an infinite age, so it
+jumps straight to its target without any special-casing downstream.
 
 ### Requirements
 

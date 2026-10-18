@@ -208,10 +208,12 @@ Goal: niri-quality motion with mango-level configurability. Switches and layout 
 are smooth, interruptible, and free of pops.
 
 ### 3.1 `src/animation` (`COMPOSITOR.md` §9)
-- [ ] `Curve::{ Spring, Easing, Bezier }`; `Animated<T> { current, target, velocity, curve }`.
-- [ ] Interruptible retargeting (keep value + velocity); `is_animating()`.
-- [ ] **One synced clock per animation kind** (no per-window drift).
-- [ ] Zero-duration fast path + `reduce-motion` flag hook.
+- [x] `Curve::{ Spring, Easing, Bezier }`; `Animated<T>` (`from`/`to`/`velocity`/`start`/`curve`/`kind`).
+- [x] Interruptible retargeting (keeps value + velocity); `is_animating()`.
+- [x] **One synced clock per animation kind** (no per-window drift) — `Clocks`/`Kind`.
+- [x] Zero-duration fast path + `reduce-motion` flag hook.
+- Note: values are *sampled* from frame time rather than stepped (COMPOSITOR.md §9);
+  springs are evaluated in closed form, so missed frames cannot drift them.
 
 ### 3.2 Drive animations off the frame clock
 - [ ] Advance animations using the **vblank / `wp_presentation` time**, not `Instant::now()`.

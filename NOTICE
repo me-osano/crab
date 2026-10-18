@@ -21,5 +21,13 @@ projects and their licenses.
 
 See ROADMAP.md §11 and docs/decisions/0001-license.md for details.
 
-No third-party code has been adapted into crawm yet; this file exists so the
-convention is in place from the first adapted file.
+Files adapted so far:
+
+  * `src/animation/spring.rs` — the damped-spring solution, adapted from niri's
+    `src/animation/spring.rs`, which follows libadwaita's spring animation
+    (LGPL-2.1-or-later, https://gitlab.gnome.org/GNOME/libadwaita) and, behind it,
+    RBBAnimation (MIT).
+  * `src/animation/curve.rs` — the cubic-Bézier solver follows the same shape as
+    niri's `src/animation/bezier.rs` and libadwaita's easing code
+    (LGPL-2.1-or-later).
+

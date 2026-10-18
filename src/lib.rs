@@ -9,7 +9,7 @@
 //! * [`core`] — identifiers, geometry, colors, spaces, window model;
 //! * [`config`] — TOML parsing, validation, and defaults;
 //! * [`layout`] — the [`layout::Layout`] trait and its implementations;
-//! * [`animation`] — springs, easings, and animated scalars.
+//! * [`animation`] — curves, animated values, and the frame clock.
 //!
 //! Nothing here may depend on Smithay or Wayland; that rule is enforced by
 //! `scripts/check-boundaries.sh`, which also rejects any non-pure `mod` added to
