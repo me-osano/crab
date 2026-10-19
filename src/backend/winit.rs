@@ -96,7 +96,21 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     // a resize), so fold them in before starting the frame.
                     data.state.output_state.queue_redraw();
                     if data.state.output_state.begin_frame() {
+                        // Re-time the animation clock to the frame being drawn.
+                        // winit reports no presentation timestamp, so the loop
+                        // clock read here stands in for the vertical blank; the
+                        // tty backend will pass the real one (TODO.md §3.2).
+                        let frame_time = data.state.start_time.elapsed().as_secs_f64();
+                        data.state.advance_frame(frame_time);
                         render::render(&data.state, &mut data.backend);
+                        // Keep frames coming while anything is still moving.
+                        // This folds into the frame just presented, so
+                        // `finish_frame` reports the follow-up and winit
+                        // schedules it; once everything settles the loop stops
+                        // requesting frames and the compositor goes idle.
+                        if data.state.is_animating() {
+                            data.state.output_state.queue_redraw();
+                        }
                         // The swap in `render` waits for the vertical blank; a
                         // request that arrived during it needs another frame.
                         if data.state.output_state.finish_frame() {

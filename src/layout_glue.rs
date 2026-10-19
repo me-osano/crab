@@ -9,6 +9,7 @@
 //!
 //! It is binary-only glue, so it may depend on Smithay freely.
 
+use crawm::animation::Kind;
 use crawm::core::{Direction, LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, WindowId};
 use crawm::layout::{self, LayoutInput, LayoutWindow, Placement};
 
@@ -185,14 +186,25 @@ fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
 
 /// Places a tiled/fullscreen window, configuring the client when the size
 /// changes.
+///
+/// The layout's rectangle is the *target*: the client is configured with it and
+/// the drawn rectangle is animated toward it. The kind records what moved the
+/// window — a change of size or a change of place — which is the granularity
+/// animations are configured at (M5).
 fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visible: bool) {
     let location = point_i32(rect.x, rect.y);
     let size = size_i32(rect.w, rect.h);
+    let clocks = state.frame_clock;
     let Some(window) = state.window_mut(id) else {
         return;
     };
     window.visible = visible;
     window.location = location;
+    let kind = if window.size == size {
+        Kind::WindowMove
+    } else {
+        Kind::WindowResize
+    };
     if configure_size && window.size != size {
         window.size = size;
         window
@@ -200,6 +212,7 @@ fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visi
             .with_pending_state(|pending| pending.size = Some(size));
         window.surface.send_configure();
     }
+    window.animate_to(rect, kind, &clocks);
 }
 
 /// Places a floating window at its remembered geometry (cascading a new one).

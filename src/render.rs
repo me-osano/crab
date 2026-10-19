@@ -5,8 +5,12 @@
 //! describe: **borders** around tiled and floating windows, the **z-order**
 //! (tiled below floating below fullscreen below popups), skipping the windows
 //! the current view hides (`COMPOSITOR.md` §7.1), and the compositor's own
-//! **cursor**. The frame-clock driver in `src/animation` and real damage
-//! tracking land later.
+//! **cursor**. Real damage tracking lands later.
+//!
+//! Windows are drawn at their **animated** rectangle (`ManagedWindow::visual_*`),
+//! sampled from the frame clock the backend has just re-timed, so the borders
+//! and the surfaces move together and the frame timestamps clients get refer to
+//! the same instant the motion was sampled at (TODO.md §3.2).
 //!
 //! The cursor is ours to draw: `wl_pointer.set_cursor` is a request, not a
 //! buffer, and the backends hide the host cursor so only this one is visible
@@ -29,7 +33,7 @@ use smithay::backend::winit::WinitGraphicsBackend;
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Size, Transform};
 use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
 };
@@ -115,11 +119,12 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
         // toplevel (`PopupManager` tracks the tree), so they are gathered per
         // window; a popup without a buffer yet yields no elements.
         for window in state.windows.iter().filter(|w| w.mapped && w.visible) {
+            let origin = window.visual_origin(&state.frame_clock);
             for (popup, offset) in crate::state::popup_offsets(window) {
                 surfaces.extend(render_elements_from_surface_tree(
                     &mut *renderer,
                     popup.wl_surface(),
-                    (window.location + offset).to_physical(1),
+                    (origin + offset).to_physical(1),
                     1.0,
                     1.0,
                     Kind::Unspecified,
@@ -212,7 +217,7 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             Err(err) => tracing::error!(?err, "failed to begin the frame"),
         }
 
-        let time = state.start_time.elapsed().as_millis() as u32;
+        let time = state.frame_clock.now_ms();
         for window in state
             .windows
             .iter()
@@ -247,6 +252,8 @@ fn collect_pass<'a>(
     surfaces: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
 ) {
     for window in windows {
+        let location = window.visual_origin(&state.frame_clock);
+        let size = window.visual_size(&state.frame_clock);
         // A fullscreen or maximized window covers the screen, so a border would
         // only clip it.
         if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
@@ -255,7 +262,7 @@ fn collect_pass<'a>(
             } else {
                 border_color(state.config.unfocused_border_color)
             };
-            borders.extend(borders_for(window, border_width, color));
+            borders.extend(borders_for(location, size, border_width, color));
         }
         // The toplevel is drawn from its geometry origin pulled back out by the
         // client's own decoration inset, so the *window geometry* — what the
@@ -263,7 +270,9 @@ fn collect_pass<'a>(
         surfaces.extend(render_elements_from_surface_tree(
             renderer,
             window.wl_surface(),
-            window.surface_origin().to_physical(1),
+            window
+                .visual_surface_origin(&state.frame_clock)
+                .to_physical(1),
             1.0,
             1.0,
             Kind::Unspecified,
@@ -276,12 +285,18 @@ fn border_color(color: Color) -> Color32F {
     Color32F::new(color.r, color.g, color.b, color.a)
 }
 
-/// Four solid rectangles that frame `window`'s border width, in physical pixels.
-fn borders_for(window: &ManagedWindow, bw: i32, color: Color32F) -> Vec<SolidColorRenderElement> {
-    let x = window.location.x;
-    let y = window.location.y;
-    let width = window.size.w;
-    let height = window.size.h;
+/// Four solid rectangles that frame a border width around a drawn window, in
+/// physical pixels.
+fn borders_for(
+    location: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    bw: i32,
+    color: Color32F,
+) -> Vec<SolidColorRenderElement> {
+    let x = location.x;
+    let y = location.y;
+    let width = size.w;
+    let height = size.h;
     let rects = [
         Rectangle::new((x - bw, y - bw).into(), (width + 2 * bw, bw).into()),
         Rectangle::new((x - bw, y + height).into(), (width + 2 * bw, bw).into()),
@@ -435,8 +450,9 @@ fn arrow_cursor(origin: Point<f64, Logical>) -> Vec<SolidColorRenderElement> {
 
 /// Fires `wl_surface.frame` callbacks for a surface and its children.
 ///
-/// Copied from Smithay's `minimal` example; M3 replaces this with the
-/// frame-clock driver in `src/animation`.
+/// The timestamp is the frame clock's, i.e. the presentation time of the frame
+/// the client's callback fired in — the same instant every animation drawn in
+/// this frame was sampled at.
 fn send_frame_callbacks(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(
         surface,

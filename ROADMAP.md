@@ -460,7 +460,9 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] GLES render; frame callbacks; per-output redraw state machine
       (Idle→Queued→WaitingForVBlank→Idle). *(Transitions are pure and unit-tested in
       `src/core/output.rs`; the winit backend schedules them from `Redraw` events.
-      Damage-aware partial redraws and the vblank/presentation clock are M3.)*
+      Damage-aware partial redraws are still to come; the animation frame clock landed
+      with M3 (re-timed at the frame boundary under winit; the real vblank timestamp
+      arrives with the M4 backend).)*
 - [x] Fixed cascade placement.
 - [ ] **Exit:** `foot` + a GTK app run nested, accept input, resize. *(`foot` and GTK
       apps (`pavucontrol`, `nautilus`) run nested against the M1 globals; pointer input
@@ -483,15 +485,19 @@ supersede `COMPOSITOR.md` §22 where they differ.
       floating dialogs and a full interactive day remain.)*
 
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
-- [ ] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
+- [x] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
       interruptible retargeting; `is_animating()`.
 - [ ] `Scroll` family `scroll` mode (columns, focus/center/overspread, proportion presets,
       per-column width, vertical variant).
 - [ ] Named spaces + `on-overflow` centering; `default-column-display normal|tabbed`.
-- [ ] Animate open/close/move/resize/space-switch/layout-switch.
+- [x] Animate move/resize/layout-switch: windows spring to their new rectangles, and
+      borders, popups and hit-testing follow the drawn rectangle.
+- [ ] Animate open/close/space-switch.
 - [ ] Resize: configure immediately, draw last buffer scaled/cropped until commit.
       Close: snapshot last buffer.
-- [ ] Clock = vblank/`wp_presentation`, not `Instant::now()`.
+- [x] Animations advance on frame time: the winit backend re-times the frame clock at the
+      frame boundary and keeps requesting frames only while something is moving. The real
+      vblank/`wp_presentation` timestamp arrives with the M4 backend.
 - [ ] **Exit:** space/space switches and layout changes are smooth and interruptible,
       no pops.
 

@@ -510,6 +510,14 @@ jumps straight to its target without any special-casing downstream.
 | Scroller | view offset |
 | Border/focus ring | color blend |
 
+Landed in M3: **the per-window rectangle** — move/resize in layout, and with it layout
+switches, which are the same thing seen from a different angle. The window, its border and
+its popups are all drawn at the animated rectangle, and hit-testing, drag origins and popup
+placement read the same rectangle, so nothing lags behind the picture while it moves. The
+space-switch *slide*, the scroller offset, open/close and border colour blends still land
+with the rest of M3 (their properties need the snapshot and crop/scale machinery described
+below).
+
 ### Resize handling
 
 Clients commit new buffers after being configured, not instantly. For smooth visuals:

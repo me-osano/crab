@@ -138,7 +138,9 @@ impl<T: Animatable> Animated<T> {
         if self.to == target {
             return;
         }
-        if from == target && velocity == T::zero() {
+        if from == target {
+            // It is already where it is being sent: stop here rather than let
+            // the carried velocity swing it out past a point it is sitting on.
             self.snap_to(target);
             return;
         }
@@ -306,6 +308,21 @@ mod tests {
         animated.animate(10.0, Kind::WindowMove, &at(0.0));
         assert!(!animated.is_animating(&at(0.0)));
         assert_eq!(animated.value(&at(0.0)), 10.0);
+    }
+
+    #[test]
+    fn a_retarget_to_the_value_it_is_moving_through_stops_there() {
+        let mut animated = Animated::new(0.0, spring(), Kind::WindowMove);
+        animated.animate(100.0, Kind::WindowMove, &at(0.0));
+
+        let stop = at(0.1);
+        let here = animated.value(&stop);
+        assert!(animated.velocity(&stop) > 0.0, "it is on its way");
+        animated.animate(here, Kind::WindowMove, &stop);
+
+        assert_eq!(animated.value(&stop), here, "it stays put");
+        assert_eq!(animated.velocity(&stop), 0.0, "the momentum is dropped");
+        assert!(!animated.is_animating(&stop), "no wobble around the stop");
     }
 
     #[test]

@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use crawm::animation::{Animated, Clocks, Curve, Kind, SpringParams};
 use crawm::config::Config;
 use crawm::core::{
     Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
@@ -49,6 +50,14 @@ pub(crate) const DEFAULT_WINDOW_SIZE: (i32, i32) = (800, 600);
 /// How much of a window must stay on screen when it is dragged, in pixels.
 const MIN_VISIBLE: f64 = 32.0;
 
+/// The curve a window's rectangle moves along when the layout moves it.
+///
+/// One curve for every window rectangle for now; M5 makes it per-event config
+/// (`COMPOSITOR.md` §9). Springs are the right default because retargeting
+/// mid-flight then keeps the velocity, so a second layout switch blends out of
+/// the first instead of restarting.
+const WINDOW_CURVE: Curve = Curve::Spring(SpringParams::DEFAULT);
+
 /// One managed toplevel: the protocol object and its pure model.
 pub(crate) struct ManagedWindow {
     /// The xdg toplevel this describes.
@@ -73,6 +82,16 @@ pub(crate) struct ManagedWindow {
     pub(crate) visible: bool,
     /// Set once the client commits a buffer; unmapped windows are not drawn.
     pub(crate) mapped: bool,
+    /// Where the window is *drawn*: the animated value of its placement.
+    ///
+    /// The layout's own `location`/`size` are the target it is heading for —
+    /// what the client is configured with, what a drag grabs, what the next
+    /// relocation starts from. While the two differ the window is in motion.
+    visual: Animated<Rect>,
+    /// Whether [`Self::visual`] has had a real placement yet. The first one
+    /// snaps, so a new window appears where the layout put it instead of flying
+    /// in from its default rectangle.
+    visual_placed: bool,
 }
 
 impl ManagedWindow {
@@ -86,12 +105,6 @@ impl ManagedWindow {
         self.surface.wl_surface()
     }
 
-    /// Where the toplevel's `wl_surface` origin sits, which is the geometry
-    /// origin shifted back out by the client's decoration inset.
-    pub(crate) fn surface_origin(&self) -> Point<i32, Logical> {
-        self.location - self.geometry.loc
-    }
-
     /// Current window geometry in logical coordinates.
     pub(crate) fn rect(&self) -> Rect {
         Rect::new(
@@ -100,6 +113,56 @@ impl ManagedWindow {
             f64::from(self.size.w),
             f64::from(self.size.h),
         )
+    }
+
+    /// The rectangle the window is drawn at, sampled from its animation.
+    ///
+    /// This is the rectangle the user sees, and everything that has to agree
+    /// with the picture — hit-testing, interaction origins, popup placement,
+    /// borders — reads it rather than the layout target.
+    pub(crate) fn visual_rect(&self, clocks: &Clocks) -> Rect {
+        self.visual.value(clocks)
+    }
+
+    /// The drawn rectangle's origin, rounded to the pixel grid.
+    pub(crate) fn visual_origin(&self, clocks: &Clocks) -> Point<i32, Logical> {
+        let rect = self.visual_rect(clocks);
+        point_i32(rect.x, rect.y)
+    }
+
+    /// The drawn rectangle's size, rounded to the pixel grid.
+    pub(crate) fn visual_size(&self, clocks: &Clocks) -> Size<i32, Logical> {
+        let rect = self.visual_rect(clocks);
+        size_i32(rect.w, rect.h)
+    }
+
+    /// Where the toplevel's `wl_surface` origin sits while it is drawn.
+    pub(crate) fn visual_surface_origin(&self, clocks: &Clocks) -> Point<i32, Logical> {
+        self.visual_origin(clocks) - self.geometry.loc
+    }
+
+    /// Moves the drawn rectangle toward `rect`, for the reason `kind`.
+    ///
+    /// The first placement snaps rather than animates, and a placement that
+    /// repeats the one already being animated toward is a no-op, so this is safe
+    /// to call on every re-layout.
+    pub(crate) fn animate_to(&mut self, rect: Rect, kind: Kind, clocks: &Clocks) {
+        if self.visual_placed {
+            self.visual.animate(rect, kind, clocks);
+        } else {
+            self.visual.snap_to(rect);
+            self.visual_placed = true;
+        }
+    }
+
+    /// Pins the drawn rectangle to `rect`, dropping any motion.
+    ///
+    /// For movement that must not animate — a window following the pointer in a
+    /// drag has to track it 1:1 — and for re-layouts that would otherwise
+    /// restart an animation that is already heading there.
+    pub(crate) fn snap_visual_to(&mut self, rect: Rect) {
+        self.visual.snap_to(rect);
+        self.visual_placed = true;
     }
 }
 
@@ -173,6 +236,11 @@ pub(crate) struct Crawm {
     pub(crate) super_held: bool,
     /// Time of the first frame, used for `wl_surface.frame` timestamps.
     pub(crate) start_time: Instant,
+    /// The frame clock every animation is sampled against (COMPOSITOR.md §9).
+    ///
+    /// Backends re-time it once per frame, from that frame's presentation time;
+    /// everything drawn in a frame therefore sees one instant.
+    pub(crate) frame_clock: Clocks,
     /// Pointer position in logical compositor coordinates.
     pub(crate) pointer_location: Point<f64, Logical>,
     /// Whether [`Self::pointer_location`] means anything yet. Backends report
@@ -257,6 +325,7 @@ impl Crawm {
             interaction: None,
             super_held: false,
             start_time: Instant::now(),
+            frame_clock: Clocks::new(),
             pointer_location: (0.0, 0.0).into(),
             pointer_seen: false,
             cursor_image: CursorImageStatus::default_named(),
@@ -297,6 +366,27 @@ impl Crawm {
         layout_glue::arrange(self);
     }
 
+    /// Re-times the animation clock for the frame about to be drawn.
+    ///
+    /// `frame_time` is the presentation time of that frame, in seconds since
+    /// [`Crawm::start_time`]. The winit backend has no vertical-blank timestamp
+    /// and reads its own loop clock at the frame boundary; the tty backend will
+    /// pass the real one (TODO.md §3.2).
+    pub(crate) fn advance_frame(&mut self, frame_time: f64) {
+        self.frame_clock.advance(frame_time);
+    }
+
+    /// Whether anything on screen is still moving.
+    ///
+    /// The backends ask this after each frame: while it holds, the redraw
+    /// machine keeps requesting frames; once it stops, the compositor goes back
+    /// to drawing nothing at all (ROADMAP.md §9, COMPOSITOR.md §9).
+    pub(crate) fn is_animating(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|window| window.visual.is_animating(&self.frame_clock))
+    }
+
     /// Registers a newly created toplevel with the space/layout model.
     ///
     /// A toplevel with a parent is a transient dialog: it floats immediately
@@ -328,6 +418,17 @@ impl Crawm {
             geometry: Rectangle::default(),
             visible: false,
             mapped: false,
+            visual: Animated::new(
+                Rect::new(
+                    0.0,
+                    0.0,
+                    f64::from(DEFAULT_WINDOW_SIZE.0),
+                    f64::from(DEFAULT_WINDOW_SIZE.1),
+                ),
+                WINDOW_CURVE,
+                Kind::WindowMove,
+            ),
+            visual_placed: false,
         });
 
         self.focus_window(Some(id));
@@ -524,14 +625,15 @@ impl Crawm {
             .iter()
             .find(|window| window.wl_surface() == surface)
         {
-            return Some(window.location);
+            return Some(window.visual_origin(&self.frame_clock));
         }
         for window in &self.windows {
+            let origin = window.visual_origin(&self.frame_clock);
             for (popup, offset) in popup_offsets(window) {
                 if popup.wl_surface() == surface {
                     // `offset` is the popup's surface origin; its geometry
                     // origin is that plus whatever the popup itself reports.
-                    return Some(window.location + offset + popup.geometry().loc);
+                    return Some(origin + offset + popup.geometry().loc);
                 }
             }
         }
@@ -600,7 +702,7 @@ impl Crawm {
     pub(crate) fn window_at(&self, position: Point<f64, Logical>) -> Option<WindowId> {
         let point = crawm::core::Point::new(position.x, position.y);
         let hits = |window: &ManagedWindow| {
-            window.mapped && window.visible && window.rect().contains(point)
+            window.mapped && window.visible && window.visual_rect(&self.frame_clock).contains(point)
         };
         // Floating windows stack by focus, most recent on top.
         for target in self.focus_stack.iter() {
@@ -629,8 +731,9 @@ impl Crawm {
         // this is what keeps the pointer on an open menu (and lets its grab see
         // that the pointer is still on the right client).
         for window in self.windows.iter().rev().filter(|w| w.mapped && w.visible) {
+            let origin = window.visual_origin(&self.frame_clock);
             for (popup, offset) in popup_offsets(window) {
-                let origin = window.location + offset;
+                let origin = origin + offset;
                 if let Some((surface, location)) = under_from_surface_tree(
                     popup.wl_surface(),
                     position - origin.to_f64(),
@@ -643,7 +746,10 @@ impl Crawm {
         }
         let id = self.window_at(position)?;
         let window = self.window(id)?;
-        Some((window.wl_surface().clone(), window.surface_origin()))
+        Some((
+            window.wl_surface().clone(),
+            window.visual_surface_origin(&self.frame_clock),
+        ))
     }
 
     /// Focuses the window under `position` (click-to-focus).
@@ -805,7 +911,10 @@ impl Crawm {
         let Some(id) = self.focused_id() else {
             return;
         };
-        let Some(rect) = self.window(id).map(ManagedWindow::rect) else {
+        let Some(rect) = self
+            .window(id)
+            .map(|window| window.visual_rect(&self.frame_clock))
+        else {
             return;
         };
         let now_floating = self
@@ -915,7 +1024,10 @@ impl Crawm {
         let Some(id) = self.window_at(position) else {
             return false;
         };
-        let rect = self.window(id).map(ManagedWindow::rect).unwrap_or_default();
+        let rect = self
+            .window(id)
+            .map(|window| window.visual_rect(&self.frame_clock))
+            .unwrap_or_default();
         if let Some(window) = self.window_mut(id) {
             if window.window.is_tiled() {
                 window.window.set_floating(true, rect);
@@ -959,6 +1071,9 @@ impl Crawm {
         if let Some(window) = self.window_mut(interaction.id) {
             window.window.float_geometry = Some(rect);
             window.location = point_i32(rect.x, rect.y);
+            // The window tracks the pointer 1:1, so the drawn rectangle is
+            // pinned rather than animated toward the new geometry.
+            window.snap_visual_to(rect);
             if resize {
                 let size = size_i32(rect.w, rect.h);
                 if window.size != size {

@@ -186,7 +186,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 ### 2.6 Layout params, switching, memory
 - [x] `cycle-layout-mode` + `cycle-layout-family` (two actions); set layout per space; `Pertag`-style **per-space layout memory + params restore** (§7.4).
 - [x] Gaps (inner/outer), border width, focus ring color (`border_color` / `unfocused_border_color`).
-- [ ] Switching layout animates rects (stub animation now; real in Phase 3).
+- [x] Switching layout animates rects (real in Phase 3: windows spring to their new rectangles).
 
 ### 2.7 Interactive move/resize
 - [x] `Super+drag` move, `Super+right-drag` resize for floating windows.
@@ -216,9 +216,16 @@ are smooth, interruptible, and free of pops.
   springs are evaluated in closed form, so missed frames cannot drift them.
 
 ### 3.2 Drive animations off the frame clock
-- [ ] Advance animations using the **vblank / `wp_presentation` time**, not `Instant::now()`.
-- [ ] Redraw machine keeps requesting frames while `is_animating()`; stops when settled.
-- [ ] The frame-clock driver in `src/animation` bridges the primitives ↔ placements/elements.
+- [x] Advance animations using **frame time**, not wall-clock reads inside a redraw — the
+  winit backend re-times `Crawm::frame_clock` from its loop clock at the frame boundary
+  (winit reports no presentation time); the tty backend passes the real vblank /
+  `wp_presentation` time in M4.
+- [x] Redraw machine keeps requesting frames while `is_animating()`; stops when settled
+  (`WinitEvent::Redraw` re-queues while anything moves, so idle CPU stays at zero).
+- [x] The frame-clock driver bridges the primitives ↔ placements/elements:
+  `Crawm::advance_frame` / `Crawm::is_animating`, per-window `Animated<Rect>` written by
+  `layout_glue::place`, sampled by `render`. The bridge is glue, so it lives in the binary
+  — `src/animation` stays pure.
 
 ### 3.3 `Scroll` family: `scroll` mode (niri)
 - [ ] Infinite horizontal strip of columns; focused column centered / edge-aligned (`center`, `overspread`).
@@ -232,10 +239,13 @@ are smooth, interruptible, and free of pops.
 - [ ] `default-column-display normal|tabbed`.
 
 ### 3.5 Animate the events that matter
+- [x] Move/resize: x/y/w/h — the window, its border and its popups all render at the
+  animated rectangle, and hit-testing reads it too.
+- [ ] Move/resize: **crop/scale the last buffer** until the client commits the new size.
 - [ ] Open: alpha, scale, offset.
 - [ ] Close: alpha, scale — **snapshot the last buffer** into a texture after unmap (`COMPOSITOR.md` §9 resize handling).
-- [ ] Move/resize: x/y/w/h; on resize **crop/scale the last buffer** until the client commits.
-- [ ] Space switch: per-output slide of window groups; layout switch: per-window rect.
+- [x] Layout switch: per-window rect — windows spring to their new tile.
+- [ ] Space switch: per-output slide of window groups.
 - [ ] Scroll view offset; border/focus-ring color blend.
 
 ### 3.6 Gesture plumbing (touchpad gestures land in M6)
