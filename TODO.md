@@ -228,15 +228,24 @@ are smooth, interruptible, and free of pops.
   — `src/animation` stays pure.
 
 ### 3.3 `Scroll` family: `scroll` mode (niri)
-- [ ] Infinite horizontal strip of columns; focused column centered / edge-aligned (`center`, `overspread`).
-- [ ] Per-column width (proportion/fixed), `preset-column-widths`; column display `normal | tabbed`.
-- [ ] Vertical variant; `focus/center` commands; `neighbor()` for left/right/up/down.
-- [ ] **Stable layout on open** — a new window does not reflow existing columns.
+- [x] Infinite horizontal strip of columns; focused column edge-aligned / centered
+  (`center = never | always | on-overflow`), and `overspread` deciding whether a
+  column wider than the view spills past both edges or is clamped to it.
+- [x] Per-column width (proportion/fixed), presets cycled by `switch-preset-width`;
+  column display `normal | tabbed`. *(The `preset-column-widths` /
+  `default-column-display` config keys ride with M5's schema; the `tabbed` tab bar
+  itself is M7.)*
+- [x] Vertical variant (`vertical-scroll`, the same code on the other axis);
+  `switch-preset-width` / `center-column` commands; `neighbor()` for left/right/up/down.
+- [x] **Stable layout on open** — a new window opens beside the focused column and
+  reflows nothing: existing columns keep their width and their place, and the
+  focused window does not move even when a column before it closes.
 
 ### 3.4 Named spaces + overflow
 - [ ] Named spaces / persistent workspaces; survive output unplug (§3A).
-- [ ] `on-overflow` centering for full-width columns.
-- [ ] `default-column-display normal|tabbed`.
+- [x] `on-overflow` centering for full-width columns. *(The policy landed with the
+  scroller in 3.3; a full-width column simply degenerates to the leading edge.)*
+- [x] `default-column-display normal|tabbed`.
 
 ### 3.5 Animate the events that matter
 - [x] Move/resize: x/y/w/h — the window, its border and its popups all render at the
@@ -246,7 +255,9 @@ are smooth, interruptible, and free of pops.
 - [ ] Close: alpha, scale — **snapshot the last buffer** into a texture after unmap (`COMPOSITOR.md` §9 resize handling).
 - [x] Layout switch: per-window rect — windows spring to their new tile.
 - [ ] Space switch: per-output slide of window groups.
-- [ ] Scroll view offset; border/focus-ring color blend.
+- [ ] Scroll view offset; border/focus-ring color blend. *(A scroll already slides, because
+  every window retargets to its new column rect; animating the offset *itself* — free
+  scroll, gestures, a rubber band at the ends — is what remains.)*
 
 ### 3.6 Gesture plumbing (touchpad gestures land in M6)
 - [ ] Gesture values write directly into animation targets 1:1 while fingers are down; hand velocity to a spring on release (§9).
@@ -388,7 +399,7 @@ Goal: every layout in `ROADMAP.md` §3B works; grouping and scratchpads feel nat
 ### 7.1 More layout modes
 Modes slot into the M2 families (ADR-0004), not a flat list.
 - [ ] `Tile` family: `Grid`, `Deck`, `Dwindle`/spiral (smart split, preserve, manual split), `Fair` + `VerticalFair`, `CenterTile`, `VerticalTile`, `RightTile`.
-- [ ] `Scroll` family: `VerticalScroller`, `VerticalGrid`, `VerticalDeck`.
+- [ ] `Scroll` family: `VerticalGrid`, `VerticalDeck`. *(`VerticalScroller` shipped with `scroll`/`vertical-scroll` in M3.)*
 - [ ] `Stack` family: `Tabbed`.
 - [ ] Per-mode params + presets; per-space memory for every mode.
 

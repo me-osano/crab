@@ -128,7 +128,16 @@ pub trait Layout: core::fmt::Debug + Send + Sync {
 
     /// A layout-specific command; the default applies the shared master
     /// ratio/count commands.
-    fn command(&self, command: LayoutCommand, params: &mut LayoutParams) {
+    ///
+    /// Commands a family owns itself get the layout's own persistent state —
+    /// which is where the scroller keeps its columns — while the rest edit
+    /// [`LayoutParams`] (`COMPOSITOR.md` §7.1).
+    fn command(
+        &self,
+        command: LayoutCommand,
+        params: &mut LayoutParams,
+        _scroll: &mut ScrollState,
+    ) {
         command.apply(params);
     }
 }

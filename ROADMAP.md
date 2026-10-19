@@ -182,7 +182,7 @@ strategy; mode = concrete arrangement. Two cycle actions address the two axes
 | `Tile` | `dwindle` (smart split, preserve, manual split) | mango/Hypr | P1 | M7 |
 | `Tile` | `fair`, `vertical-fair` | mango | P1 | M7 |
 | `Tile` | `center-tile`, `vertical-tile`, `right-tile` | mango | P2 | M7 |
-| `Scroll` | `vertical-scroll` | mango/niri | P2 | M7 |
+| `Scroll` | `vertical-scroll` | mango/niri | P2 | M3 |
 | `Stack` | `tabbed` (grouped slots) | cosmic | P1 | M7 |
 | Per-space layout memory + params restore | mango (`Pertag`) | P0 | M2/M3 |
 | Per-layout directional `neighbor()` | niri | P1 | M2 |
@@ -487,9 +487,15 @@ supersede `COMPOSITOR.md` §22 where they differ.
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
 - [x] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
       interruptible retargeting; `is_animating()`.
-- [ ] `Scroll` family `scroll` mode (columns, focus/center/overspread, proportion presets,
-      per-column width, vertical variant).
+- [x] `Scroll` family: `scroll` **and** `vertical-scroll` modes — the column model lives
+      in `ScrollState`, opening a window never reflows an existing column, and the view
+      follows the focused one under `center = never | always | on-overflow`, with
+      `overspread` deciding what a column wider than the view does. Per-column width
+      (`proportion`/`fixed`), `switch-preset-width`, `center-column`, `normal | tabbed`
+      columns, and main/cross-axis `neighbor()`.
 - [ ] Named spaces + `on-overflow` centering; `default-column-display normal|tabbed`.
+      *(The `on-overflow` policy and `tabbed` display landed with the scroller; the
+      **named**-space layer is still open, and the config keys ride with M5.)*
 - [x] Animate move/resize/layout-switch: windows spring to their new rectangles, and
       borders, popups and hit-testing follow the drawn rectangle.
 - [ ] Animate open/close/space-switch.

@@ -22,6 +22,7 @@ use crawm::core::{
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
     Window, WindowId,
 };
+use crawm::layout;
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
 use smithay::input::SeatState;
@@ -293,6 +294,7 @@ impl Crawm {
             gaps: f64::from(config.gaps),
             border_width: f64::from(config.border_width),
             position: TilePosition::Left,
+            ..LayoutParams::default()
         };
         let space_state = SpaceState::new(
             LayoutKind::from_name(&config.layout).unwrap_or_default(),
@@ -898,10 +900,15 @@ impl Crawm {
         self.relayout();
     }
 
-    /// Applies a layout command (master ratio/count) to the current space.
+    /// Applies a layout command (master ratio/count, column width, centring)
+    /// to the current space.
+    ///
+    /// The command goes through the layout rather than straight to the
+    /// parameters, so a family that owns its state — the scroller and its
+    /// columns — gets to handle it (`crawm::layout::apply_command`).
     pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
         if let Some(space) = self.output_state.current_space_state_mut() {
-            command.apply(&mut space.params);
+            layout::apply_command(space.layout, command, &mut space.params, &mut space.scroll);
         }
         self.relayout();
     }

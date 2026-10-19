@@ -16,7 +16,7 @@ pub struct SpaceState {
     pub layout: LayoutKind,
     /// Its tunables (master ratio/count, gaps, …).
     pub params: LayoutParams,
-    /// Scroll offset for scrolling layouts (reserved for M3).
+    /// Persistent state for scrolling layouts (`COMPOSITOR.md` §7.7).
     pub scroll: ScrollState,
     /// Most-recently-focused windows on this space, newest first.
     pub focus_history: Vec<WindowId>,

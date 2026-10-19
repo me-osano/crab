@@ -31,3 +31,8 @@ Files adapted so far:
     niri's `src/animation/bezier.rs` and libadwaita's easing code
     (LGPL-2.1-or-later).
 
+crawm's scroller (`src/layout/scroll.rs`) implements the model niri's
+scrolling layout established — the column strip, `center-focused-column`,
+`overspread`, preset column widths — rather than adapting niri code; only the
+idea is shared.
+

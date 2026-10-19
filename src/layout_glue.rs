@@ -10,7 +10,9 @@
 //! It is binary-only glue, so it may depend on Smithay freely.
 
 use crawm::animation::Kind;
-use crawm::core::{Direction, LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, WindowId};
+use crawm::core::{
+    Direction, LayoutFamily, LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, WindowId,
+};
 use crawm::layout::{self, LayoutInput, LayoutWindow, Placement};
 
 use crate::state::{Crawm, ManagedWindow, point_i32, size_i32};
@@ -81,6 +83,22 @@ pub(crate) fn arrange(state: &mut Crawm) {
             place(state, placement.window, placement.rect, true, true);
         }
     }
+    // The scroller's model is worth seeing when a strip does not look right; it
+    // is tallied at `trace`, so a normal run stays quiet.
+    if kind.family() == LayoutFamily::Scroll {
+        let placed: Vec<_> = placements
+            .iter()
+            .map(|placement| (placement.window, placement.rect))
+            .collect();
+        tracing::trace!(
+            columns = scroll.columns.len(),
+            offset = scroll.offset,
+            ?focused,
+            placed = ?placed,
+            "scrolled the view"
+        );
+    }
+
     // A scrolling layout may have updated its offset.
     if let Some(space) = state.output_state.current_space_state_mut() {
         space.scroll = scroll;
@@ -171,6 +189,9 @@ fn tiled_windows(state: &Crawm, view: SpaceSet) -> Vec<LayoutWindow> {
 
 /// The current space's layout, parameters, and scroll state (copied out so the
 /// layout call does not borrow `state`).
+///
+/// The scroll state is cloned rather than copied — it owns the scroller's
+/// columns — and written back after the arrange.
 fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
     state.output_state.current_space_state().map_or_else(
         || {
@@ -180,7 +201,7 @@ fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
                 ScrollState::default(),
             )
         },
-        |space| (space.layout, space.params, space.scroll),
+        |space| (space.layout, space.params, space.scroll.clone()),
     )
 }
 

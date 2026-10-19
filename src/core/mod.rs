@@ -28,7 +28,8 @@ pub use geometry::{Point, Rect, Size};
 pub use ids::{LayerId, OutputId, WindowId};
 pub use output::{Output, RedrawState, SpaceState};
 pub use params::{
-    Direction, LayoutCommand, LayoutFamily, LayoutKind, LayoutParams, ScrollState, TilePosition,
+    Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutFamily, LayoutKind,
+    LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, TilePosition, WidthPresets,
 };
 pub use rules::WindowRule;
 pub use spaces::{SpaceSet, SpaceView};

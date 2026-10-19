@@ -12,7 +12,9 @@ border_width = 2
 border_color = "#7aa2f7"
 unfocused_border_color = "#3b4261"
 
-# Layout used for new spaces. See `crawm-cli layouts` for the available set.
+# Layout used for new spaces: `tile`, `monocle`, `floating`, `scroll` or
+# `vertical-scroll`, or a family name (`stack`, `tile`, `scroll`) as an alias
+# for that family's default mode.
 layout = "tile"
 
 # Master area (the `tile` layout): how many windows sit in it, and its size as a

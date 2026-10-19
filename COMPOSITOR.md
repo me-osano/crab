@@ -285,14 +285,14 @@ pub struct SpaceView {
 pub struct SpaceState {
     pub layout: LayoutKind,       // a family + a mode (see §7.2)
     pub params: LayoutParams,     // master ratio, master count, gaps, etc.
-    pub scroll: ScrollState,      // for scroller: focused column, view offset
+    pub scroll: ScrollState,      // for scroller: its columns and the view offset
     pub focus_history: Vec<WindowId>,
 }
 ```
 
 A space's layout is a **mode inside a family** (ADR-0004): `Stack` (`floating`,
 `monocle`, later `tabbed`), `Tile` (M2 `tile`; later `grid`, `deck`, `dwindle`,
-…), and `Scroll` (M3 `scroll`). Two cycle actions address the two axes:
+…), and `Scroll` (M3 `scroll`, `vertical-scroll`). Two cycle actions address the two axes:
 `cycle-layout-mode` (within the family) and `cycle-layout-family` (to the next
 family's default mode). Config and IPC name a mode; a family name is an alias for
 that family's default mode.
@@ -341,8 +341,10 @@ pub trait Layout {
     /// Optional: directional focus within this layout (left/right/up/down).
     fn neighbor(&self, input: &LayoutInput<'_>, from: usize, dir: Direction) -> Option<usize>;
 
-    /// Optional: layout-specific commands (grow master, scroll column, etc.)
-    fn command(&self, _cmd: LayoutCommand, _params: &mut LayoutParams) {}
+    /// Optional: layout-specific commands (grow master, scroll column, etc.).
+    /// The layout's own persistent state comes along, so a family can edit what
+    /// only it understands — the scroller's columns, for instance.
+    fn command(&self, _cmd: LayoutCommand, _params: &mut LayoutParams, _scroll: &mut ScrollState) {}
 }
 ```
 
@@ -364,8 +366,8 @@ first mode is its default, and the family name is accepted as an alias for it.
 | `Tile` | `deck` | Master + stack where only the top of the stack is visible | mango/dwl | M7 |
 | `Tile` | `dwindle` | Recursive splits (smart/manual), with preserve | bspwm/Hyprland | M7 |
 | `Tile` | `fair`, `vertical-*` | Fair splits and vertical variants | mango | M7 |
-| `Scroll` | `scroll` | Infinite horizontal strip of columns; focus/center/overspread | niri | M3 |
-| `Scroll` | `vertical-scroll` | Same, on the vertical axis | niri/mango | M7 |
+| `Scroll` | `scroll` | Infinite horizontal strip of columns | niri | M3 |
+| `Scroll` | `vertical-scroll` | Same strip, run down the vertical axis | niri/mango | M3 |
 
 ### 7.3 Mixing tiling and floating
 
@@ -397,6 +399,55 @@ Because layouts are pure:
 - Unit tests on fixed inputs (golden rect lists).
 - `proptest` invariants: no overlaps in non-floating layouts, all rects inside area, total area coverage within gaps, deterministic output.
 - Snapshot tests for each layout with 1..12 windows.
+- Scroller-specific invariants: every window is placed, the focused column is always in view, columns never overlap, and opening a window leaves every column up to the focused one — and the view — exactly where it was.
+
+### 7.7 The scroller (`Scroll` family)
+
+niri's model, and the reason it feels calm: **the columns are the layout's state,
+not a function of the window list**. `arrange` only *reconciles* them against the
+windows it is handed.
+
+- A **column** is a width plus an ordered list of windows plus a display mode
+  (`normal`, and `tabbed` from M7). Columns live in `ScrollState`, which every
+  space owns, so a column keeps its width and its neighbours across any number
+  of arranges.
+- A window that is not in a column yet becomes a new column **immediately after
+  the focused one** (or after the column that held the focus when the focused
+  window is itself new). Columns whose windows are all gone are dropped. This is
+  what gives the two properties everything else follows from:
+  - opening a window cannot resize or move *any* existing window — the new
+    column simply takes space where it is inserted;
+  - the focused window never drifts on its own — the view offset is re-derived
+    each arrange from the focused column's place in the strip and where it was
+    asked to sit on screen, so columns opening or closing before it move the
+    strip but not the window.
+- A column's main-axis span is its configured width — a `proportion` of the view
+  or a `fixed` size — widened to fit its widest window's minimum size. Whether a
+  column wider than the view *spills past both edges* (`overspread = true`) or is
+  clamped to the view (`overspread = false`) is a separate question from where
+  the view sits.
+- **Where the view sits** — `center-focused-column` — is one of `never` (scroll
+  as little as it takes to keep the focused column visible; the default),
+  `always` (keep it in the middle), or `on-overflow` (centre it only when it
+  cannot sit beside the previously focused column). A too-wide column always
+  aligns its leading edge with the view's.
+- **Inside** a column the windows split the cross axis with the usual gaps; in
+  `tabbed` they all take the column's rectangle and only the focused one is
+  drawn, so a tab switch moves nothing.
+- `switch-preset-width` cycles the focused column through `preset-column-widths`
+  (a third, a half, two thirds by default); `center-column` centres it once.
+  Both commands are the scroller's own — they edit `ScrollState`, not
+  `LayoutParams`, which is why the trait's `command` receives both.
+- Movement along the strip is animated window-by-window like any other relayout
+  (each window's target rect is where its column lands), so a scroll is a
+  `move` animation. Animating the *offset* itself — free scrolling, gestures,
+  a rubber band at the ends — is [section 9](#9-animation-system) work.
+- Off-screen columns are still given an explicit rectangle and drawn (clipped by
+  the output); culling them from the render pass is a damage-tracking concern.
+
+`scroll` and `vertical-scroll` are one implementation on two axes: every
+computation is expressed in terms of the *main* axis (which the strip grows
+along) and the *cross* axis, and `ScrollAxis` turns those into coordinates.
 
 ---
 
@@ -507,16 +558,17 @@ jumps straight to its target without any special-casing downstream.
 | Move/resize in layout | x, y, w, h (render at animated rect; for resize, crop/scale the last buffer until the client catches up) |
 | Space switch | per-output horizontal/vertical slide of window groups |
 | Layout switch | per-window rect |
-| Scroller | view offset |
+| Scroller | view offset (today a scroll lands as per-window moves; animating the offset itself — free scroll, gestures, the ends of the strip — is open) |
 | Border/focus ring | color blend |
 
 Landed in M3: **the per-window rectangle** — move/resize in layout, and with it layout
-switches, which are the same thing seen from a different angle. The window, its border and
-its popups are all drawn at the animated rectangle, and hit-testing, drag origins and popup
-placement read the same rectangle, so nothing lags behind the picture while it moves. The
-space-switch *slide*, the scroller offset, open/close and border colour blends still land
-with the rest of M3 (their properties need the snapshot and crop/scale machinery described
-below).
+switches and scrolling, which are the same thing seen from different angles (a scroll
+retargets every window to the rectangle its column now occupies). The window, its border
+and its popups are all drawn at the animated rectangle, and hit-testing, drag origins and
+popup placement read the same rectangle, so nothing lags behind the picture while it
+moves. The space-switch *slide*, the scroller's *own* offset (for free scrolling and
+gestures), open/close and border colour blends still land with the rest of M3 (their
+properties need the snapshot and crop/scale machinery described below).
 
 ### Resize handling
 

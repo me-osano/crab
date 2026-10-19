@@ -8,22 +8,28 @@
 //! drawn above tiled windows by the compositor, so layouts never need to know
 //! about them (`COMPOSITOR.md` §7.1).
 //!
-//! M2 ships three layouts — [`Tile`], [`Monocle`], and [`Floating`] — selected
-//! through [`LayoutKind`]. The compositor picks one with [`arrange`] /
-//! [`neighbor`] rather than holding a trait object per space.
+//! M2 ships [`Tile`], [`Monocle`], and [`Floating`]; M3 adds the scroller,
+//! [`Scroll`], which is `scroll` and `vertical-scroll` on one axis-generic
+//! implementation. The compositor picks one through [`LayoutKind`] with
+//! [`arrange`] / [`neighbor`] / [`apply_command`] rather than holding a trait
+//! object per space.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod placement;
+mod scroll;
 mod tile;
 
 pub use placement::{
     Layout, LayoutInput, LayoutWindow, Placement, apply_hints, directional_neighbor,
 };
+pub use scroll::Scroll;
 pub use tile::Tile;
 
-use crate::core::{LayoutKind, Point, Rect, Size};
+use crate::core::{
+    Direction, LayoutCommand, LayoutKind, LayoutParams, Point, Rect, ScrollAxis, ScrollState, Size,
+};
 
 /// Shows only the focused window, filling the area (others are hidden).
 #[derive(Clone, Copy, Debug, Default)]
@@ -78,6 +84,8 @@ pub fn layout_for(kind: LayoutKind) -> Box<dyn Layout> {
         LayoutKind::Tile => Box::new(Tile),
         LayoutKind::Monocle => Box::new(Monocle),
         LayoutKind::Floating => Box::new(Floating),
+        LayoutKind::Scroll => Box::new(Scroll::new(ScrollAxis::Horizontal)),
+        LayoutKind::VerticalScroll => Box::new(Scroll::new(ScrollAxis::Vertical)),
     }
 }
 
@@ -99,9 +107,24 @@ pub fn neighbor(
     kind: LayoutKind,
     input: &LayoutInput<'_>,
     from: usize,
-    direction: crate::core::Direction,
+    direction: Direction,
 ) -> Option<usize> {
     layout_for(kind).neighbor(input, from, direction)
+}
+
+/// Applies a [`LayoutCommand`] to `kind`'s parameters and persistent state.
+///
+/// The compositor calls this rather than [`LayoutCommand::apply`] directly, so
+/// commands that a family owns itself — the scroller's width and centring,
+/// which need its columns — reach the layout that understands them
+/// (`COMPOSITOR.md` §7.1).
+pub fn apply_command(
+    kind: LayoutKind,
+    command: LayoutCommand,
+    params: &mut LayoutParams,
+    scroll: &mut ScrollState,
+) {
+    layout_for(kind).command(command, params, scroll);
 }
 
 /// A cascading starting position for a new floating window.
@@ -204,7 +227,46 @@ mod tests {
         assert_eq!(by_name("tile").unwrap().kind(), LayoutKind::Tile);
         assert_eq!(by_name("monocle").unwrap().kind(), LayoutKind::Monocle);
         assert_eq!(by_name("floating").unwrap().kind(), LayoutKind::Floating);
+        assert_eq!(by_name("scroll").unwrap().kind(), LayoutKind::Scroll);
+        assert_eq!(
+            by_name("vertical-scroll").unwrap().kind(),
+            LayoutKind::VerticalScroll
+        );
         assert!(by_name("nope").is_none());
+    }
+
+    #[test]
+    fn every_kind_has_a_layout() {
+        for kind in LayoutKind::ALL {
+            assert_eq!(layout_for(kind).kind(), kind);
+        }
+    }
+
+    #[test]
+    fn apply_command_reaches_the_layout_that_owns_it() {
+        // The shared commands land in the parameters…
+        let mut params = LayoutParams::default();
+        let mut scroll = ScrollState::default();
+        apply_command(
+            LayoutKind::Tile,
+            LayoutCommand::IncMasterCount,
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(params.master_count, 2);
+
+        // …and the scroller's land in its state, which only it can reach.
+        apply_command(
+            LayoutKind::Scroll,
+            LayoutCommand::CenterColumn,
+            &mut params,
+            &mut scroll,
+        );
+        assert!(
+            scroll.center_request,
+            "the scroller handled its own command"
+        );
+        assert_eq!(params.master_count, 2, "and left the parameters alone");
     }
 
     #[test]

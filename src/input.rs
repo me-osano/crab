@@ -55,6 +55,10 @@ enum Action {
     MasterRatio(bool),
     /// Add (`true`) or remove a master slot.
     MasterCount(bool),
+    /// Cycle the focused scroll column's width through the presets.
+    PresetWidth,
+    /// Scroll the focused scroll column to the middle of the view.
+    CenterColumn,
     /// Ask the focused window to close.
     Close,
 }
@@ -153,6 +157,8 @@ fn bind_action(modifiers: &ModifiersState, keysym: Keysym) -> Option<Action> {
         keysyms::KEY_l if shift => Action::MasterCount(true),
         keysyms::KEY_h => Action::MasterRatio(false),
         keysyms::KEY_l => Action::MasterRatio(true),
+        keysyms::KEY_r => Action::PresetWidth,
+        keysyms::KEY_c => Action::CenterColumn,
         keysyms::KEY_q => Action::Close,
         _ => return None,
     })
@@ -189,6 +195,8 @@ fn apply(state: &mut Crawm, action: Action) {
         } else {
             LayoutCommand::DecMasterCount
         }),
+        Action::PresetWidth => state.layout_command(LayoutCommand::SwitchPresetWidth),
+        Action::CenterColumn => state.layout_command(LayoutCommand::CenterColumn),
         Action::Close => state.close_focused(),
     }
 }
