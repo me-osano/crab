@@ -1,13 +1,15 @@
-//! The bridge between the pure layout engine and Smithay state.
+//! The bridge between the pure layout engine (`crawm::layout`) and Smithay state.
 //!
 //! `crawm::layout` is a pure function over logical rectangles; [`Crawm`] holds
 //! `ToplevelSurface`s that must be told about those rectangles through
 //! `configure`. This module is the one place that knows both: it reads the
 //! current space's layout, builds the [`LayoutInput`], and applies the resulting
 //! [`Placement`]s (and the floating/fullscreen rules the layouts deliberately do
-//! not know about, `COMPOSITOR.md` §7.1).
+//! not know about, `COMPOSITOR.md` §7.1). Every layout *decision* is made in the
+//! pure module; this one only carries it out.
 //!
-//! It is binary-only glue, so it may depend on Smithay freely.
+//! It is part of the binary (see [`crate::compositor`]), so it may depend on
+//! Smithay freely.
 
 use crawm::animation::Kind;
 use crawm::core::{
@@ -15,7 +17,7 @@ use crawm::core::{
 };
 use crawm::layout::{self, LayoutInput, LayoutWindow, Placement};
 
-use crate::state::{Crawm, ManagedWindow, point_i32, size_i32};
+use crate::compositor::state::{Crawm, ManagedWindow, point_i32, size_i32};
 
 /// Gap between two cascaded floating windows, in logical pixels.
 const CASCADE_STEP: f64 = 32.0;

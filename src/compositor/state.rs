@@ -3,8 +3,9 @@
 //! [`Crawm`] owns every piece of Smithay state the compositor touches and is
 //! owned by the main loop on one thread (ROADMAP.md §6 M1: *one
 //! `calloop::EventLoop<State>` on the main thread; `State` is single-owner*).
-//! Protocol handling is split per protocol under [`crate::handlers`]; input
-//! lives in [`crate::input`] and drawing in [`crate::render`].
+//! Protocol handling is split per protocol under
+//! [`crate::compositor::handlers`]; input lives in [`crate::compositor::input`]
+//! and drawing in [`crate::compositor::render`].
 //!
 //! The pure model — windows, spaces, layouts, focus — lives in the `crawm`
 //! library ([`crawm::core`], [`crawm::layout`]); this file is the glue that
@@ -22,7 +23,6 @@ use crawm::core::{
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
     Window, WindowId,
 };
-use crawm::layout;
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
 use smithay::input::SeatState;
@@ -42,7 +42,7 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::ShmState;
 
-use crate::layout_glue;
+use crate::compositor::layout;
 
 /// Size a new toplevel is configured to before the layout first sizes it, in
 /// logical pixels. Floating windows pick their own size instead.
@@ -365,7 +365,7 @@ impl Crawm {
 
     /// Recomputes every window's rectangle for the current view and layout.
     pub(crate) fn relayout(&mut self) {
-        layout_glue::arrange(self);
+        layout::arrange(self);
     }
 
     /// Re-times the animation clock for the frame about to be drawn.
@@ -794,7 +794,7 @@ impl Crawm {
         let Some(current) = self.focused_id() else {
             return;
         };
-        if let Some(next) = layout_glue::directional_target(self, current, direction) {
+        if let Some(next) = layout::directional_target(self, current, direction) {
             self.focus_window(Some(next));
             self.relayout();
         }
@@ -908,7 +908,12 @@ impl Crawm {
     /// columns — gets to handle it (`crawm::layout::apply_command`).
     pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
         if let Some(space) = self.output_state.current_space_state_mut() {
-            layout::apply_command(space.layout, command, &mut space.params, &mut space.scroll);
+            crawm::layout::apply_command(
+                space.layout,
+                command,
+                &mut space.params,
+                &mut space.scroll,
+            );
         }
         self.relayout();
     }

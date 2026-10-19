@@ -6,7 +6,7 @@
 //! stays *state*, and adding a protocol (M3's layer shell, idle, screencopy, …)
 //! is one new file rather than another arm in a mega-`impl`.
 //!
-//! [`Crawm`]: crate::state::Crawm
+//! [`Crawm`]: crate::compositor::state::Crawm
 
 mod compositor;
 mod data_device;

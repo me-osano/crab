@@ -38,7 +38,7 @@ use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
 };
 
-use crate::state::{Crawm, ManagedWindow};
+use crate::compositor::state::{Crawm, ManagedWindow};
 
 /// Background color of the compositor (dark slate).
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
@@ -120,7 +120,7 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
         // window; a popup without a buffer yet yields no elements.
         for window in state.windows.iter().filter(|w| w.mapped && w.visible) {
             let origin = window.visual_origin(&state.frame_clock);
-            for (popup, offset) in crate::state::popup_offsets(window) {
+            for (popup, offset) in crate::compositor::state::popup_offsets(window) {
                 surfaces.extend(render_elements_from_surface_tree(
                     &mut *renderer,
                     popup.wl_surface(),
@@ -224,7 +224,7 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             .filter(|window| window.mapped && window.visible)
         {
             send_frame_callbacks(window.wl_surface(), time);
-            for (popup, _) in crate::state::popup_offsets(window) {
+            for (popup, _) in crate::compositor::state::popup_offsets(window) {
                 send_frame_callbacks(popup.wl_surface(), time);
             }
         }

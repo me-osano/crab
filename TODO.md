@@ -52,7 +52,7 @@ locally as the canonical reference.
 - [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crawm-anim` crate).
 - [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crawm-config` crate).
 - [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
-- [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style).
+- [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style). Smithay-facing code lives under `src/compositor/` (state, handlers, input, render, the layout bridge), backends under `src/backend/`.
 - [x] `src/lib.rs` — the package is lib + bin: the pure modules are the reusable library surface (so doctests run and `tests/` can drive them directly); the boundary script rejects any non-pure `mod` here.
 - [x] Backend cargo features — `backend-winit` (default), `backend-tty`, `backend-x11` gate Smithay's backend stacks, so a default build skips DRM/session/input; CI builds `--all-features` to keep proving the stack.
 - [x] `crawm-cli/` — CLI client (renamed from `crawm-msg`).
@@ -142,7 +142,7 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 (every named icon draws as the built-in arrow until the icon set lands), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
 `xdg_decoration` (client-side decorations work). Popup grabs and `xdg_popup.reposition`
 landed in `handlers/xdg_shell.rs` (M3 scope, done early) and render from the
-`PopupManager` tree in `src/render.rs`.
+`PopupManager` tree in `src/compositor/render.rs`.
 
 ---
 
@@ -163,7 +163,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 ### 2.2 `src/layout` engine (`COMPOSITOR.md` §7.1)
 - [x] `LayoutInput`, `Placement { window, rect, visible, z_hint }`, `LayoutParams`, `ScrollState`.
 - [x] `trait Layout { kind; arrange; neighbor?; command? }` — **pure functions**, no globals.
-- [x] `layout_glue.rs` in the binary: bridge Smithay windows → layout input; map `Placement` back.
+- [x] `compositor/layout.rs` in the binary: bridge Smithay windows → layout input; map `Placement` back.
 - [x] **Floating windows are excluded from `arrange`** and drawn above tiled windows with per-window raise.
 
 ### 2.3 Layout families (ADR-0004)
@@ -224,7 +224,7 @@ are smooth, interruptible, and free of pops.
   (`WinitEvent::Redraw` re-queues while anything moves, so idle CPU stays at zero).
 - [x] The frame-clock driver bridges the primitives ↔ placements/elements:
   `Crawm::advance_frame` / `Crawm::is_animating`, per-window `Animated<Rect>` written by
-  `layout_glue::place`, sampled by `render`. The bridge is glue, so it lives in the binary
+  `compositor::layout::place`, sampled by `render`. The bridge is glue, so it lives in the binary
   — `src/animation` stays pure.
 
 ### 3.3 `Scroll` family: `scroll` mode (niri)
@@ -599,7 +599,7 @@ crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
                    src/config     → core, serde, toml, thiserror
                    src/layout     → core
                    src/animation  → core            (curves; geometry via core)
-                 · bin target (src/main.rs) + Smithay glue (backends, handlers, render, input)
+                 · bin target (src/main.rs) + Smithay glue (src/compositor/, src/backend/)
                  · pure modules are Smithay-free and depend downward only (source-scanned in CI)
 crawm-ipc      → (leaf; serde only)
 crawm-cli      → ipc                        (CLI)

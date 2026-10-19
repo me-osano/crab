@@ -104,7 +104,7 @@ family's default mode (so `layout = "tile"` and `layout = "stack"` both work, an
 - **The `floating` layout now floats.** Previously a space whose layout was
   `floating` produced no placements for its *tiled* windows, which stayed
   invisible. In the family model `floating` is the `Stack` family's free mode, so
-  the compositor cascades every window on such a space (`layout_glue.rs`).
+  the compositor cascades every window on such a space (`compositor/layout.rs`).
 - **Names are versionless and additive.** Config/IPC names (`floating`, `monocle`,
   `tile`, `stack`, `scroll`, …) are stable; new modes are added, never renamed.
 - `COMPOSITOR.md` §6–7 and `ROADMAP.md` §3A–3B are updated to this vocabulary.

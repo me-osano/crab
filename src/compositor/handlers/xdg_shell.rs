@@ -18,7 +18,7 @@ use smithay::wayland::shell::xdg::{
     Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 
-use crate::state::Crawm;
+use crate::compositor::state::Crawm;
 
 impl XdgShellHandler for Crawm {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -95,7 +95,7 @@ impl XdgShellHandler for Crawm {
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
         // TODO(M3): honour client-initiated interactive moves, which arrive with
         // a pointer serial and need a real pointer grab. M2 only starts drags
-        // from the compositor's own keybinds (see `src/input.rs`).
+        // from the compositor's own keybinds (see `src/compositor/input.rs`).
     }
 
     fn resize_request(

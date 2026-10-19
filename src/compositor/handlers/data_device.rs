@@ -9,7 +9,7 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 
-use crate::state::Crawm;
+use crate::compositor::state::Crawm;
 
 impl SelectionHandler for Crawm {
     type SelectionUserData = ();

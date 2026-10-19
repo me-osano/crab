@@ -8,7 +8,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 
-use crate::state::{ClientState, Crawm};
+use crate::compositor::state::{ClientState, Crawm};
 
 impl CompositorHandler for Crawm {
     fn compositor_state(&mut self) -> &mut CompositorState {

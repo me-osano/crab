@@ -178,7 +178,9 @@ crawm/
 
 The package is **lib + bin**: `src/lib.rs` exposes only the pure
 `src/{core,config,layout,animation}` modules, and `src/main.rs` is the thin
-Smithay entry point (backends, handlers, render, input). `scripts/check-boundaries.sh`
+Smithay entry point. Everything binary-side that knows Smithay lives in
+`src/compositor/` (state, handlers, input, render, the layout bridge), so the
+shared code is one directory and the platform code another. `scripts/check-boundaries.sh`
 rejects any non-pure `mod` in `lib.rs`, so the reusable surface stays graphics-free.
 
 ### Inside `src/`
@@ -186,27 +188,22 @@ rejects any non-pure `mod` in `lib.rs`, so the reusable surface stays graphics-f
 ```
 src/
 ├── lib.rs                      # library surface: pure modules only
-├── main.rs                     # bin: backends, handlers, render, input
-├── state.rs                    # State struct + top-level event dispatch
+├── main.rs                     # bin entry point: backend selection, logging, panic hook
+├── compositor/                 # everything that knows Smithay (binary-side)
+│   ├── mod.rs
+│   ├── state.rs                # Crawm: state + top-level event dispatch
+│   ├── layout.rs               # bridges Smithay windows to the pure layout module
+│   ├── input.rs                # seat events + binds; splits per device class when it earns it
+│   ├── render.rs               # frame composition; splits into render/ when effects need it
+│   └── handlers/               # one file per protocol (xdg_shell.rs, layer_shell.rs, ...)
 ├── backend/
 │   ├── mod.rs                  # Backend trait
 │   ├── winit.rs
 │   ├── tty.rs                  # DRM/KMS, multi-GPU later
 │   └── headless.rs             # for tests
-├── handlers/                   # one file per protocol (xdg_shell.rs, layer_shell.rs, ...)
-├── input/
-│   ├── mod.rs
-│   ├── keyboard.rs
-│   ├── pointer.rs
-│   ├── gestures.rs
-│   └── binds.rs
-├── render/
-│   ├── mod.rs                  # element ordering, frame composition
-│   ├── elements/               # window, layer, cursor, border, shadow, blur, text
-│   ├── shaders.rs
-│   └── damage.rs
-├── layout/                    # pure layout engine (Layout trait, layouts, placement)
-├── layout_glue.rs              # bridges Smithay windows to the pure layout module
+├── core/                       # pure data: ids, geometry, spaces, window model, no Smithay
+├── config/                     # parsing, validation, defaults, schema (pure)
+├── layout/                     # pure layout engine (Layout trait, layouts, placement)
 ├── animation/                  # pure primitives; driver advances them off the frame clock
 ├── ipc.rs
 ├── config_reload.rs
@@ -934,7 +931,7 @@ Measure continuously; regressions block merges once benchmarks exist.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Smithay API churn | Rebase pain | Pin commit; update in dedicated PRs; keep Smithay-facing code isolated in `handlers/` and `backend/` |
+| Smithay API churn | Rebase pain | Pin commit; update in dedicated PRs; keep Smithay-facing code isolated in `compositor/` and `backend/` |
 | Scope creep (effects, every protocol) | Never reaching daily-drivable | Strict milestone gating (section 22); P0/P1 first; effects behind features |
 | Layout/animation coupling bugs | Glitchy resize | Pure layout module; explicit animation retargeting tests |
 | NVIDIA quirks | Unusable for part of audience | Test early on NVIDIA proprietary + nouveau/NVK; document known issues |

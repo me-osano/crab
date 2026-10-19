@@ -3,7 +3,7 @@
 use smithay::delegate_shm;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 
-use crate::state::Crawm;
+use crate::compositor::state::Crawm;
 
 impl ShmHandler for Crawm {
     fn shm_state(&self) -> &ShmState {

@@ -23,8 +23,8 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
 
-use crate::state::{ClientState, Crawm};
-use crate::{input, render};
+use crate::compositor::state::{ClientState, Crawm};
+use crate::compositor::{input, render};
 
 /// Base name for crawm's Wayland socket; `bind_auto` appends `-N`.
 const SOCKET_BASENAME: &str = "crawm";

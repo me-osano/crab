@@ -19,7 +19,7 @@ use smithay::input::keyboard::{FilterResult, Keysym, ModifiersState, keysyms};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point};
 
-use crate::state::{Crawm, GrabMode};
+use crate::compositor::state::{Crawm, GrabMode};
 
 /// `BTN_LEFT`.
 const BTN_LEFT: u32 = 0x110;

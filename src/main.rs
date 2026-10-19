@@ -1,9 +1,11 @@
 //! crawm — a Wayland compositor merging mango-style spaces, niri scrolling, and cosmic
 //! protocol breadth.
 //!
-//! This binary is the thin Smithay entry point: it owns backends, handlers,
-//! rendering, and input. The Smithay-free logic lives in the `crawm` library
-//! (see `src/lib.rs` and `ROADMAP.md` §5), which is also what `tests/` drives.
+//! This binary is the thin Smithay entry point: backend selection, logging, and
+//! the top-level event loop. Everything that touches Smithay lives in
+//! `src/compositor/` (state, handlers, input, render) and `src/backend/`, while
+//! the Smithay-free logic lives in the `crawm` library (see `src/lib.rs` and
+//! `ROADMAP.md` §5), which is also what `tests/` drives.
 //!
 //! Which backends are compiled in is a cargo feature: `backend-winit` (the
 //! default, nested development path) and `backend-tty` (bare-metal DRM/KMS, M4).
@@ -14,22 +16,14 @@
 
 mod backend;
 mod cli;
-// The compositor core is built by whichever backend actually uses it: M1's
-// winit backend builds the state, runs the handlers, and draws. The headless
-// path stays state-free, and the tty backend (M4) bails before it needs state,
-// so gating on `backend-winit` alone keeps every feature combination
-// warning-free; M4 widens this to `any(backend-winit, backend-tty)`.
+// The compositor is built by whichever backend actually uses it: M1's winit
+// backend builds the state, runs the handlers, and draws. The headless path
+// stays state-free, and the tty backend (M4) bails before it needs state, so
+// gating on `backend-winit` alone keeps every feature combination warning-free;
+// M4 widens this to `any(backend-winit, backend-tty)`.
 #[cfg(feature = "backend-winit")]
-mod handlers;
-#[cfg(feature = "backend-winit")]
-mod input;
-#[cfg(feature = "backend-winit")]
-mod layout_glue;
+mod compositor;
 mod logging;
-#[cfg(feature = "backend-winit")]
-mod render;
-#[cfg(feature = "backend-winit")]
-mod state;
 
 use anyhow::Context as _;
 use clap::Parser as _;

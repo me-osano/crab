@@ -419,13 +419,12 @@ Rules:
   `tests/` (the root `Cargo.toml` is both the `crawm` package and the workspace
   root, niri-style).
 
-Inside `src/`: `lib.rs` (pure library surface), `main.rs`, `state.rs`,
-`backend/{mod,winit,tty,headless}.rs`,
-`handlers/` (one per protocol), `input/{mod,keyboard,pointer,gestures,binds}.rs`,
-`render/{mod,elements/,shaders.rs,damage.rs}`, `core/` (pure data model),
-`config/` (pure TOML parse/validate), `layout/` (pure), `layout_glue.rs`,
-`animation/` (pure primitives + the frame-clock driver), `ipc.rs`,
-`config_reload.rs`, `screencast/`, `xwayland.rs`. (See `COMPOSITOR.md` §5.)
+Inside `src/`: `lib.rs` (pure library surface), `main.rs`, `compositor/`
+(binary-side: `state.rs`, `layout.rs`, `input.rs`, `render.rs`, `handlers/`),
+`backend/{mod,winit,tty,headless}.rs`, `core/` (pure data model), `config/`
+(pure TOML parse/validate), `layout/` (pure), `animation/` (pure primitives +
+the frame-clock driver), `ipc.rs`, `config_reload.rs`, `screencast/`,
+`xwayland.rs`. (See `COMPOSITOR.md` §5.)
 
 ---
 
@@ -732,7 +731,7 @@ attribution — including the HDR/colour-management work — while keeping the
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Smithay API churn | rebase pain | Pin a git rev; isolate Smithay-facing code in `handlers/`+`backend/`; update in dedicated PRs |
+| Smithay API churn | rebase pain | Pin a git rev; isolate Smithay-facing code in `compositor/`+`backend/`; update in dedicated PRs |
 | Scope creep (14 layouts + effects + HDR) | never daily-drivable | Hard milestone gating; M6 exit = one full week as primary |
 | Renderer choice blocks HDR | rework | **Resolved (ADR-0002):** GLES, and HDR works on GLES. Residual: Smithay colour-management is **unmerged** → plan to vendor a patched Smithay rev |
 | Effects ↔ damage bugs | frame drops | Budget + cache blur; keep effects behind flags; M8 exit checks §9 |
