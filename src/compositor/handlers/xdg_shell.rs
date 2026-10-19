@@ -182,7 +182,7 @@ impl XdgShellHandler for Crawm {
         if let Some(window) = self.window_mut(id) {
             if !window.window.floating {
                 let rect = window.visual_rect(&clocks);
-                window.window.set_floating(true, rect);
+                window.float_at(rect);
                 changed = true;
             }
         }

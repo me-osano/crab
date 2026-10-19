@@ -51,6 +51,16 @@ pub(crate) const DEFAULT_WINDOW_SIZE: (i32, i32) = (800, 600);
 /// How much of a window must stay on screen when it is dragged, in pixels.
 const MIN_VISIBLE: f64 = 32.0;
 
+/// How many different sizes a client may commit instead of the one it was
+/// configured to before we stop asking it to resize.
+///
+/// A client that is merely behind commits its old size once (which is already
+/// booked, so it does not count again) and then the new one; a client that
+/// needs a second configure answers the first retry. Three is room for both,
+/// and a client that keeps answering with fresh sizes of its own still only
+/// buys itself two retries.
+const MAX_SIZE_REFUSALS: u8 = 3;
+
 /// The curve a window's rectangle moves along when the layout moves it.
 ///
 /// One curve for every window rectangle for now; M5 makes it per-event config
@@ -93,6 +103,8 @@ pub(crate) struct ManagedWindow {
     /// snaps, so a new window appears where the layout put it instead of flying
     /// in from its default rectangle.
     visual_placed: bool,
+    /// What the client has been asked to be, and how it has answered.
+    configure: Configure,
 }
 
 impl ManagedWindow {
@@ -164,6 +176,165 @@ impl ManagedWindow {
     pub(crate) fn snap_visual_to(&mut self, rect: Rect) {
         self.visual.snap_to(rect);
         self.visual_placed = true;
+    }
+
+    /// Whether the client has refused enough sizes that we stopped asking it
+    /// to be the size the layout drew it at.
+    pub(crate) fn is_size_refusing(&self) -> bool {
+        self.configure.gave_up()
+    }
+
+    /// Lets the window size itself, wherever it is now.
+    ///
+    /// A floating window owns its size, so the geometry it commits becomes the
+    /// truth and there is nothing left to compare its commits against until
+    /// the layout takes the size back over.
+    pub(crate) fn float_at(&mut self, rect: Rect) {
+        self.window.set_floating(true, rect);
+        self.configure = Configure::default();
+    }
+
+    /// Asks the client to be `size`, the size its rectangle is about to have.
+    ///
+    /// The request is clamped to the client's own size hints: a window that
+    /// has told us it cannot be smaller than `min_size` is never going to
+    /// commit a smaller size, and asking for something it cannot be only earns
+    /// a refusal. Asking twice for one size is skipped, which is what keeps a
+    /// re-layout from configuring a window over and over.
+    ///
+    /// The size is only a request — [`Self::on_committed_size`] watches what
+    /// the client actually commits.
+    pub(crate) fn configure_to(&mut self, size: Size<i32, Logical>) {
+        let size = clamp_to_hints(size, self.window.min_size, self.window.max_size);
+        if self.configure.ask(size) {
+            self.send_configure(size);
+        }
+    }
+
+    /// Sends a configure for what was last asked, without forgetting what was
+    /// refused for it: a retry asks again, it does not start over.
+    fn retry_configure(&mut self) {
+        let Some(size) = self.configure.asked() else {
+            return;
+        };
+        self.send_configure(size);
+    }
+
+    fn send_configure(&mut self, size: Size<i32, Logical>) {
+        tracing::trace!(title = ?self.window.title, ?size, "sending configure");
+        self.surface
+            .with_pending_state(|pending| pending.size = Some(size));
+        self.surface.send_configure();
+    }
+
+    /// Books what a commit says about [`Self::configure_to`], asking again if
+    /// the client is merely behind.
+    fn on_committed_size(&mut self, size: Size<i32, Logical>) {
+        match self.configure.commit(size) {
+            Reply::TryAgain => {
+                tracing::trace!(
+                    title = ?self.window.title,
+                    committed = ?size,
+                    "the client answered with a size it was not asked for; asking again"
+                );
+                self.retry_configure();
+            }
+            Reply::GaveUp => {
+                tracing::debug!(
+                    title = ?self.window.title,
+                    asked = ?self.configure.asked(),
+                    committed = ?size,
+                    "client refuses the size it is configured to"
+                );
+            }
+            Reply::Complied | Reply::SameAsBefore => {}
+        }
+    }
+}
+
+/// What a commit says about the size a client was asked to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reply {
+    /// It is the size it was asked for, and everything is forgotten.
+    Complied,
+    /// The same size it committed last time, wrong or right: nothing new.
+    SameAsBefore,
+    /// A size it has not committed before, and not the one asked for:
+    /// worth asking once more.
+    TryAgain,
+    /// Enough different sizes have been answered with: stop asking.
+    GaveUp,
+}
+
+/// What a client was asked to be, and how it has answered.
+///
+/// A configure is a request, not a command, so this is what tells "the client
+/// has not caught up yet" — over within a frame or two, with the surface
+/// drawn into its rectangle meanwhile — from "the client is never going to be
+/// that size", which has to be given up on: configuring a client that ignores
+/// us forever is exactly the loop this must not become (TODO.md §1.5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Configure {
+    /// The size last asked for, if any.
+    asked: Option<Size<i32, Logical>>,
+    /// The size last committed, if any.
+    committed: Option<Size<i32, Logical>>,
+    /// How many *different* sizes have been committed instead of `asked`.
+    refusals: u8,
+    /// Whether asking has been given up on.
+    gave_up: bool,
+}
+
+impl Configure {
+    /// The size last asked for.
+    fn asked(&self) -> Option<Size<i32, Logical>> {
+        self.asked
+    }
+
+    /// Whether the client has refused so many sizes that we stopped asking.
+    fn gave_up(&self) -> bool {
+        self.gave_up
+    }
+
+    /// Starts asking for `size`, unless it has already been asked for.
+    ///
+    /// A size that differs from the last one is a fresh start: the client
+    /// refused nothing yet for *this* rectangle, so it gets a new allowance of
+    /// refusals. Asking again for the same size returns false, which is what
+    /// keeps a re-layout from configuring a window over and over.
+    fn ask(&mut self, size: Size<i32, Logical>) -> bool {
+        if self.asked == Some(size) {
+            return false;
+        }
+        self.asked = Some(size);
+        self.refusals = 0;
+        self.gave_up = false;
+        true
+    }
+
+    /// Books a commit of `size` and says what it is worth.
+    ///
+    /// Only a size the client has not committed before is a new answer: the
+    /// same one repeated — which is what a client that ignores configure keeps
+    /// giving, and what a terminal that rounds its window to whole character
+    /// cells always gives — is not, so this cannot turn into a configure loop.
+    /// A client that commits the size it was asked for starts over.
+    fn commit(&mut self, size: Size<i32, Logical>) -> Reply {
+        let previous = self.committed.replace(size);
+        if self.asked == Some(size) {
+            self.refusals = 0;
+            self.gave_up = false;
+            return Reply::Complied;
+        }
+        if self.gave_up || previous == Some(size) {
+            return Reply::SameAsBefore;
+        }
+        self.refusals = self.refusals.saturating_add(1);
+        if self.refusals >= MAX_SIZE_REFUSALS {
+            self.gave_up = true;
+            return Reply::GaveUp;
+        }
+        Reply::TryAgain
     }
 }
 
@@ -412,6 +583,13 @@ impl Crawm {
         });
         surface.send_configure();
 
+        // Only tiled windows were given a size to be; a floating one chose
+        // its own and gets an empty configure (xdg-shell's initial one).
+        let mut configure = Configure::default();
+        if !window.floating {
+            configure.ask(DEFAULT_WINDOW_SIZE.into());
+        }
+
         self.windows.push(ManagedWindow {
             surface,
             window,
@@ -431,6 +609,7 @@ impl Crawm {
                 Kind::WindowMove,
             ),
             visual_placed: false,
+            configure,
         });
 
         self.focus_window(Some(id));
@@ -541,6 +720,11 @@ impl Crawm {
                 }
                 let rect = window.rect();
                 window.window.float_geometry = Some(rect);
+            } else if geometry.size.w > 0 && geometry.size.h > 0 {
+                // A tiled window is the size we configured it to, or it is
+                // behind, or it is refusing; this is where the three are told
+                // apart (TODO.md §1.5).
+                window.on_committed_size(geometry.size);
             }
         }
 
@@ -1042,7 +1226,7 @@ impl Crawm {
             .unwrap_or_default();
         if let Some(window) = self.window_mut(id) {
             if window.window.is_tiled() {
-                window.window.set_floating(true, rect);
+                window.float_at(rect);
             }
         }
         self.focus_window(Some(id));
@@ -1090,10 +1274,10 @@ impl Crawm {
                 let size = size_i32(rect.w, rect.h);
                 if window.size != size {
                     window.size = size;
-                    window
-                        .surface
-                        .with_pending_state(|state| state.size = Some(size));
-                    window.surface.send_configure();
+                    // The client may not be able to follow — its size hints
+                    // may not reach this far — which `configure_to` clamps
+                    // to; the window is drawn at the dragged size either way.
+                    window.configure_to(size);
                 }
             }
         }
@@ -1141,6 +1325,37 @@ pub(crate) fn point_i32(x: f64, y: f64) -> Point<i32, Logical> {
 pub(crate) fn size_i32(w: f64, h: f64) -> Size<i32, Logical> {
     let size: Size<i32, Logical> = ((w.round() as i32).max(1), (h.round() as i32).max(1)).into();
     size
+}
+
+/// Clamps a size into the hints a client set for itself.
+///
+/// A hint of zero on an axis means the client set no limit on it, which is how
+/// `xdg_toplevel.set_min_size`/`set_max_size` spell "unbounded". Asking a
+/// client for a size outside its hints gets a refusal, so the layout sizes it
+/// to what it accepts instead.
+pub(crate) fn clamp_to_hints(
+    size: Size<i32, Logical>,
+    min: Option<CoreSize>,
+    max: Option<CoreSize>,
+) -> Size<i32, Logical> {
+    let (mut w, mut h) = (f64::from(size.w), f64::from(size.h));
+    if let Some(min) = min {
+        if min.w > 0.0 {
+            w = w.max(min.w);
+        }
+        if min.h > 0.0 {
+            h = h.max(min.h);
+        }
+    }
+    if let Some(max) = max {
+        if max.w > 0.0 {
+            w = w.min(max.w);
+        }
+        if max.h > 0.0 {
+            h = h.min(max.h);
+        }
+    }
+    size_i32(w, h)
 }
 
 /// Every popup hanging off `window`, with the popup's *surface* origin relative
@@ -1201,4 +1416,105 @@ fn read_size_hints(surface: &WlSurface) -> (Option<CoreSize>, Option<CoreSize>) 
         };
         (convert(cached.min_size), convert(cached.max_size))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A size in logical pixels, the way the protocol spells it.
+    fn size(w: i32, h: i32) -> Size<i32, Logical> {
+        (w, h).into()
+    }
+
+    #[test]
+    fn a_client_that_complies_is_asked_once() {
+        let mut configure = Configure::default();
+        assert!(configure.ask(size(940, 1030)));
+        // Asking again for the same rectangle — which every re-layout of an
+        // unchanged window does — configures nothing.
+        assert!(!configure.ask(size(940, 1030)));
+        assert_eq!(configure.commit(size(940, 1030)), Reply::Complied);
+        assert!(!configure.gave_up());
+    }
+
+    #[test]
+    fn the_same_wrong_size_is_not_a_new_refusal() {
+        let mut configure = Configure::default();
+        assert!(configure.ask(size(940, 1030)));
+        // A new size it was not asked for: worth asking once more.
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+        // The same answer over and over is not new, so it buys no more
+        // configures however often the client commits. This is the shape of a
+        // terminal that rounds its window to whole character cells, which will
+        // never be exactly what was asked for and must never loop on that.
+        assert_eq!(configure.commit(size(469, 600)), Reply::SameAsBefore);
+        assert_eq!(configure.commit(size(469, 600)), Reply::SameAsBefore);
+        assert!(!configure.gave_up());
+    }
+
+    #[test]
+    fn enough_different_sizes_end_the_asking() {
+        let mut configure = Configure::default();
+        assert!(configure.ask(size(940, 1030)));
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+        assert_eq!(configure.commit(size(500, 620)), Reply::TryAgain);
+        // The third distinct answer is one too many: stop configuring.
+        assert_eq!(configure.commit(size(520, 640)), Reply::GaveUp);
+        assert!(configure.gave_up());
+        // And stay stopped, for this rectangle.
+        assert_eq!(configure.commit(size(540, 660)), Reply::SameAsBefore);
+        assert_eq!(configure.commit(size(469, 600)), Reply::SameAsBefore);
+    }
+
+    #[test]
+    fn a_client_that_refused_a_size_gets_a_new_chance_at_another() {
+        let mut configure = Configure::default();
+        assert!(configure.ask(size(940, 1030)));
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+        assert_eq!(configure.commit(size(500, 620)), Reply::TryAgain);
+        assert_eq!(configure.commit(size(520, 640)), Reply::GaveUp);
+        assert!(configure.gave_up());
+
+        // A different rectangle is a different question, and the allowance of
+        // refusals goes with it.
+        assert!(configure.ask(size(600, 800)));
+        assert!(!configure.gave_up());
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+    }
+
+    #[test]
+    fn a_client_that_complies_starts_over() {
+        let mut configure = Configure::default();
+        assert!(configure.ask(size(940, 1030)));
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+        assert_eq!(configure.commit(size(940, 1030)), Reply::Complied);
+
+        // Having been right once does not buy the client forever: a later
+        // answer of its own counts from the top again.
+        assert_eq!(configure.commit(size(469, 600)), Reply::TryAgain);
+        assert!(!configure.gave_up());
+    }
+
+    #[test]
+    fn hints_clamp_a_request_to_what_the_client_can_be() {
+        let max = Some(CoreSize::new(469.0, 0.0));
+        assert_eq!(clamp_to_hints(size(940, 1030), None, max), size(469, 1030));
+
+        let min = Some(CoreSize::new(300.0, 400.0));
+        assert_eq!(clamp_to_hints(size(100, 100), min, None), size(300, 400));
+
+        // A zero on an axis means the client set no limit on it.
+        assert_eq!(
+            clamp_to_hints(
+                size(940, 1030),
+                Some(CoreSize::new(0.0, 0.0)),
+                Some(CoreSize::new(0.0, 0.0))
+            ),
+            size(940, 1030)
+        );
+
+        // Nothing is ever asked for a degenerate size.
+        assert_eq!(clamp_to_hints(size(0, 0), min, None), size(300, 400));
+    }
 }

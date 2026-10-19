@@ -571,8 +571,22 @@ properties need the snapshot and crop/scale machinery described below).
 
 Clients commit new buffers after being configured, not instantly. For smooth visuals:
 
-- Immediately configure the client with the target size.
-- Keep drawing the old buffer scaled/cropped into the animated rect until the new buffer arrives.
+- Configure the client with the target size, clamped to the `min_size`/`max_size` hints it
+  set, and book what was asked so a later commit can be compared against it.
+- Draw the committed buffer **into** the animated rect until the new buffer arrives, per
+  axis: a rect that has grown past what the client committed is filled by scaling its
+  pixels over it, anchored on the rect's origin so the window's top-left corner stays put
+  and a client's decoration shadows spill past the far edge as they do at rest; a rect the
+  client has overfilled is cut back to it pixel for pixel, so nothing spills into a
+  neighbour. A rect the client has filled exactly is drawn 1:1, shadows included.
+- Ask again only for a *new* wrong size, and only a bounded number of times
+  (`MAX_SIZE_REFUSALS`); then the window is marked as refusing, left at the size it chose,
+  and drawn cut back to its rect. A client that keeps repeating itself is never configured
+  again, so this cannot loop.
+- **Input caveat:** while a rect is bigger than what its client committed, pointer
+  coordinates handed to the client are off by the same factor the pixels were scaled by.
+  Fix: map input back through the window's drawn rect (what niri's `View::local()` does);
+  a window that is cut back is unaffected, since it is drawn 1:1.
 - For close animations, capture the last buffer into an offscreen texture before the surface goes away.
 
 ---

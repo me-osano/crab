@@ -210,10 +210,11 @@ fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
 /// Places a tiled/fullscreen window, configuring the client when the size
 /// changes.
 ///
-/// The layout's rectangle is the *target*: the client is configured with it and
-/// the drawn rectangle is animated toward it. The kind records what moved the
-/// window — a change of size or a change of place — which is the granularity
-/// animations are configured at (M5).
+/// The layout's rectangle is the *target*: the client is configured with it —
+/// clamped to the size hints it set, since a request it cannot honour only
+/// earns a refusal — and the drawn rectangle is animated toward it. The kind
+/// records what moved the window — a change of size or a change of place —
+/// which is the granularity animations are configured at (M5).
 fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visible: bool) {
     let location = point_i32(rect.x, rect.y);
     let size = size_i32(rect.w, rect.h);
@@ -228,12 +229,13 @@ fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visi
     } else {
         Kind::WindowResize
     };
-    if configure_size && window.size != size {
+    if configure_size {
         window.size = size;
-        window
-            .surface
-            .with_pending_state(|pending| pending.size = Some(size));
-        window.surface.send_configure();
+        // Asks the client for this rectangle. A size already asked for sends
+        // nothing, so a re-layout that changes no rectangle configures no
+        // client; a rectangle the client cannot be (its hints) asks for the
+        // size it can.
+        window.configure_to(size);
     }
     window.animate_to(rect, kind, &clocks);
 }
