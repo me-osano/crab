@@ -80,7 +80,8 @@ impl SpringParams {
     /// the distance covered: `-ln(ε)` divided by the rate the spring decays at.
     /// A critically damped spring carries a `1 + βt` factor, which the fixed
     /// point below folds in, so the animation ends on a sub-pixel remainder
-    /// instead of snapping the last pixel. Capped at [`MAX_SETTLE_SECS`].
+    /// instead of snapping the last pixel. Capped (`MAX_SETTLE_SECS`), so even a
+    /// spring that would ring forever does end.
     #[must_use]
     pub fn settle_secs(&self) -> f64 {
         let beta = (self.damping / 2.0).max(0.0);

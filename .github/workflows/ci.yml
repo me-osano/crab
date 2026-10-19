@@ -47,6 +47,11 @@ jobs:
             libgbm-dev libdrm-dev \
             libinput-dev libudev-dev libseat-dev
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The binary's docs link across `compositor::*`, and the pure modules link
+      # between each other; keep every intra-doc link resolving.
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   test:
     name: test
