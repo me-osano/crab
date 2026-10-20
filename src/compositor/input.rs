@@ -17,7 +17,8 @@ use smithay::backend::input::{
 };
 use smithay::input::keyboard::{FilterResult, Keysym, ModifiersState, keysyms};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
-use smithay::utils::{Logical, Point};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
 use crate::compositor::state::{Crawm, GrabMode};
 
@@ -227,7 +228,7 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
         focus,
         &MotionEvent {
             location: position,
-            serial: 0.into(),
+            serial: SERIAL_COUNTER.next_serial(),
             time,
         },
     );
@@ -239,36 +240,58 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
 /// With Super held, the left button starts an interactive move and the right
 /// button a resize; both are swallowed rather than sent to the client.
 ///
+/// A move/resize that the *client* started (`xdg_toplevel.move` from its own
+/// titlebar) ends on the release too, but that release is forwarded: the client
+/// saw the press and would otherwise think the button is still down.
+///
 /// When a client holds a pointer grab (an open menu, `xdg_popup.grab`), the grab
 /// owns the button instead: it dismisses the popup on a click outside of it and
 /// forwards the rest, so crawm stays out of the way.
 fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
     let pressed = event.state();
     let grabbed = state.pointer.is_grabbed();
+    let serial = SERIAL_COUNTER.next_serial();
     if pressed == ButtonState::Pressed && !grabbed {
         let position = state.pointer_location;
         if state.super_held {
             let mode = match event.button_code() {
                 BTN_LEFT => Some(GrabMode::Move),
-                BTN_RIGHT => Some(GrabMode::Resize),
+                BTN_RIGHT => Some(GrabMode::Resize {
+                    edges: ResizeEdge::BottomRight,
+                }),
                 _ => None,
             };
             if let Some(mode) = mode {
-                if state.begin_interaction(mode, position) {
+                if state.begin_interaction(mode, position, event.button_code()) {
                     return;
                 }
             }
         }
         state.focus_at(position);
-    } else if !grabbed && state.end_interaction() {
-        // The release ends a compositor grab; do not forward it either.
-        return;
+    } else if pressed == ButtonState::Released {
+        // The release ends an interaction even when `grabbed` is set: a press
+        // we forwarded leaves smithay's implicit click grab active until this
+        // very release, and that is exactly the case a client-started drag is
+        // in. A real client grab (a popup) never starts an interaction, so
+        // ending one here takes nothing away from it.
+        if let Some(interaction) = state.end_interaction(event.button_code()) {
+            if !interaction.from_client {
+                // A compositor grab swallowed the press, so it swallows the
+                // release too: the client never saw the button go down.
+                return;
+            }
+        }
     }
 
+    if pressed == ButtonState::Pressed {
+        // A press the client can see is the only one an interactive request
+        // may name.
+        state.last_pointer_press = Some(serial);
+    }
     state.pointer.clone().button(
         state,
         &ButtonEvent {
-            serial: 0.into(),
+            serial,
             time: event.time_msec(),
             button: event.button_code(),
             state: pressed,

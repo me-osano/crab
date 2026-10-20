@@ -18,7 +18,7 @@ use smithay::wayland::shell::xdg::{
     Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 
-use crate::compositor::state::Crawm;
+use crate::compositor::state::{Crawm, GrabMode};
 
 impl XdgShellHandler for Crawm {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -92,20 +92,18 @@ impl XdgShellHandler for Crawm {
         self.reposition_popup(&surface, positioner, token);
     }
 
-    fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO(M3): honour client-initiated interactive moves, which arrive with
-        // a pointer serial and need a real pointer grab. M2 only starts drags
-        // from the compositor's own keybinds (see `src/compositor/input.rs`).
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        client_interaction(self, &surface, &seat, serial, GrabMode::Move);
     }
 
     fn resize_request(
         &mut self,
-        _surface: ToplevelSurface,
-        _seat: wl_seat::WlSeat,
-        _serial: Serial,
-        _edges: xdg_toplevel::ResizeEdge,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
     ) {
-        // TODO(M3): honour client-initiated resizes from the requested edge.
+        client_interaction(self, &surface, &seat, serial, GrabMode::Resize { edges });
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
@@ -193,3 +191,26 @@ impl XdgShellHandler for Crawm {
 }
 
 delegate_xdg_shell!(Crawm);
+
+/// Starts a move/resize the client asked for with `xdg_toplevel`.
+///
+/// The request names the seat and the serial of the press that triggered it.
+/// Only a press we actually sent can start a drag, and only while the window
+/// is still under the pointer, so a stale or invented serial does nothing;
+/// [`Crawm::begin_client_interaction`] checks both.
+fn client_interaction(
+    state: &mut Crawm,
+    surface: &ToplevelSurface,
+    seat: &wl_seat::WlSeat,
+    serial: Serial,
+    mode: GrabMode,
+) {
+    if Seat::<Crawm>::from_resource(seat).is_none() {
+        tracing::debug!("ignored an interactive request on a seat we do not own");
+        return;
+    }
+    let Some(id) = state.window_id_for(surface.wl_surface()) else {
+        return;
+    };
+    state.begin_client_interaction(id, mode, serial);
+}

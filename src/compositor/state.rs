@@ -33,7 +33,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState, with_states};
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::xdg::{
@@ -363,11 +363,85 @@ impl Configure {
 pub(crate) enum GrabMode {
     /// Moving the window around.
     Move,
-    /// Resizing it from its bottom-right corner.
-    Resize,
+    /// Resizing it: the named edges follow the pointer, the others stay put.
+    Resize {
+        /// The edges being dragged, as `xdg_toplevel.resize` names them.
+        edges: xdg_toplevel::ResizeEdge,
+    },
 }
 
-/// An in-progress interactive move/resize started from a keybind.
+impl GrabMode {
+    /// The rectangle a drag of `(dx, dy)` from `origin` produces.
+    ///
+    /// A move translates. A resize keeps the edges that are not being dragged
+    /// fixed, so pulling the left or top edge moves the origin as well as
+    /// changing the size. A dragged edge never crosses the fixed one — the
+    /// result stays at least one pixel wide and tall — so a window cannot
+    /// invert itself.
+    fn rect_after(self, origin: Rect, dx: f64, dy: f64) -> Rect {
+        match self {
+            Self::Move => origin.translated(dx, dy),
+            Self::Resize { edges } => {
+                let Edges {
+                    left,
+                    right,
+                    top,
+                    bottom,
+                } = edges.into();
+                let mut rect = origin;
+                if left {
+                    rect.x = origin.x + dx;
+                    rect.w = origin.right() - rect.x;
+                } else if right {
+                    rect.w = origin.w + dx;
+                }
+                if top {
+                    rect.y = origin.y + dy;
+                    rect.h = origin.bottom() - rect.y;
+                } else if bottom {
+                    rect.h = origin.h + dy;
+                }
+                if rect.w < 1.0 {
+                    rect.w = 1.0;
+                    if left {
+                        rect.x = origin.right() - 1.0;
+                    }
+                }
+                if rect.h < 1.0 {
+                    rect.h = 1.0;
+                    if top {
+                        rect.y = origin.bottom() - 1.0;
+                    }
+                }
+                rect
+            }
+        }
+    }
+}
+
+/// Which sides of a rectangle a resize drags.
+#[derive(Clone, Copy, Debug)]
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl From<xdg_toplevel::ResizeEdge> for Edges {
+    fn from(edge: xdg_toplevel::ResizeEdge) -> Self {
+        use xdg_toplevel::ResizeEdge as E;
+
+        Self {
+            left: matches!(edge, E::Left | E::TopLeft | E::BottomLeft),
+            right: matches!(edge, E::Right | E::TopRight | E::BottomRight),
+            top: matches!(edge, E::Top | E::TopLeft | E::TopRight),
+            bottom: matches!(edge, E::Bottom | E::BottomLeft | E::BottomRight),
+        }
+    }
+}
+
+/// An in-progress interactive move/resize.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Interaction {
     /// The window being manipulated.
@@ -378,6 +452,18 @@ pub(crate) struct Interaction {
     pub(crate) grab: Point<f64, Logical>,
     /// The window's rectangle when the grab started.
     pub(crate) origin: Rect,
+    /// The button that started a compositor grab, whose release ends it.
+    ///
+    /// `None` for a client request: `xdg_toplevel.move` names a press serial
+    /// rather than a button, and the client already tracks its own press.
+    pub(crate) button: Option<u32>,
+    /// Whether the client asked for the grab (`xdg_toplevel.move`/`resize`)
+    /// rather than a compositor bind.
+    ///
+    /// The difference is the press: a compositor grab swallowed it, so it
+    /// swallows the release too, while a client-initiated one must see its own
+    /// release or its titlebar stays stuck down.
+    pub(crate) from_client: bool,
 }
 
 /// Per-client state carried through wayland-server's `ClientData` API.
@@ -424,6 +510,12 @@ pub(crate) struct Crawm {
     pub(crate) bound_keys: HashSet<u32>,
     /// An in-progress interactive move/resize, if any.
     pub(crate) interaction: Option<Interaction>,
+    /// Serial of the last pointer press sent to a client.
+    ///
+    /// `xdg_toplevel.move` and `resize` name the press that triggered them; a
+    /// request whose serial is not this one is stale (or not ours) and is
+    /// ignored.
+    pub(crate) last_pointer_press: Option<Serial>,
     /// Whether Super is currently held (drives pointer grabs).
     pub(crate) super_held: bool,
     /// Time of the first frame, used for `wl_surface.frame` timestamps.
@@ -516,6 +608,7 @@ impl Crawm {
             focus_stack: FocusStack::new(),
             bound_keys: HashSet::new(),
             interaction: None,
+            last_pointer_press: None,
             super_held: false,
             start_time: Instant::now(),
             frame_clock: Clocks::new(),
@@ -1244,14 +1337,64 @@ impl Crawm {
         &mut self,
         mode: GrabMode,
         position: Point<f64, Logical>,
+        button: u32,
     ) -> bool {
         let Some(id) = self.window_at(position) else {
             return false;
         };
-        let rect = self
+        self.begin_interaction_for(id, mode, position, Some(button), false)
+    }
+
+    /// Starts a move/resize because `id`'s client asked for one.
+    ///
+    /// xdg-shell lets the compositor ignore interactive requests, and a stale
+    /// serial is exactly what a request from a window the user did not just
+    /// press looks like. Require the last press we sent and the same window
+    /// still under the pointer. Fullscreen and maximized windows keep their
+    /// state: moving them is what leaving those states is for.
+    pub(crate) fn begin_client_interaction(
+        &mut self,
+        id: WindowId,
+        mode: GrabMode,
+        serial: Serial,
+    ) -> bool {
+        if self.last_pointer_press != Some(serial) {
+            tracing::debug!(
+                ?serial,
+                "ignored an interactive request with a stale serial"
+            );
+            return false;
+        }
+        let Some(window) = self.window(id) else {
+            return false;
+        };
+        if window.window.fullscreen || window.window.maximized {
+            tracing::debug!("ignored an interactive request on a fullscreen or maximized window");
+            return false;
+        }
+        let position = self.pointer_location;
+        if self.window_at(position) != Some(id) {
+            tracing::debug!("ignored an interactive request on a window not under the pointer");
+            return false;
+        }
+        self.begin_interaction_for(id, mode, position, None, true)
+    }
+
+    /// Puts `id` into an interactive grab, floating it first if it was tiled.
+    fn begin_interaction_for(
+        &mut self,
+        id: WindowId,
+        mode: GrabMode,
+        position: Point<f64, Logical>,
+        button: Option<u32>,
+        from_client: bool,
+    ) -> bool {
+        let Some(rect) = self
             .window(id)
             .map(|window| window.visual_rect(&self.frame_clock))
-            .unwrap_or_default();
+        else {
+            return false;
+        };
         if let Some(window) = self.window_mut(id) {
             if window.window.is_tiled() {
                 window.float_at(rect);
@@ -1263,6 +1406,8 @@ impl Crawm {
             mode,
             grab: position,
             origin: rect,
+            button,
+            from_client,
         });
         self.relayout();
         true
@@ -1277,20 +1422,9 @@ impl Crawm {
         };
         let dx = position.x - interaction.grab.x;
         let dy = position.y - interaction.grab.y;
-        let origin = interaction.origin;
-        let (rect, resize) = match interaction.mode {
-            GrabMode::Move => (origin.translated(dx, dy), false),
-            GrabMode::Resize => (
-                Rect::new(
-                    origin.x,
-                    origin.y,
-                    (origin.w + dx).max(1.0),
-                    (origin.h + dy).max(1.0),
-                ),
-                true,
-            ),
-        };
-        let rect = self.clamp_rect(rect);
+        let mode = interaction.mode;
+        let rect = self.clamp_rect(mode.rect_after(interaction.origin, dx, dy));
+        let resize = matches!(mode, GrabMode::Resize { .. });
 
         if let Some(window) = self.window_mut(interaction.id) {
             window.window.float_geometry = Some(rect);
@@ -1313,14 +1447,19 @@ impl Crawm {
         true
     }
 
-    /// Ends an in-progress interaction, if any. Returns whether one was active.
-    pub(crate) fn end_interaction(&mut self) -> bool {
-        let active = self.interaction.is_some();
-        if active {
-            self.interaction = None;
-            self.relayout();
+    /// Ends the interaction if `button`'s release should end it.
+    ///
+    /// A compositor grab belongs to the button that started it, so releasing a
+    /// different one leaves the drag running and reaches the client, which saw
+    /// that press. A client-requested grab ends on any release.
+    pub(crate) fn end_interaction(&mut self, button: u32) -> Option<Interaction> {
+        let interaction = self.interaction?;
+        if interaction.button.is_some_and(|grabbed| grabbed != button) {
+            return None;
         }
-        active
+        self.interaction = None;
+        self.relayout();
+        Some(interaction)
     }
 
     /// Keeps a dragged/resized window partly on screen.
@@ -1449,6 +1588,7 @@ fn read_size_hints(surface: &WlSurface) -> (Option<CoreSize>, Option<CoreSize>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
 
     /// A size in logical pixels, the way the protocol spells it.
     fn size(w: i32, h: i32) -> Size<i32, Logical> {
@@ -1544,5 +1684,73 @@ mod tests {
 
         // Nothing is ever asked for a degenerate size.
         assert_eq!(clamp_to_hints(size(0, 0), min, None), size(300, 400));
+    }
+
+    /// A window rectangle to drag, in logical pixels.
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn a_move_translates_the_rectangle() {
+        let origin = rect(100.0, 100.0, 400.0, 300.0);
+        assert_eq!(
+            GrabMode::Move.rect_after(origin, 25.0, -40.0),
+            rect(125.0, 60.0, 400.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn a_resize_pins_the_edges_that_are_not_dragged() {
+        let origin = rect(100.0, 100.0, 400.0, 300.0);
+        let resize = |edges| GrabMode::Resize { edges };
+
+        // Bottom-right, the compositor's own drag: the origin stays put.
+        assert_eq!(
+            resize(ResizeEdge::BottomRight).rect_after(origin, 30.0, 20.0),
+            rect(100.0, 100.0, 430.0, 320.0)
+        );
+        // Left: the right edge stays where it was, so the origin moves too.
+        assert_eq!(
+            resize(ResizeEdge::Left).rect_after(origin, 40.0, 99.0),
+            rect(140.0, 100.0, 360.0, 300.0)
+        );
+        // Top-left: both far edges are pinned.
+        assert_eq!(
+            resize(ResizeEdge::TopLeft).rect_after(origin, -10.0, -10.0),
+            rect(90.0, 90.0, 410.0, 310.0)
+        );
+        // Bottom: only the height moves.
+        assert_eq!(
+            resize(ResizeEdge::Bottom).rect_after(origin, 30.0, 20.0),
+            rect(100.0, 100.0, 400.0, 320.0)
+        );
+    }
+
+    #[test]
+    fn a_dragged_edge_cannot_cross_the_fixed_one() {
+        let origin = rect(100.0, 100.0, 400.0, 300.0);
+        let resize = |edges| GrabMode::Resize { edges };
+
+        // Pulling the left edge right past the right edge stops just short.
+        assert_eq!(
+            resize(ResizeEdge::Left).rect_after(origin, 500.0, 0.0),
+            rect(499.0, 100.0, 1.0, 300.0)
+        );
+        // The same for the top edge, leaving the width alone.
+        assert_eq!(
+            resize(ResizeEdge::Top).rect_after(origin, 0.0, 400.0),
+            rect(100.0, 399.0, 400.0, 1.0)
+        );
+        // Dragging the right edge far left stops at the left edge, which is
+        // the one that stays put.
+        assert_eq!(
+            resize(ResizeEdge::Right).rect_after(origin, -500.0, 0.0),
+            rect(100.0, 100.0, 1.0, 300.0)
+        );
+        assert_eq!(
+            resize(ResizeEdge::BottomRight).rect_after(origin, -500.0, -500.0),
+            rect(100.0, 100.0, 1.0, 1.0)
+        );
     }
 }

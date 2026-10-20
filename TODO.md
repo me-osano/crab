@@ -198,6 +198,15 @@ and per-space layout memory. Everything here is pure and unit-testable.
 ### 2.7 Interactive move/resize
 - [x] `Super+drag` move, `Super+right-drag` resize for floating windows.
 - [x] Tiled window drag → auto-float (default); reorder-in-layout is the config option (§7.3).
+- [x] **Client-initiated** move/resize (`xdg_toplevel.move`/`resize`, e.g. a CSD titlebar):
+  the request's serial must be the last press crawm sent and the window must still be under
+  the pointer; tiled windows float first, fullscreen and maximized ones refuse. The press was
+  forwarded, so its release is too — a client that never sees it keeps its titlebar stuck.
+  A resize follows the requested edge(s), holding the opposite edge and stopping at one
+  pixel instead of inverting. Checked nested with a probe client that asks on press: press
+  and release report the same surface-local point while the pointer travels (the window
+  followed it), no motion is forwarded during the grab, and a left-edge drag configures the
+  client to the new width; a forged serial is ignored and motion keeps reaching the client.
 - [ ] Snap-to-edge for floating (basic).
 
 ### 2.8 Tests

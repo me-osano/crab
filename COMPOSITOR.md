@@ -621,6 +621,8 @@ All effects are optional render passes with a performance budget and a kill swit
 - Pointer events are forwarded as `wl_pointer`, and every motion/button/axis batch ends with
   `wl_pointer.frame`: clients that group events (SCTK, GTK, Qt) only act once the frame
   arrives.
+- Button and enter events carry a real serial (`SERIAL_COUNTER`), and the last press a client
+  saw is remembered: `xdg_toplevel.move`/`resize` name a press, and the compositor checks it.
 - Per-device config: natural scroll, tap, accel profile, click method, disable-while-typing.
 - XKB layouts configurable per keyboard; runtime layout switching via bind and IPC.
 
@@ -648,6 +650,14 @@ All effects are optional render passes with a performance budget and a kill swit
 
 - Super+drag to move, Super+right-drag to resize, as in classic stacking WMs.
 - For tiled windows: dragging converts to floating or reorders, per config.
+- A client may also ask (`xdg_toplevel.move`/`resize`, usually a CSD titlebar drag). The
+  request is accepted only while its serial is the last press crawm sent and the window is
+  still under the pointer; fullscreen and maximized windows ignore it, tiled ones float
+  first. Because the press reached the client, its release is forwarded as well — a
+  compositor-started drag swallowed the press and swallows the release, but a client that
+  never sees its release keeps the titlebar pressed.
+- A resize drags the requested edge(s) and pins the opposite ones, so pulling the left or
+  top edge moves the origin too. It stops at one pixel rather than crossing the fixed edge.
 - Snap-to-edges and tile-by-drag-to-edge can come later as stacking-mode polish.
 
 ---
