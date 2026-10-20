@@ -47,6 +47,12 @@ cargo run -- --backend winit     # nested window on an existing session
 cargo run -- --validate          # parse + validate the config, then exit
 ```
 
+Configuration is TOML; the shipped example is
+[`resources/default-config.toml`](resources/default-config.toml). Copy it to
+`~/.config/crawm/config.toml` (or pass `--config <path>`). `[layout]` and
+`[animations] enabled` apply today; the remaining mango-style sections parse and are
+wired as their milestones land (`COMPOSITOR.md` §13).
+
 Backends are cargo features: `backend-winit` is the default (nested development);
 `--backend tty` needs `--features backend-tty` (bare-metal DRM/KMS, M4). The
 default build skips the DRM/session/input stack; `cargo clippy --all-features`

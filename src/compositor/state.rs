@@ -19,7 +19,7 @@ use std::time::Instant;
 use crawm::animation::{Animated, Clocks, Curve, Kind, SpringParams};
 use crawm::config::Config;
 use crawm::core::{
-    Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
+    ColumnWidth, Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
     Window, WindowId,
 };
@@ -577,6 +577,8 @@ impl Crawm {
             gaps: f64::from(config.gaps),
             border_width: f64::from(config.border_width),
             position: TilePosition::Left,
+            column_width: ColumnWidth::Proportion(config.scroll.default_column_ratio),
+            center: config.scroll.center_focused_column,
             ..LayoutParams::default()
         };
         let space_state = SpaceState::new(
@@ -725,6 +727,9 @@ impl Crawm {
             configure,
         });
 
+        // A first window on the empty space past the end turns that space into
+        // space 1 (the view moves with it).
+        self.compact_spaces();
         self.focus_window(Some(id));
         self.relayout();
     }
@@ -902,6 +907,9 @@ impl Crawm {
 
     /// Drops `ids` from the focus stack and per-space history and refocuses.
     fn forget_windows(&mut self, ids: &[WindowId]) {
+        // A space whose last window just went away ceases to exist, and the
+        // spaces after it move down (niri-style dynamic spaces).
+        self.compact_spaces();
         for &id in ids {
             self.focus_stack.remove(FocusTarget::Window(id));
             for space in &mut self.output_state.space_states {
@@ -910,6 +918,35 @@ impl Crawm {
         }
         self.refocus_after_view_change();
         self.relayout();
+    }
+
+    /// Every space that currently holds a window.
+    fn occupied_spaces(&self) -> SpaceSet {
+        self.windows
+            .iter()
+            .fold(SpaceSet::empty(), |spaces, window| {
+                spaces | window.window.spaces
+            })
+    }
+
+    /// Resolves a 1-based dynamic index to the fixed slot it names.
+    ///
+    /// The spaces that hold windows are dense from 1. An index past the last one
+    /// names the empty space right after them, so `MOD+9` on a two-space desktop
+    /// means "the new space" instead of leaving six holes.
+    fn dynamic_space(&self, index: u8) -> Option<SpaceSet> {
+        SpaceSet::from_dynamic_index(index, self.occupied_spaces())
+    }
+
+    /// Removes spaces that just became empty and renumbers the rest.
+    ///
+    /// Window membership is renumbered to match, and each space's layout state
+    /// moves with it (see [`crawm::core::Output::compact`]).
+    fn compact_spaces(&mut self) {
+        let remap = self.output_state.compact(self.occupied_spaces());
+        for window in &mut self.windows {
+            window.window.spaces = remap.map_mask(window.window.spaces);
+        }
     }
 
     /// The origin of the *window geometry* of the toplevel or popup owning
@@ -1106,21 +1143,30 @@ impl Crawm {
     }
 
     /// Views a single space by 1-based index.
+    ///
+    /// Spaces are dynamic: an index past the last space lands on the empty space
+    /// after it, so `MOD+5` on a two-space desktop shows space 3 rather than a
+    /// gap of empty spaces.
     pub(crate) fn view_space(&mut self, index: u8) {
-        let Some(mask) = SpaceSet::from_index(index) else {
+        let Some(mask) = self.dynamic_space(index) else {
             return;
         };
         self.output_state.view_space(mask);
+        self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
     }
 
     /// Toggles a space in the view (`MOD+ctrl+N`).
+    ///
+    /// The index is dynamic like [`view_space`](Self::view_space), so toggling
+    /// the same bind twice adds and then removes the same space.
     pub(crate) fn toggle_view_space(&mut self, index: u8) {
-        let Some(mask) = SpaceSet::from_index(index) else {
+        let Some(mask) = self.dynamic_space(index) else {
             return;
         };
         self.output_state.toggle_view(mask);
+        self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
     }
@@ -1128,30 +1174,38 @@ impl Crawm {
     /// Swaps to the previously-viewed space set.
     pub(crate) fn toggle_back(&mut self) {
         self.output_state.toggle_back();
+        self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
     }
 
-    /// Moves the focused window to a space by 1-based index.
+    /// Moves the focused window to a space by 1-based index and shows it there.
+    ///
+    /// The index is dynamic like [`view_space`](Self::view_space): moving past
+    /// the last space sends the window to the empty space after it, and because
+    /// the space it left may become empty, the spaces after that one move down.
     pub(crate) fn move_to_space(&mut self, index: u8) {
-        let (Some(mask), Some(id)) = (SpaceSet::from_index(index), self.focused_id()) else {
+        let (Some(mask), Some(id)) = (self.dynamic_space(index), self.focused_id()) else {
             return;
         };
         if let Some(window) = self.window_mut(id) {
             window.window.move_to_space(mask);
         }
+        self.output_state.view_space(mask);
+        self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
     }
 
     /// Toggles a space on the focused window (`MOD+shift+ctrl+N`).
     pub(crate) fn toggle_space(&mut self, index: u8) {
-        let (Some(mask), Some(id)) = (SpaceSet::from_index(index), self.focused_id()) else {
+        let (Some(mask), Some(id)) = (self.dynamic_space(index), self.focused_id()) else {
             return;
         };
         if let Some(window) = self.window_mut(id) {
             window.window.toggle_space(mask);
         }
+        self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
     }

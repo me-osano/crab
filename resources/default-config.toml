@@ -3,7 +3,34 @@
 # This is the shipped default; copy it to $XDG_CONFIG_HOME/crawm/config.toml
 # (usually ~/.config/crawm/config.toml) and edit. Check it with
 # `crawm --validate --config <path>`.
+#####################################################################
+[input.keyboard]
+repeat_rate = 25
+repeat_delay = 600
+numlock_on = 0
+xkb_rules_layout = "us"
 
+[input.touchpad]
+disable = 0
+tap_to_click = 1
+tap_and_drag = 1
+drag_lock = 1
+natural_scrolling = 1
+disable_while_typing = 1
+swipe_min_threshold = 1
+
+[input.mouse]
+natural_scrolling = 0
+
+####################################################################
+[output.monitor] # eg. [output.eDP-1]
+mode = "1920x1080@120.030"
+scale = 1.0
+transform = "normal"
+position = { x=1280, y=0 }
+
+######################################################################
+[layout]
 # Space between and around windows, in logical pixels.
 gaps = 8
 
@@ -12,15 +39,134 @@ border_width = 2
 border_color = "#7aa2f7"
 unfocused_border_color = "#3b4261"
 
+client_side_decorations = 0
+focus_follows_cursor = 1
+
 # Layout used for new spaces: `tile`, `monocle`, `floating`, `scroll` or
 # `vertical-scroll`, or a family name (`stack`, `tile`, `scroll`) as an alias
 # for that family's default mode.
-layout = "tile"
+default_layout = "tile"
 
-# Master area (the `tile` layout): how many windows sit in it, and its size as a
-# fraction of the usable area.
+[layout.stack]
+next_space_direction = "horizontal"
+
+[layout.tile]
+# Master area: How many windows sit in it, and its size as a fraction of the usable area.
 master_count = 1
 master_ratio = 0.6
+next_space_direction = "horizontal"
 
+[layout.scroll]
+center_focused_column = "never" # always | never
+always_center_single_column = 1
+default_column_ratio = 0.5
+next_space_direction = "vertical"
+
+####################################################################
 [animations]
-enabled = true
+enabled = 1
+# support type: zoom, slide
+animation_type_open = "slide"
+animation_type_close = "slide"
+
+####################################################################
+[autostart]
+exec_once = ["waybar"]
+
+####################################################################
+[[window_rule]]
+open_floating = 1
+size = [800,500]
+offset_x = -90
+offset_y = -90
+app_id = "Nautilus"
+
+[[window_rule]]
+open_floating = 1
+size = [1200,800]
+app_id = ["brave", "obsidian"]
+
+[layer_rule]
+animation_type_open = "zoom"
+layer_name = ["rofi", "alacritty"]
+
+###################################################################
+[binds.default]
+"SUPER+q" = "killclient"
+"SUPER+o" = "toggle_overview"
+"SUPER+Return" = "spawn:alacritty"
+"SUPER+space" = "spawn:rofi -show drun"
+
+# switch window focus
+"ALT+Left" = "focusdir:left"
+"ALT+Right" = "focusdir:right"
+"ALT+Up" = "focusdir:up"
+"ALT+Down" = "focusdir:down"
+
+# move window
+"SUPER+SHIFT+Up" = "move_client:up"
+"SUPER+SHIFT+Down" = "move_client:down"
+"SUPER+SHIFT+Left" = "move_client:left"
+"SUPER+SHIFT+Right" = "move_client:right"
+
+# switch layout
+"SUPER+Tab" = "switch_layout"  # Stack -> Tile -> Scroll
+
+# switch space
+"SUPER+Left" = "view_space_left"
+"SUPER+Right" = "view_space_right"
+"SUPER+1" = "view_space:1"
+"SUPER+2" = "view_space:2"
+"SUPER+3" = "view_space:3"
+"SUPER+4" = "view_space:4"
+"SUPER+5" = "view_space:5"
+
+# Space: move client to the space and focus it
+"Alt+1" = "move_client_space:1"
+"Alt+2" = "move_client_space:2"
+"Alt+3" = "move_client_space:3"
+"Alt+4" = "move_client_space:4"
+"Alt+5" = "move_client_space:5"
+
+# switch window status
+"Alt+v" = "toogle_window_floating"
+"ALT+a" = "toggle_maximize_window,"
+"ALT+f" = "toggle_fullscreen,"
+"ALT+w" = "minimized,"
+"ALT+SHIFT+w" = "restore_minimized"
+"ALT+z" = "toggle_scratchpad"
+
+# Works even when screen is locked
+[binds.locked]
+# Volume & Brightness Bindings
+"XF86AudioRaiseVolume" = "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1+ -l 1.0"
+"XF86AudioLowerVolume" = "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.1-"
+"XF86AudioMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+"XF86AudioMicMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
+
+"XF86MonBrightnessUp" = "spawn:brightnessctl --class=backlight set +10%"
+"XF86MonBrightnessDown" = "spawn:brightnessctl --class=backlight set 10%-"
+
+[mousebinds]
+# Mouse Button Bindings
+"btn_left" = "moveresize,curmove"
+"btn_middle" = "togglemaximizescreen"
+"btn_right" = "moveresize,curresize"
+
+[gesturebinds]
+# Gesture Bindings
+"left+3" = "focusdir:left"
+"right+3" = "focusdir:right"
+"up+3" = "focusdir:up"
+"down+3" = "focusdir:down"
+"right+4" = "viewprev_have_client"
+"left+4" = "viewnext_have_client"
+"up+4" = "enteroverview"
+"down+4" = "leaveoverview"
+
+[axisbinds]
+# Axis Bindings
+"SUPER+UP" = "viewtoleft_have_client"
+"SUPER+DOWN" = "viewtoright_have_client"
+
+

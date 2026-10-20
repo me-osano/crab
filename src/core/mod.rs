@@ -32,5 +32,5 @@ pub use params::{
     LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, TilePosition, WidthPresets,
 };
 pub use rules::WindowRule;
-pub use spaces::{SpaceSet, SpaceView};
+pub use spaces::{SpaceRemap, SpaceSet, SpaceView};
 pub use window::{AppliedRules, Window};

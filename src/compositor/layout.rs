@@ -219,6 +219,9 @@ fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visi
     let location = point_i32(rect.x, rect.y);
     let size = size_i32(rect.w, rect.h);
     let clocks = state.frame_clock;
+    // `[animations] enabled = 0` makes every placement instant; the first
+    // placement snaps either way.
+    let animate = state.config.animations.enabled;
     let Some(window) = state.window_mut(id) else {
         return;
     };
@@ -237,7 +240,11 @@ fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visi
         // size it can.
         window.configure_to(size);
     }
-    window.animate_to(rect, kind, &clocks);
+    if animate {
+        window.animate_to(rect, kind, &clocks);
+    } else {
+        window.snap_visual_to(rect);
+    }
 }
 
 /// Places a floating window at its remembered geometry (cascading a new one).

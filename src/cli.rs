@@ -12,7 +12,8 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Backend::Winit)]
     pub backend: Backend,
 
-    /// Path to a TOML config file. Without this, built-in defaults are used.
+    /// Path to a TOML config file. Without this, `$XDG_CONFIG_HOME/crawm/config.toml`
+    /// is used if it exists, else built-in defaults.
     #[arg(long, short)]
     pub config: Option<PathBuf>,
 

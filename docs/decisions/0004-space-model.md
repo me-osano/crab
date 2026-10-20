@@ -81,8 +81,8 @@ Two cycle actions replace the single `cycle-layout`:
 - `cycle-layout-family` — the next **family**, landing on its default mode.
 
 Config and IPC accept a mode name; the family name is an accepted alias for that
-family's default mode (so `layout = "tile"` and `layout = "stack"` both work, and
-`free` is an alias for `floating`).
+family's default mode (so `default_layout = "tile"` and `default_layout = "stack"`
+both work, and `free` is an alias for `floating`).
 
 ## Consequences
 
@@ -108,6 +108,21 @@ family's default mode (so `layout = "tile"` and `layout = "stack"` both work, an
 - **Names are versionless and additive.** Config/IPC names (`floating`, `monocle`,
   `tile`, `stack`, `scroll`, …) are stable; new modes are added, never renamed.
 - `COMPOSITOR.md` §6–7 and `ROADMAP.md` §3A–3B are updated to this vocabulary.
+
+## Update (2026-10-20): dynamic numbering
+
+The user asked for spaces to behave like niri workspaces: no per-space layout
+configuration, and dynamic numbering that never leaves an empty space before the
+focused one. The baseline above still holds — 32 slots per output and
+multi-space windows remain possible — but the **numbering** is now dynamic:
+`Output::compact` removes spaces that are now empty and followed by occupied
+ones, renumbers the survivors densely from 1, moves each space's `SpaceState`
+with it, and renumbers window membership through `SpaceRemap`. The view follows
+its content: removing the focused space hands the view to the space that moved
+into its slot. A newly created space starts from the `[layout]` defaults. An
+`ext-workspace-v1` projection can expose this numbering as dynamic workspaces
+without changing the pure model, and the `Vec`/`SlotMap` change rejected below
+remains a follow-up only if more than 32 spaces are ever needed.
 
 ## Alternatives considered
 

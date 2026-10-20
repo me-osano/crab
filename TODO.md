@@ -161,8 +161,9 @@ and per-space layout memory. Everything here is pure and unit-testable.
 ### 2.1 `src/core` data model (`COMPOSITOR.md` §6)
 - [x] Newtypes `WindowId`, `OutputId`, `SpaceSet(u32)`, `LayerId`; logical `f64` `Rect`/`Point`/`Size`.
 - [x] `Window` (id, app_id, title, `spaces: SpaceSet`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
-- [x] `Output` (name, geometry, scale, `usable_area`, `view: SpaceView`, `space_states: [SpaceState; 32]`).
+- [x] `Output` (name, geometry, scale, `usable_area`, `view: SpaceView`, `space_states: [SpaceState; 32]`, `default_space`).
 - [x] `SpaceView { visible, previous }`; `SpaceState { layout, params, scroll, focus_history }`.
+- [x] `SpaceRemap` — dense renumbering used by dynamic spaces (niri-style): see §2.5.
 - [x] `FocusTarget { Window | LayerSurface | LockSurface | None }`; per-output MRU stack + `last_focused_output`.
 - [x] **One** focus function that updates keyboard focus, activation (`xdg_toplevel`), border-color targets, and IPC events.
 - [x] Document the **multi-space-view rule**: combined set uses the lowest-numbered visible space's layout (dwm behavior).
@@ -189,6 +190,9 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] `view-space`, `toggle-space-view`, `view-spaces 1+3` (multi-view), `move-to-space`, `toggle-space` (on window).
 - [x] Multiple spaces **per window**; `toggle-back` via `SpaceView.previous`.
 - [x] Per-output space views; moving windows/output focus between spaces.
+- [x] **Dynamic numbering** (niri-style): a space exists while it holds a window or is the empty space past the last occupied one; spaces that are now empty and followed by occupied ones are removed and the survivors compacted from 1, with their layout state following and window membership renumbered through `SpaceRemap` — so there is never an empty space before the focused one, and removing the focused space hands the view to the space that moves up.
+- [x] `move-to-space` shows the target space, so focus follows the moved window.
+- [x] **No per-space configuration**: every space starts from `[layout]` defaults; cycling the layout changes only the current space at runtime.
 
 ### 2.6 Layout params, switching, memory
 - [x] `cycle-layout-mode` + `cycle-layout-family` (two actions); set layout per space; `Pertag`-style **per-space layout memory + params restore** (§7.4).
@@ -333,7 +337,7 @@ Goal: boot `crawm` from a TTY and use it as the real session on one machine.
 
 ### 4.6 Session integration (basic)
 - [ ] `.desktop` entry + session wrapper: set `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE=wayland`, `dbus-update-activation-environment`.
-- [ ] `spawn-at-startup` entries in config.
+- [ ] `spawn-at-startup` entries in config (`[autostart] exec_once` parses; the spawner is open).
 
 **Exit criteria (phase):** log in from a display manager / boot from a TTY, run a full app set, switch VT and resume cleanly; mixed-DPI outputs are crisp.
 
@@ -345,8 +349,18 @@ Goal: a bar can display spaces/windows via IPC, config edits apply live, and a b
 never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 
 ### 5.1 `src/config`
-- [ ] TOML parser (per ADR-0003) → typed `Config`; defaults in `resources/default-config.toml`.
-- [ ] Validation with **good error spans** (the `toml` crate reports line/column); `crawm-cli validate` (and `--validate`) for CI/pre-flight.
+- [x] TOML parser (per ADR-0003) → typed `Config`; the mango-style section layout
+      (`[input]`, `[output.<name>]`, `[layout]`, `[animations]`, `[autostart]`,
+      `[window_rule]`, `[layer_rule]`, `[binds.*]`, `[mousebinds]`,
+      `[gesturebinds]`, `[axisbinds]`) is `resources/default-config.toml`, and a
+      test parses/validates it. `[layout]` and `[animations] enabled` are applied;
+      the other sections are typed, validated and kept for their milestones.
+- [x] Default config path (`$XDG_CONFIG_HOME/crawm/config.toml`, then
+      `$HOME/.config/crawm/config.toml`) when `--config` is absent.
+- [x] `crawm --validate` for CI/pre-flight (syntax/type errors already carry the
+      `toml` crate's line/column).
+- [ ] Validation with **good error spans** for semantic errors (range/choice
+      failures name the key but carry no span yet).
 - [ ] File includes (`include = [...]`, with optional entries); user variables.
 
 ### 5.2 Hot reload
@@ -354,6 +368,8 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] On error: keep last good config, show an **on-screen error banner** + log; never crash or lose state.
 
 ### 5.3 Binds & input config
+- [x] Parse `[binds.default]`/`[binds.locked]` (and the mouse/gesture/axis tables)
+      as `chord = action` strings, kept verbatim.
 - [ ] Keyboard binds (modifiers + key), **`Mod` remap**; mouse binds; axis binds; gesture binds; switch (lid) binds.
 - [ ] Bind flags: `repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass-through.
 - [ ] **Key modes / submaps** (resize, passthrough).
@@ -361,6 +377,9 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] **Hotkey overlay** listing active binds.
 
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
+- [x] Parse `[window_rule]` / `[[window_rule]]`: `app_id`, `open_floating`, `width`,
+      `height`, `offset_x`, `offset_y`; parse `[layer_rule]` / `[[layer_rule]]`.
+- [ ] Match and apply rules (the parsed rules are inert).
 - [ ] Window rules: match `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11-vs-Wayland.
 - [ ] Actions: initial space, floating, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
 - [ ] Space rules, layer rules, monitor rules (name/make/model/serial regex), device rules.

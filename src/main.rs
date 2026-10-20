@@ -37,13 +37,20 @@ fn main() -> anyhow::Result<()> {
     logging::install_panic_hook();
 
     let config = resolve_config(&args)?;
+    let pending = config.pending_sections();
+    if !pending.is_empty() {
+        tracing::info!(
+            sections = ?pending,
+            "config sections parsed but not applied yet (their milestones are M4-M6)"
+        );
+    }
 
     if args.validate {
         // Validate even a default config, then report and exit.
         crawm::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
         println!(
             "ok: config valid (gaps={}, border-width={}, layout={}, animations={})",
-            config.gaps, config.border_width, config.layout, config.animations
+            config.gaps, config.border_width, config.layout, config.animations.enabled
         );
         return Ok(());
     }
@@ -76,11 +83,17 @@ fn run_tty(_config: &Config) -> anyhow::Result<()> {
     anyhow::bail!("this crawm build has no `tty` backend; enable the `backend-tty` feature")
 }
 
-/// Loads the config from `--config`, or falls back to built-in defaults.
+/// Loads the config from `--config`, else the default path if it exists, else
+/// built-in defaults.
 fn resolve_config(args: &Args) -> anyhow::Result<Config> {
-    match &args.config {
-        Some(path) => crawm::config::load(path)
-            .with_context(|| format!("loading config from {}", path.display())),
-        None => Ok(Config::default()),
+    if let Some(path) = &args.config {
+        return crawm::config::load(path)
+            .with_context(|| format!("loading config from {}", path.display()));
     }
+    if let Some(path) = crawm::config::default_path().filter(|path| path.exists()) {
+        tracing::debug!(path = %path.display(), "loading default config");
+        return crawm::config::load(&path)
+            .with_context(|| format!("loading config from {}", path.display()));
+    }
+    Ok(Config::default())
 }

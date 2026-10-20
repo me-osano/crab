@@ -7,7 +7,9 @@
 //! [`Output::current_space_index`].
 
 use crate::core::OutputId;
-use crate::core::{LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, SpaceView, WindowId};
+use crate::core::{
+    LayoutKind, LayoutParams, Rect, ScrollState, SpaceRemap, SpaceSet, SpaceView, WindowId,
+};
 
 /// Per-space layout state, remembered for the lifetime of the output.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -90,6 +92,9 @@ pub struct Output {
     pub view: SpaceView,
     /// Per-space layout state.
     pub space_states: [SpaceState; SPACE_SLOTS],
+    /// The state a newly created space starts with, and what a slot is reset to
+    /// when its space is removed.
+    pub default_space: SpaceState,
     /// Where this output is in the redraw cycle (`COMPOSITOR.md` §8.2).
     pub redraw: RedrawState,
 }
@@ -115,6 +120,7 @@ impl Output {
             usable_area: geometry,
             view: SpaceView::new(SpaceSet::SPACE_1),
             space_states: core::array::from_fn(|_| default.clone()),
+            default_space: default,
             redraw: RedrawState::Idle,
         }
     }
@@ -188,6 +194,36 @@ impl Output {
         if !self.view.previous.is_empty() {
             self.view.toggle_back();
         }
+    }
+
+    /// Removes empty spaces and renumbers the rest (niri-style dynamic spaces).
+    ///
+    /// A space exists while it holds a window (`occupied` is the union of every
+    /// window's membership) or is the empty space past the last occupied one,
+    /// which is where a `view` past the end lands. Kept spaces become contiguous
+    /// from 1 in their relative order, each space's [`SpaceState`] moves with it,
+    /// and a freed slot is reset to [`Output::default_space`] so a space created
+    /// later starts from the configured default.
+    ///
+    /// Callers must renumber window membership with the returned [`SpaceRemap`];
+    /// the view is remapped in place (a removed focused space hands the view to
+    /// the space that moves into its slot). This also drops a `previous` set that
+    /// pointed at a removed space, making `toggle-back` a no-op instead of a jump
+    /// to a space that is gone.
+    #[must_use]
+    pub fn compact(&mut self, occupied: SpaceSet) -> SpaceRemap {
+        let remap = SpaceRemap::new(occupied, self.view);
+        let old = self.space_states.clone();
+        self.space_states = core::array::from_fn(|_| self.default_space.clone());
+        for old_index in 1..=SpaceSet::COUNT {
+            let new_index = remap.new_index(old_index);
+            if new_index != 0 {
+                self.space_states[usize::from(new_index - 1)] =
+                    old[usize::from(old_index - 1)].clone();
+            }
+        }
+        remap.map_view(&mut self.view);
+        remap
     }
 
     /// Requests a frame.
@@ -306,6 +342,83 @@ mod tests {
         assert_eq!(Output::slot_of(SpaceSet::empty()), None);
         assert_eq!(Output::slot_of(SpaceSet::SPACE_1 | SpaceSet::SPACE_2), None);
         assert_eq!(Output::slot_of(SpaceSet::SPACE_2), Some(1));
+    }
+
+    #[test]
+    fn compact_closes_a_gap_and_moves_the_view_with_it() {
+        let mut out = output();
+        out.view_space(SpaceSet::SPACE_3);
+        let remap = out.compact(SpaceSet::SPACE_1 | SpaceSet::SPACE_3);
+        assert_eq!(out.view.visible, SpaceSet::SPACE_2);
+        assert_eq!(remap.map_mask(SpaceSet::SPACE_3), SpaceSet::SPACE_2);
+        assert_eq!(remap.map_mask(SpaceSet::SPACE_1), SpaceSet::SPACE_1);
+    }
+
+    #[test]
+    fn compact_keeps_an_empty_focused_space_after_the_occupied_ones() {
+        let mut out = output();
+        out.view_space(SpaceSet::SPACE_4);
+        let _ = out.compact(SpaceSet::SPACE_1);
+        assert_eq!(out.view.visible, SpaceSet::SPACE_2);
+        assert_eq!(out.current_space_index(), Some(1));
+    }
+
+    #[test]
+    fn compact_hands_an_emptied_focused_space_to_the_next_one() {
+        let mut out = output();
+        out.space_states[2].layout = LayoutKind::Monocle;
+        out.view_space(SpaceSet::SPACE_2);
+        let _ = out.compact(SpaceSet::SPACE_1 | SpaceSet::SPACE_3);
+        assert_eq!(out.view.visible, SpaceSet::SPACE_2);
+        assert_eq!(
+            out.current_space_state().unwrap().layout,
+            LayoutKind::Monocle
+        );
+    }
+
+    #[test]
+    fn compact_resets_freed_slots_and_moves_the_state_of_kept_spaces() {
+        let mut out = output();
+        out.space_states[2].layout = LayoutKind::Scroll;
+        out.view_space(SpaceSet::SPACE_1);
+        let _ = out.compact(SpaceSet::SPACE_1 | SpaceSet::SPACE_3);
+        assert_eq!(out.space_states[1].layout, LayoutKind::Scroll);
+        assert_eq!(out.space_states[2].layout, out.default_space.layout);
+    }
+
+    #[test]
+    fn compact_drops_a_previous_view_of_a_removed_space() {
+        let mut out = output();
+        out.view_space(SpaceSet::SPACE_3);
+        out.view_space(SpaceSet::SPACE_1);
+        let _ = out.compact(SpaceSet::SPACE_1);
+        assert_eq!(out.view.previous, SpaceSet::empty());
+        out.toggle_back();
+        assert_eq!(out.view.visible, SpaceSet::SPACE_1);
+    }
+
+    #[test]
+    fn compact_leaves_no_empty_space_before_the_focused_one() {
+        for visible_index in 1..=6u8 {
+            for bits in 0u8..(1 << 6) {
+                let occupied = (1..=6u8)
+                    .filter(|index| bits & (1 << (index - 1)) != 0)
+                    .fold(SpaceSet::empty(), |spaces, index| {
+                        spaces | SpaceSet::from_index(index).unwrap()
+                    });
+                let mut out = output();
+                out.view_space(SpaceSet::from_index(visible_index).unwrap());
+                let remap = out.compact(occupied);
+                let focused = out.view.visible.iter_indices().next().unwrap();
+                let occupied = remap.map_mask(occupied);
+                for index in 1..focused {
+                    assert!(
+                        occupied.contains(SpaceSet::from_index(index).unwrap()),
+                        "space {index} is empty and before the focused space {focused}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

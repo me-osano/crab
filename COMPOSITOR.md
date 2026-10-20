@@ -272,6 +272,7 @@ pub struct Output {
     pub usable_area: Rect,        // after layer-shell exclusive zones
     pub view: SpaceView,            // which spaces are visible and how
     pub space_states: [SpaceState; 32],
+    pub default_space: SpaceState,   // state a newly created space starts with
 }
 
 pub struct SpaceView {
@@ -295,6 +296,21 @@ family's default mode). Config and IPC name a mode; a family name is an alias fo
 that family's default mode.
 
 Rule for **multi-space view**: when several spaces are visible, the layout of the *lowest-numbered visible space* is used for the combined window set (dwm behavior). Document this clearly; it is the one place where space models confuse people.
+
+Spaces are **dynamic** (niri-style): a space exists while it holds a window or is
+the empty space past the last occupied one (where a `view` past the end lands).
+After a window closes or moves, `Output::compact` removes the spaces that are now
+empty and followed by occupied ones, renumbers the survivors densely from 1,
+moves each space's `SpaceState` (layout memory, scroll columns, focus history)
+with it, and resets freed slots to `default_space`. The returned `SpaceRemap`
+renumbers window membership, and the view follows its content: if the focused
+space is removed, it shows the space that moved into its slot. There is
+therefore never an empty space before the focused one: `MOD+5` on a two-space
+desktop shows the empty space 3, closing the last window of space 2 makes space 3
+become space 2, and with no windows at all every index collapses to space 1. The
+fixed 32-slot `SpaceSet` is unchanged; this is a renumbering policy on top of it.
+There is **no per-space configuration**: a new space starts from the `[layout]`
+defaults, and cycling the layout changes only the current space at runtime.
 
 ### Focus model
 
@@ -714,112 +730,139 @@ Keep this table in the repo and update it as protocols land. Each protocol gets 
 | Plain `key = value` (mango) | Easy to hand-edit; simple parsing | Weak structure; harder to validate |
 | Lua/Rhai scripting | Maximum power | Complexity, startup cost, safety |
 
-**Recommendation:** **TOML** for the main config (ADR-0003), with `snake_case` keys
-and arrays of tables (`[[window_rule]]`, `[[bind]]`) for repeated structures. Add an
-optional scripting layer (Rhai or Lua) only after IPC is solid; most "scripting"
-needs are met by IPC plus the event stream.
+**Recommendation:** **TOML** for the main config (ADR-0003), with `snake_case` keys,
+mango-style sections (`[layout]`, `[input]`, `[binds.default]`, …), arrays of tables
+where a section repeats (`[[window_rule]]`; a single `[window_rule]` table is
+accepted too), and a flat `chord = action` map for binds. Add an optional scripting
+layer (Rhai or Lua) only after IPC is solid; most "scripting" needs are met by IPC
+plus the event stream.
 
 ### 13.2 Behavior
 
 - **Hot reload** via file watcher with debounce.
 - **Atomic apply:** parse and validate into a new `Config`; only swap if valid.
 - **Errors surface visibly:** on-screen banner plus `crawm-cli validate` for CI/pre-flight.
+- **Default path:** `$XDG_CONFIG_HOME/crawm/config.toml` (falling back to
+  `$HOME/.config/crawm/config.toml`) is read when `--config` is absent. The shipped
+  example is `resources/default-config.toml`.
+- **Toggles accept both spellings:** TOML `true`/`false` and mango's `0`/`1`.
+- **Sections land as their features do:** the current schema is the full example
+  (see §13.3), but only `[layout]` and `[animations] enabled` are applied so far. A
+  section whose feature is still missing parses and validates, so a config can be
+  written once; unknown keys are ignored and a present-but-wrongly-typed key is an
+  error. The pre-`[layout]` flat form is rejected with a message rather than silently reset.
 - `include = ["other.toml"]` support for splitting configs.
 - Provide `crawm-cli config schema` or documented defaults so editors can offer completion later.
 
-### 13.3 Example (sketch)
+### 13.3 Example
+
+The authoritative example is [`resources/default-config.toml`](resources/default-config.toml);
+`crawm --validate --config <path>` checks a copy. Its shape:
 
 ```toml
-# General
+[layout]
 gaps = 8
 border_width = 2
-focus_follows_mouse = false
-
-[spaces]
+border_color = "#7aa2f7"
+unfocused_border_color = "#3b4261"
+client_side_decorations = 0
+focus_follows_cursor = 1
 default_layout = "tile"
 
-# Per-space defaults
-[[spaces.space]]
-index = 1
-layout = "scroll"
+[layout.stack]
+next_space_direction = "horizontal"
 
-[[spaces.space]]
-index = 2
-layout = "tile"
-master_ratio = 0.55
+[layout.tile]
 master_count = 1
+master_ratio = 0.6
+next_space_direction = "horizontal"
 
-[[spaces.space]]
-index = 3
-layout = "floating"
+[layout.scroll]
+center_focused_column = "never"        # never | always | on-overflow
+always_center_single_column = 1
+default_column_ratio = 0.5
+next_space_direction = "vertical"
 
-[animations.window_open]
-spring = { damping = 1.0, stiffness = 800 }
-
-[animations.window_move]
-spring = { damping = 1.0, stiffness = 1000 }
-
-[animations.space_switch]
-easing = { kind = "ease-out-cubic", duration_ms = 220 }
-
-[effects]
-corner_radius = 10
-
-[effects.shadow]
-enabled = true
-softness = 24
-offset = [0, 6]
-
-[effects.blur]
-enabled = true
-passes = 3
-radius = 6
+[animations]
+enabled = 1                                   # 0/1 or false/true
+animation_type_open = "slide"                 # slide | zoom
+animation_type_close = "slide"
 
 [input.keyboard]
-xkb_layout = "us,de"
-xkb_options = "grp:alt_shift_toggle"
-repeat_delay = 300
-repeat_rate = 40
+repeat_rate = 25
+repeat_delay = 600
+numlock_on = 0
+xkb_rules_layout = "us"
 
 [input.touchpad]
-tap = true
-natural_scroll = true
-dwt = true
+disable = 0
+tap_to_click = 1
+tap_and_drag = 1
+drag_lock = 1
+natural_scrolling = 1
+disable_while_typing = 1
+swipe_min_threshold = 1
 
-[[output]]
-name = "DP-1"
-mode = "2560x1440@144"
-scale = 1.25
-position = [0, 0]
+[input.mouse]
+natural_scrolling = 0
 
-[[window_rule]]
-match = { app_id = "^pavucontrol$" }
-floating = true
-size = [700, 500]
+[output.monitor]                              # one table per connector, e.g. eDP-1
+mode = "1920x1080@120.030"
+scale = 1.0
+transform = "normal"
+position = { x = 1280, y = 0 }
 
-[[window_rule]]
-match = { app_id = "^firefox$", title = "^Picture-in-Picture$" }
-floating = true
-pinned = true
-blur = false
+[autostart]
+exec_once = ["waybar"]
 
-# Keybinds: chord = action
-[binds]
-"Mod+Return" = { spawn = ["foot"] }
-"Mod+Space" = { cycle_layout_mode = {} }
-"Mod+Ctrl+Space" = { cycle_layout_family = {} }
-"Mod+F" = { toggle_floating = {} }
-"Mod+Shift+1" = { move_to_space = 1 }
-"Mod+1" = { view_space = 1 }
-"Mod+Ctrl+1" = { toggle_space_view = 1 }
-"Mod+H" = { focus = "left" }
-"Mod+L" = { focus = "right" }
-"Mod+Shift+Q" = { close_window = {} }
+[[window_rule]]                               # `[window_rule]` also works for one
+app_id = "Nautilus"                           # a string or a list of app_ids
+open_floating = 1
+size = [800, 500]
+offset_x = -90
+offset_y = -90
+
+[layer_rule]
+animation_type_open = "zoom"
+layer_name = ["rofi", "alacritty"]
+
+[binds.default]
+"SUPER+q" = "killclient"
+"SUPER+Return" = "spawn:alacritty"
+"ALT+Left" = "focusdir:left"
+"SUPER+1" = "view_space:1"
+"Alt+1" = "move_client_space:1"
+
+[binds.locked]
+"XF86AudioMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+
+[mousebinds]
+"btn_left" = "moveresize,curmove"
+"btn_right" = "moveresize,curresize"
+
+[gesturebinds]
+"left+3" = "focusdir:left"
+
+[axisbinds]
+"SUPER+UP" = "viewtoleft_have_client"
 ```
+
+**Status:** `[layout]` and `[animations] enabled` are applied at startup; the
+open/close styles are read when those animations land (M3). The other sections parse
+and validate so the file can be written once, but their behavior lands with M4
+(`[input]`, `[output]`), M5.3/M5.4 (`[binds.*]`, `[mousebinds]`, `[autostart]`, rules)
+and M6 (gestures, layer rules). The built-in key table is still what runs.
 
 ### 13.4 Window rules
 
-Matching on `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11 vs Wayland. Actions: initial space, floating, size, position, opacity, blur/shadow/corner overrides, `no-focus`, `pinned`, `always-on-top`, `block-out-from` (screencast privacy), default column width (scroller).
+Rules live in `[window_rule]` (one table) or `[[window_rule]]` (several). The
+current schema matches `app_id` (a string or a list of app_ids) and sets
+`open_floating`, `size = [width, height]`, `offset_x` and `offset_y`; M5.4 expands
+it to match `title`, `is-floating`,
+`is-fullscreen`, `output`, `space` and X11-vs-Wayland, with actions for initial
+space, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned,
+always-on-top, `block-out-from` (screencast privacy) and default column width
+(scroller).
 
 Apply rules **at map time** and **re-evaluate on title/app-id change** for rules marked `dynamic`.
 

@@ -42,7 +42,8 @@ crawm's configuration is **TOML**, parsed with `serde` and the `toml` crate
   swap only if it validates.
 - **Trade-off:** TOML is less pleasant for *repeated, deeply-nested* structures (long
   lists of window rules, per-tag bind tables). We mitigate this with arrays of tables
-  (`[[window_rule]]`, `[[bind]]`) and by keeping such tables shallow; if a construct
+  (`[[window_rule]]`) and with compact `chord = action` maps
+  (`[binds.default]`, `[mousebinds]`), keeping such tables shallow; if a construct
   becomes genuinely awkward we will reconsider a nested format for that one table in a
   follow-up ADR rather than switching the whole config.
 - Reserved keys use `snake_case` (e.g. `border_width`, `border_color`), matching
