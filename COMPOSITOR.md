@@ -583,10 +583,10 @@ Clients commit new buffers after being configured, not instantly. For smooth vis
   (`MAX_SIZE_REFUSALS`); then the window is marked as refusing, left at the size it chose,
   and drawn cut back to its rect. A client that keeps repeating itself is never configured
   again, so this cannot loop.
-- **Input caveat:** while a rect is bigger than what its client committed, pointer
-  coordinates handed to the client are off by the same factor the pixels were scaled by.
-  Fix: map input back through the window's drawn rect (what niri's `View::local()` does);
-  a window that is cut back is unaffected, since it is drawn 1:1.
+- Pointer input is mapped back through the same fit: the seat is given an origin that makes
+  `position - origin` land on the surface-local point *drawn* there, not the one the
+  placement puts there (`WindowFit::input_origin`). A window that is cut back is drawn 1:1
+  and reports its plain surface origin. Popups are never stretched and keep their placement.
 - For close animations, capture the last buffer into an offscreen texture before the surface goes away.
 
 ---
@@ -618,6 +618,9 @@ All effects are optional render passes with a performance budget and a kill swit
 ### Devices
 
 - libinput via Smithay: keyboard, pointer, touchpad, touchscreen, tablet (later), switches (lid).
+- Pointer events are forwarded as `wl_pointer`, and every motion/button/axis batch ends with
+  `wl_pointer.frame`: clients that group events (SCTK, GTK, Qt) only act once the frame
+  arrives.
 - Per-device config: natural scroll, tap, accel profile, click method, disable-while-typing.
 - XKB layouts configurable per keyboard; runtime layout switching via bind and IPC.
 

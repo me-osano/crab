@@ -42,6 +42,7 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::ShmState;
 
+use crate::compositor::fit::WindowFit;
 use crate::compositor::layout;
 
 /// Size a new toplevel is configured to before the layout first sizes it, in
@@ -149,9 +150,28 @@ impl ManagedWindow {
         size_i32(rect.w, rect.h)
     }
 
-    /// Where the toplevel's `wl_surface` origin sits while it is drawn.
+    /// Where the toplevel's `wl_surface` origin sits while it is drawn: the
+    /// rectangle's origin pulled back by the client's own decoration inset.
+    ///
+    /// This is where the renderer places the surface tree. Pointer input asks
+    /// [`Self::fit`] for the origin it reports instead, because the two differ
+    /// while the window is being stretched.
     pub(crate) fn visual_surface_origin(&self, clocks: &Clocks) -> Point<i32, Logical> {
         self.visual_origin(clocks) - self.geometry.loc
+    }
+
+    /// How this window's committed surface maps onto where it is drawn.
+    ///
+    /// Both readers of that mapping build it here — the renderer drawing the
+    /// window forward, the seat answering the pointer backward — so what is
+    /// drawn and what a click means cannot drift apart (`super::fit`).
+    pub(crate) fn fit(&self, clocks: &Clocks) -> WindowFit {
+        WindowFit::new(
+            Rectangle::new(self.visual_origin(clocks), self.visual_size(clocks)),
+            self.visual_surface_origin(clocks),
+            self.geometry.size,
+            !self.is_size_refusing(),
+        )
     }
 
     /// Moves the drawn rectangle toward `rect`, for the reason `kind`.
@@ -908,11 +928,19 @@ impl Crawm {
     }
 
     /// Returns the top-most mapped surface covering `position`, with the
-    /// logical coordinates of its top-left corner.
+    /// logical coordinates of its top-left corner: the origin to subtract
+    /// `position` from to get the surface-local point under it.
+    ///
+    /// For a toplevel that is the fit's origin rather than the surface's
+    /// placement. While the window is stretched, the surface-local point drawn
+    /// at `position` is not the one the placement puts there, and reporting
+    /// the placement would hand the client a position where it drew nothing
+    /// (TODO.md §3.5). Popups are never stretched — they are drawn where they
+    /// are placed — so theirs is their placement straight.
     pub(crate) fn surface_under(
         &self,
         position: Point<f64, Logical>,
-    ) -> Option<(WlSurface, Point<i32, Logical>)> {
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
         // A popup floats above every toplevel, so its tree gets first refusal:
         // this is what keeps the pointer on an open menu (and lets its grab see
         // that the pointer is still on the right client).
@@ -926,7 +954,7 @@ impl Crawm {
                     (0, 0),
                     WindowSurfaceType::ALL,
                 ) {
-                    return Some((surface, origin + location));
+                    return Some((surface, (origin + location).to_f64()));
                 }
             }
         }
@@ -934,7 +962,7 @@ impl Crawm {
         let window = self.window(id)?;
         Some((
             window.wl_surface().clone(),
-            window.visual_surface_origin(&self.frame_clock),
+            window.fit(&self.frame_clock).input_origin(position),
         ))
     }
 

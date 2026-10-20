@@ -92,7 +92,8 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 
 ### 1.3 Input basics
 - [x] Keyboard (`xkbcommon`, keymap, modifiers, key repeat) — via `KeyboardHandle::input` with the default keymap (a `KeyboardHandler` impl lands when keybind interception does).
-- [x] Pointer (motion, buttons, axis/scroll) — `PointerHandle` events.
+- [x] Pointer (motion, buttons, axis/scroll) — `PointerHandle` events, each batch closed
+  with `wl_pointer.frame` so clients that group events (SCTK, GTK, Qt) act on them.
 - [x] **Click-to-focus**; keyboard focus follows the focused surface.
 - [x] Cursor rendering (software cursor element first) — a client's `wl_pointer.set_cursor`
   surface, the built-in arrow for named icons, and nothing for a hidden cursor; the backends
@@ -260,16 +261,21 @@ are smooth, interruptible, and free of pops.
   Every surface is drawn *into* its animated rectangle rather than at its own size: a
   rectangle that has grown past what the client committed is filled by scaling its pixels
   over it, one that it has overfilled is cut back to it (`WindowFit` in
-  `src/compositor/render.rs`), so the content is never a frame behind the border and never
+  `src/compositor/fit.rs`), so the content is never a frame behind the border and never
   spills into a neighbour. At rest the mapping is 1:1 and a client draws exactly as before,
   decoration shadows included.
-- [ ] Pointer input through a **stretched** window: while a rectangle is bigger than what
-  its client committed, the coordinates handed back are scaled by the same factor the
-  pixels were, so a click during the animation lands where nothing was drawn. niri maps
-  input back through the window's drawn rect (`View::local()`); `WindowFit` already has the
-  affine, it is just not applied on the input side yet (`src/compositor/input.rs`). A
-  window that is *cut back* is unaffected — it is drawn pixel for pixel, so the pointer
-  agrees with it already.
+- [x] Pointer input through a **stretched** window: while a rectangle is bigger than what
+  its client committed, the seat is handed an origin that makes `position - origin` land on
+  the surface-local point *drawn* there, not the one the placement puts there — the inverse
+  of the fit, `WindowFit::input_origin` in `src/compositor/fit.rs`, which the renderer and
+  the input path now both read from one place (niri's `View::local()` does the same). A
+  window that is *cut back* is unaffected: it is drawn pixel for pixel and reports its
+  plain surface origin. Checked end-to-end against a probe client that commits 200×100 and
+  ignores every configure: drawn in 1904×1064, a pointer on the rectangle's centre reaches
+  it as the buffer's centre (100, 50); without the inverse it arrives as (952, 532), far
+  outside the surface. The same run turned up a missing `wl_pointer.frame` after motion and
+  buttons, without which clients that batch events (`smithay-client-toolkit`, GTK, Qt) see
+  none at all — every batch now ends with one.
 - [ ] Open: alpha, scale, offset.
 - [ ] Close: alpha, scale — **snapshot the last buffer** into a texture after unmap (`COMPOSITOR.md` §9 resize handling).
 - [x] Layout switch: per-window rect — windows spring to their new tile.

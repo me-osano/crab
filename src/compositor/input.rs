@@ -218,10 +218,10 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
         return;
     }
 
-    // `motion` sends wl_pointer.enter/leave/motion as needed.
-    let focus = state
-        .surface_under(position)
-        .map(|(surface, location)| (surface, location.to_f64()));
+    // `motion` sends wl_pointer.enter/leave/motion as needed. The focus
+    // carries the origin smithay subtracts `position` from, which for a
+    // stretched window is the fit's (`compositor::fit`), not its placement.
+    let focus = state.surface_under(position);
     state.pointer.clone().motion(
         state,
         focus,

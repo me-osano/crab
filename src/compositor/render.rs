@@ -49,6 +49,7 @@ use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
 };
 
+use crate::compositor::fit::WindowFit;
 use crate::compositor::state::{Crawm, ManagedWindow};
 
 /// Background color of the compositor (dark slate).
@@ -288,17 +289,11 @@ fn collect_pass<'a>(
         // layout placed and what `borders_for` frames — lands on the rect.
         // `WindowFit` then maps whatever the client has committed onto that
         // rect, which is the same thing while it is the size it was asked to
-        // be.
-        let fit = WindowFit {
-            drawn: Rectangle::new(location.to_physical(1), size.to_physical(1)),
-            committed: window.geometry.size,
-            may_stretch: !window.is_size_refusing(),
-        };
+        // be; pointer input reads the same fit backwards.
         surfaces.extend(fitted_surface_tree(
             renderer,
             window.wl_surface(),
-            window.visual_surface_origin(&state.frame_clock),
-            fit,
+            window.fit(&state.frame_clock),
         ));
     }
 }
@@ -311,20 +306,19 @@ fn border_color(color: Color) -> Color32F {
 /// The surface elements of one toplevel, each mapped onto the rectangle the
 /// window is being drawn at.
 ///
-/// They come from smithay at the window's surface origin — the rectangle's
+/// They come from smithay at the fit's surface origin — the rectangle's
 /// origin pulled back by the client's decoration inset — and [`WindowFit`]
 /// then moves and cuts them.
 fn fitted_surface_tree(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
-    location: Point<i32, Logical>,
     fit: WindowFit,
 ) -> Vec<FittedSurface<GlesRenderer>> {
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         render_elements_from_surface_tree(
             renderer,
             surface,
-            location.to_physical(1),
+            fit.surface_origin().to_physical(1),
             1.0,
             1.0,
             Kind::Unspecified,
@@ -337,148 +331,6 @@ fn fitted_surface_tree(
             Some(FittedSurface { inner, src, dst })
         })
         .collect()
-}
-
-/// Where one window is being drawn this frame, and how big its client has
-/// committed the window geometry to be.
-#[derive(Clone, Copy, Debug)]
-struct WindowFit {
-    /// The rectangle the window is drawn at: its animated placement.
-    drawn: Rectangle<i32, Physical>,
-    /// The size the client last committed for its window geometry, which is
-    /// what its buffer has to say for itself.
-    committed: Size<i32, Logical>,
-    /// Whether a rectangle bigger than [`Self::committed`] may be filled by
-    /// growing the pixels the client drew.
-    ///
-    /// It may only while the client is being asked for exactly this rectangle:
-    /// then the growth is the animation catching up and it is gone within the
-    /// resize. A window that refused the size is cropped instead, because
-    /// stretched pixels are pixels the client is not drawing — it would be
-    /// answering clicks in places it never painted.
-    may_stretch: bool,
-}
-
-impl WindowFit {
-    /// Maps one element of the window's surface tree onto the rectangle.
-    ///
-    /// `natural` is where smithay would have drawn the element — its position
-    /// in the tree, with the window geometry landing on the rectangle — and
-    /// `src` the part of the buffer it samples. Nothing of the element inside
-    /// the rectangle yields nothing: an element wholly outside it is not
-    /// drawn.
-    fn map_element(
-        &self,
-        natural: Rectangle<i32, Physical>,
-        src: Rectangle<f64, BufferCoords>,
-    ) -> Option<(Rectangle<f64, BufferCoords>, Rectangle<i32, Physical>)> {
-        let x = Axis::fit(
-            (f64::from(self.drawn.loc.x), f64::from(self.drawn.size.w)),
-            f64::from(self.committed.w),
-            self.may_stretch,
-        );
-        let y = Axis::fit(
-            (f64::from(self.drawn.loc.y), f64::from(self.drawn.size.h)),
-            f64::from(self.committed.h),
-            self.may_stretch,
-        );
-
-        let ((dx, dw), (cut_x_lo, cut_x_hi)) = x.cut(
-            x.map(f64::from(natural.loc.x)),
-            f64::from(natural.size.w) * x.scale,
-        )?;
-        let ((dy, dh), (cut_y_lo, cut_y_hi)) = y.cut(
-            y.map(f64::from(natural.loc.y)),
-            f64::from(natural.size.h) * y.scale,
-        )?;
-
-        // How much of the buffer one drawn pixel of this element covers, which
-        // is its buffer scale for an ordinary surface. Pixels cut from the
-        // drawing take their share of the buffer with them; a stretched axis
-        // cuts none, so the whole of it is still sampled.
-        let (sw, sh) = (
-            src.size.w / f64::from(natural.size.w).max(1.0),
-            src.size.h / f64::from(natural.size.h).max(1.0),
-        );
-        let src = Rectangle::new(
-            Point::from((src.loc.x + cut_x_lo * sw, src.loc.y + cut_y_lo * sh)),
-            Size::from((
-                src.size.w - (cut_x_lo + cut_x_hi) * sw,
-                src.size.h - (cut_y_lo + cut_y_hi) * sh,
-            )),
-        );
-        let dst = Rectangle::new(
-            Point::from((dx, dy)).to_i32_round(),
-            Size::from((dw, dh)).to_i32_round(),
-        );
-        Some((src, dst))
-    }
-}
-
-/// One axis of a window's fit: how a coordinate on the client's surface moves
-/// when it is drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Axis {
-    /// What is added to a surface coordinate times [`Self::scale`].
-    offset: f64,
-    /// Multiplier from surface pixels to drawn pixels.
-    scale: f64,
-    /// The extent the surface is cut to on this axis, present only when the
-    /// window is cropped rather than stretched.
-    cut: Option<(f64, f64)>,
-}
-
-impl Axis {
-    /// Fits one axis of a window whose rectangle spans `origin` for `size`
-    /// pixels and whose client committed `committed` of them.
-    ///
-    /// A rectangle the client has not filled yet is filled by growing what it
-    /// drew, anchored on the rectangle's origin so the window's top-left
-    /// corner stays put: the pixels that spill past the far edge are the
-    /// client's own decoration shadows, which are meant to spill. A rectangle
-    /// the client has overfilled is cut back, pixel for pixel, so nothing
-    /// spills into whatever sits beside it.
-    ///
-    /// A window at rest is neither: it is drawn exactly as the client drew it,
-    /// which is what keeps a client's decoration shadows around its edges.
-    fn fit((origin, size): (f64, f64), committed: f64, may_stretch: bool) -> Self {
-        if committed > 0.0 && size > committed && may_stretch {
-            let scale = size / committed;
-            // The map is `origin + (p - origin) * scale`, which over surface
-            // coordinates is the affine `offset + p * scale`.
-            return Axis {
-                offset: origin - origin * scale,
-                scale,
-                cut: None,
-            };
-        }
-        let cut = (committed > size).then_some((origin, origin + size));
-        Axis {
-            offset: 0.0,
-            scale: 1.0,
-            cut,
-        }
-    }
-
-    /// Where a coordinate on the client's surface lands on this axis.
-    fn map(&self, value: f64) -> f64 {
-        self.offset + value * self.scale
-    }
-
-    /// Cuts the drawn extent `[at, at + size)` to the part the window's
-    /// rectangle covers: what is left, and how much was taken from each end.
-    ///
-    /// An axis that is not cut keeps the whole extent, decorations and all; an
-    /// element lying wholly past the rectangle's edges is cut to nothing.
-    fn cut(&self, at: f64, size: f64) -> Option<((f64, f64), (f64, f64))> {
-        let Some((floor, ceiling)) = self.cut else {
-            return Some(((at, size), (0.0, 0.0)));
-        };
-        let (lo, hi) = (at, at + size);
-        let kept_lo = lo.max(floor);
-        let kept_hi = hi.min(ceiling);
-        (kept_hi > kept_lo).then_some(((kept_lo, kept_hi - kept_lo), (kept_lo - lo, hi - kept_hi)))
-    }
 }
 
 /// A surface element mapped onto the rectangle its window is drawn at.
@@ -764,128 +616,6 @@ fn send_frame_callbacks(surface: &WlSurface, time: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A window drawn at `drawn`, its client having committed `committed`.
-    fn fit(drawn: (i32, i32, i32, i32), committed: (i32, i32), may_stretch: bool) -> WindowFit {
-        WindowFit {
-            drawn: Rectangle::new((drawn.0, drawn.1).into(), (drawn.2, drawn.3).into()),
-            committed: (committed.0, committed.1).into(),
-            may_stretch,
-        }
-    }
-
-    /// One element of a surface tree at `loc`, `size` big, sampling all of a
-    /// `buffer`-sized buffer.
-    fn element(
-        loc: (i32, i32),
-        size: (i32, i32),
-        buffer: (f64, f64),
-    ) -> (Rectangle<i32, Physical>, Rectangle<f64, BufferCoords>) {
-        (
-            Rectangle::new((loc.0, loc.1).into(), (size.0, size.1).into()),
-            Rectangle::new((0.0, 0.0).into(), buffer.into()),
-        )
-    }
-
-    #[test]
-    fn a_window_at_rest_is_drawn_exactly_as_the_client_drew_it() {
-        // A client-side-decorated window: its buffer is the geometry with a
-        // 25 pixel shadow margin on every side, and at rest none of that may
-        // move or shrink, shadows included.
-        let (natural, src) = element((75, 175), (519, 1080), (519.0, 1080.0));
-        let (src, dst) = fit((100, 200, 469, 1030), (469, 1030), true)
-            .map_element(natural, src)
-            .expect("the whole window is beside its rectangle");
-        assert_eq!(dst, natural);
-        assert_eq!(src, element((0, 0), (0, 0), (519.0, 1080.0)).1);
-    }
-
-    #[test]
-    fn a_rectangle_the_client_has_not_filled_is_stretched_over() {
-        // The rectangle has grown to twice what the client committed: the
-        // buffer covers all of it, sampled from all of itself.
-        let (natural, src) = element((100, 200), (469, 1030), (469.0, 1030.0));
-        let (src, dst) = fit((100, 200, 940, 1030), (469, 1030), true)
-            .map_element(natural, src)
-            .expect("the window is inside its rectangle");
-        assert_eq!(dst, Rectangle::new((100, 200).into(), (940, 1030).into()));
-        assert_eq!(src, element((0, 0), (0, 0), (469.0, 1030.0)).1);
-    }
-
-    #[test]
-    fn a_growing_rectangle_keeps_the_windows_top_left_corner() {
-        // Stretching is anchored on the origin, so the geometry's top-left
-        // corner stays exactly where it was. Everything else scales with it,
-        // decoration shadows included: the margin above and left is still
-        // above and left, just twice as wide.
-        let (natural, src) = element((75, 175), (519, 1080), (519.0, 1080.0));
-        let (_, dst) = fit((100, 200, 940, 1030), (469, 1030), true)
-            .map_element(natural, src)
-            .expect("the window is beside its rectangle");
-        // The geometry's origin lands on the rectangle's origin, and the whole
-        // element scales by 940/469 horizontally and 1:1 vertically.
-        assert_eq!(dst.loc.x, 50);
-        assert_eq!(dst.loc.y, 175);
-        assert_eq!(dst.size.w, 1040);
-        assert_eq!(dst.size.h, 1080);
-    }
-
-    #[test]
-    fn a_rectangle_the_client_overfills_is_cut_back_to_it() {
-        // The client committed 940 and the rectangle is 469 wide: nothing may
-        // be drawn past the rectangle's right edge, and the buffer is sampled
-        // from the part of itself that would have been there.
-        let (natural, src) = element((100, 200), (940, 1030), (940.0, 1030.0));
-        let (src, dst) = fit((100, 200, 469, 1030), (940, 1030), true)
-            .map_element(natural, src)
-            .expect("the window's start is inside its rectangle");
-        assert_eq!(dst, Rectangle::new((100, 200).into(), (469, 1030).into()));
-        assert_eq!(src, element((0, 0), (0, 0), (469.0, 1030.0)).1);
-    }
-
-    #[test]
-    fn cutting_takes_the_pixels_behind_it_with_it() {
-        // The same window with its shadow margins: the cut lands on the
-        // rectangle's edges, so what survives horizontally is the geometry and
-        // the margin before it — and the buffer is sampled from that, not from
-        // its start. The other axis is left alone, since there the client
-        // filled exactly what was asked, shadows included.
-        let (natural, src) = element((75, 175), (990, 1080), (990.0, 1080.0));
-        let (src, dst) = fit((100, 200, 469, 1030), (940, 1030), true)
-            .map_element(natural, src)
-            .expect("the window's start is inside its rectangle");
-        assert_eq!(dst, Rectangle::new((100, 175).into(), (469, 1080).into()));
-        assert_eq!(src.loc.x, 25.0);
-        assert_eq!(src.size.w, 469.0);
-        assert_eq!(src.loc.y, 0.0);
-        assert_eq!(src.size.h, 1080.0);
-    }
-
-    #[test]
-    fn a_client_that_refused_the_size_is_not_stretched() {
-        // It committed 469 while its rectangle is 940 wide and is not going to
-        // grow: its pixels stay its own size, and the empty part of the
-        // rectangle is the honest picture of a client that said no. Stretched
-        // pixels would put the pointer where nothing was drawn.
-        let (natural, src) = element((100, 200), (469, 1030), (469.0, 1030.0));
-        let (src, dst) = fit((100, 200, 940, 1030), (469, 1030), false)
-            .map_element(natural, src)
-            .expect("the window is inside its rectangle");
-        assert_eq!(dst, natural);
-        assert_eq!(src, element((0, 0), (0, 0), (469.0, 1030.0)).1);
-    }
-
-    #[test]
-    fn an_element_beyond_the_rectangle_is_not_drawn() {
-        // A subsurface sitting past the right edge of a window that overfills
-        // its rectangle has nothing left of it inside.
-        let (natural, src) = element((700, 300), (100, 100), (100.0, 100.0));
-        assert!(
-            fit((100, 200, 469, 1030), (940, 1030), true)
-                .map_element(natural, src)
-                .is_none()
-        );
-    }
 
     #[test]
     fn the_tip_sits_at_the_origin() {

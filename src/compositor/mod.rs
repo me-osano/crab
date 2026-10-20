@@ -9,11 +9,14 @@
 //! [`state`] owns [`Crawm`](state::Crawm) and the top-level event dispatch; the
 //! rest hangs off it. [`handlers`] is one module per protocol, [`input`] turns
 //! backend events into seat events and holds the binds, [`layout`] applies the
-//! pure layout engine to real windows, and [`render`] draws a frame.
+//! pure layout engine to real windows, [`fit`] describes how a window's
+//! committed surface maps onto where it is drawn — the renderer and pointer
+//! input both read it — and [`render`] draws a frame.
 //!
 //! Backends (`src/backend/`) sit outside this module: they are the platform
 //! layer that drives it, not part of it.
 
+pub(crate) mod fit;
 pub(crate) mod handlers;
 pub(crate) mod input;
 pub(crate) mod layout;
