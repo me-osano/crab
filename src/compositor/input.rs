@@ -231,6 +231,7 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
             time,
         },
     );
+    state.pointer.clone().frame(state);
 }
 
 /// Forwards a button press/release, focusing the window under the pointer.
@@ -273,6 +274,7 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
             state: pressed,
         },
     );
+    state.pointer.clone().frame(state);
 }
 
 /// Forwards scroll to the focused client.
