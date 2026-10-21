@@ -66,6 +66,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .socket_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| SOCKET_BASENAME.to_owned());
+    state.set_wayland_display(socket_name.clone());
 
     let (backend, winit_source) = winit::init::<GlesRenderer>()
         .map_err(|err| anyhow::anyhow!("initialise the winit backend: {err:?}"))?;
@@ -205,6 +206,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         gaps = config.gaps,
         "crawm (winit) ready — connect clients with WAYLAND_DISPLAY={socket_name}"
     );
+    data.state.run_autostart();
 
     event_loop
         .run(None, &mut data, |data| {

@@ -62,7 +62,7 @@ pub struct Config {
     /// Scroll-family defaults (`[layout] scroll_*`).
     pub scroll: ScrollDefaults,
     /// Move focus to the window under the pointer (`[layout]
-    /// focus_follows_cursor`). Parsed, not applied yet (M4).
+    /// focus_follows_cursor`).
     pub focus_follows_cursor: bool,
     /// Keyboard, pointer and touchpad defaults (`[input]`). Parsed and
     /// validated; applied when the libinput backend lands (M4).
@@ -70,17 +70,17 @@ pub struct Config {
     /// Per-connector settings (`[output.<name>]`). Parsed; applied with the
     /// output backend (M4).
     pub outputs: BTreeMap<String, Output>,
-    /// Commands to run once at startup (`[autostart]`). Parsed, not run yet.
+    /// Commands to run once at startup (`[autostart]`). Run by the backend once
+    /// crawm's Wayland socket exists.
     pub autostart: Autostart,
     /// Rules applied when a window maps (`[window_rule]` or `[[window_rule]]`).
-    /// Parsed; matched when the rules engine lands (M5.4).
     pub window_rules: Vec<WindowRule>,
     /// Rules applied to layer-shell surfaces (`[layer_rule]` or
     /// `[[layer_rule]]`). Parsed, not applied yet (M5.4/M6.7).
     pub layer_rules: Vec<LayerRule>,
-    /// Keyboard chords (`[binds.default]` and `[binds.locked]`), kept as the
-    /// authored `chord = action` strings. Built-in binds still run until M5.3
-    /// compiles these; `locked` bindings wait for a lock screen (M6).
+    /// Keyboard chords (`[binds.default]` and `[binds.locked]`), compiled into
+    /// the session's bind table at startup. `locked` bindings are active all
+    /// the time until a lock screen exists (M6).
     pub binds: Binds,
     /// Pointer-button binds (`[mousebinds]`), kept as action strings. Parsed,
     /// not applied yet.
@@ -137,17 +137,8 @@ impl Config {
         if !self.outputs.is_empty() {
             pending.push("output");
         }
-        if !self.autostart.exec_once.is_empty() {
-            pending.push("autostart");
-        }
-        if !self.window_rules.is_empty() {
-            pending.push("window_rule");
-        }
         if !self.layer_rules.is_empty() {
             pending.push("layer_rule");
-        }
-        if !self.binds.default.is_empty() || !self.binds.locked.is_empty() {
-            pending.push("binds");
         }
         if !self.mouse_binds.is_empty() {
             pending.push("mousebinds");
@@ -158,10 +149,7 @@ impl Config {
         if !self.axis_binds.is_empty() {
             pending.push("axisbinds");
         }
-        if self.focus_follows_cursor != defaults.focus_follows_cursor {
-            pending.push("layout.focus_follows_cursor");
-        }
-        if self.client_side_decorations {
+        if self.client_side_decorations != defaults.client_side_decorations {
             pending.push("layout.client_side_decorations");
         }
         if self.space_directions != defaults.space_directions {
@@ -370,8 +358,7 @@ pub struct Output {
 /// The `[autostart]` table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Autostart {
-    /// Commands to run once when the session starts (`exec_once`). Parsed, not
-    /// run yet.
+    /// Commands to run once when the session starts (`exec_once`).
     pub exec_once: Vec<String>,
 }
 
@@ -1428,18 +1415,15 @@ mod tests {
         let pending = cfg.pending_sections();
         for section in [
             "output",
-            "autostart",
-            "window_rule",
             "layer_rule",
-            "binds",
             "mousebinds",
             "gesturebinds",
             "axisbinds",
         ] {
             assert!(pending.contains(&section), "missing {section}: {pending:?}");
         }
-        // The example's `[input]` and pointer-focus setting match the built-in
-        // defaults, so nothing is lost by not applying them; `[layout]` is.
+        // The example's `[input]` matches the built-in defaults, so nothing is
+        // lost by not applying it; `[layout]` is applied.
         assert!(!pending.contains(&"input"));
         assert!(!pending.contains(&"layout"));
 
@@ -1450,7 +1434,6 @@ mod tests {
         let pending = cfg.pending_sections();
         assert!(pending.contains(&"input"));
         assert!(pending.contains(&"layout.client_side_decorations"));
-        assert!(pending.contains(&"layout.focus_follows_cursor"));
     }
 
     #[test]

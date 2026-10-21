@@ -1,68 +1,33 @@
-//! Input: turning backend events into seat events, and the M2 keybinds.
+//! Input: turning backend events into seat events, and running keybinds.
 //!
-//! M2 wires the keyboard and pointer (motion, buttons, scroll) into the seat
-//! with click-to-focus, plus a **hardcoded keybind layer** so the space/layout
-//! actions are reachable before the config-driven bind system lands in M5. The
-//! binds below are temporary by design: when M5 adds `[[binds]]`, this table is
-//! replaced by a lookup into the parsed config, and the [`Action`] enum stays.
+//! The keyboard path forwards keys to the focused client unless the compiled
+//! [`BindTable`](crate::compositor::binds::BindTable) claims the chord, in which
+//! case the key press (and its release) is swallowed and the resulting
+//! [`Action`] runs. Binds come from `[binds.default]`/`[binds.locked]`, layered
+//! over crawm's built-ins (`crate::compositor::binds`).
 //!
 //! Touch, gestures, and pointer constraints land with the libinput backend (M4)
 //! and protocol breadth (M3); the `_ => {}` arm of [`handle`] is where they will
 //! arrive.
 
-use crawm::core::{Direction, LayoutCommand};
+use crawm::core::LayoutCommand;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, ButtonState, Event as _, InputBackend, InputEvent, KeyState,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
-use smithay::input::keyboard::{FilterResult, Keysym, ModifiersState, keysyms};
+use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
+use crate::compositor::binds::Action;
+use crate::compositor::spawn;
 use crate::compositor::state::{Crawm, GrabMode};
 
 /// `BTN_LEFT`.
 const BTN_LEFT: u32 = 0x110;
 /// `BTN_RIGHT`.
 const BTN_RIGHT: u32 = 0x111;
-
-/// A compositor action produced by a keybind or pointer grab.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
-    /// View a single space.
-    ViewSpace(u8),
-    /// Move the focused window to a space.
-    MoveToSpace(u8),
-    /// Toggle a space in the current view.
-    ToggleSpaceView(u8),
-    /// Toggle a space on the focused window.
-    ToggleSpace(u8),
-    /// Swap to the previously-viewed space set.
-    ToggleBack,
-    /// Directional focus.
-    Direction(Direction),
-    /// Focus the next (`true`) or previous (`false`) window.
-    CycleFocus(bool),
-    /// Cycle the space's layout mode within its family.
-    CycleLayoutMode,
-    /// Cycle the space's layout family (to the next family's default mode).
-    CycleLayoutFamily,
-    /// Flip the focused window between tiled and floating.
-    ToggleFloating,
-    /// Flip fullscreen for the focused window.
-    ToggleFullscreen,
-    /// Grow (`true`) or shrink the master area.
-    MasterRatio(bool),
-    /// Add (`true`) or remove a master slot.
-    MasterCount(bool),
-    /// Cycle the focused scroll column's width through the presets.
-    PresetWidth,
-    /// Scroll the focused scroll column to the middle of the view.
-    CenterColumn,
-    /// Ask the focused window to close.
-    Close,
-}
 
 /// Handles one input event from a backend, updating seat state and focus.
 pub(crate) fn handle<B: InputBackend>(state: &mut Crawm, event: InputEvent<B>) {
@@ -111,7 +76,7 @@ fn keyboard<B: InputBackend>(state: &mut Crawm, event: B::KeyboardKeyEvent) {
                 .first()
                 .copied()
                 .unwrap_or_else(|| keysym.modified_sym());
-            match bind_action(modifiers, base) {
+            match state.binds.action(modifiers, base) {
                 Some(action) => {
                     state.bound_keys.insert(keycode.raw());
                     FilterResult::Intercept(action)
@@ -126,52 +91,6 @@ fn keyboard<B: InputBackend>(state: &mut Crawm, event: B::KeyboardKeyEvent) {
     }
 }
 
-/// The action a bind maps to, or `None` to forward the key to the client.
-fn bind_action(modifiers: &ModifiersState, keysym: Keysym) -> Option<Action> {
-    if !modifiers.logo {
-        return None;
-    }
-    let symbol = keysym.raw();
-    if let Some(index) = digit_of(symbol) {
-        return Some(match (modifiers.ctrl, modifiers.shift) {
-            (false, false) => Action::ViewSpace(index),
-            (false, true) => Action::MoveToSpace(index),
-            (true, false) => Action::ToggleSpaceView(index),
-            (true, true) => Action::ToggleSpace(index),
-        });
-    }
-    let shift = modifiers.shift;
-    let ctrl = modifiers.ctrl;
-    Some(match symbol {
-        keysyms::KEY_Tab => Action::ToggleBack,
-        keysyms::KEY_Left => Action::Direction(Direction::Left),
-        keysyms::KEY_Right => Action::Direction(Direction::Right),
-        keysyms::KEY_Up => Action::Direction(Direction::Up),
-        keysyms::KEY_Down => Action::Direction(Direction::Down),
-        keysyms::KEY_j => Action::CycleFocus(true),
-        keysyms::KEY_k => Action::CycleFocus(false),
-        keysyms::KEY_space if shift => Action::ToggleFloating,
-        keysyms::KEY_space if ctrl => Action::CycleLayoutFamily,
-        keysyms::KEY_space => Action::CycleLayoutMode,
-        keysyms::KEY_f => Action::ToggleFullscreen,
-        keysyms::KEY_h if shift => Action::MasterCount(false),
-        keysyms::KEY_l if shift => Action::MasterCount(true),
-        keysyms::KEY_h => Action::MasterRatio(false),
-        keysyms::KEY_l => Action::MasterRatio(true),
-        keysyms::KEY_r => Action::PresetWidth,
-        keysyms::KEY_c => Action::CenterColumn,
-        keysyms::KEY_q => Action::Close,
-        _ => return None,
-    })
-}
-
-/// 1-based space index for `KEY_1`..`KEY_9`.
-fn digit_of(symbol: u32) -> Option<u8> {
-    let digit = symbol.checked_sub(keysyms::KEY_1)?;
-    let digit = u8::try_from(digit).ok()?;
-    (digit < 9).then_some(digit + 1)
-}
-
 /// Runs the action a bind produced.
 fn apply(state: &mut Crawm, action: Action) {
     match action {
@@ -179,13 +98,16 @@ fn apply(state: &mut Crawm, action: Action) {
         Action::MoveToSpace(index) => state.move_to_space(index),
         Action::ToggleSpaceView(index) => state.toggle_view_space(index),
         Action::ToggleSpace(index) => state.toggle_space(index),
+        Action::ViewSpaceStep(step) => state.view_space_step(step),
         Action::ToggleBack => state.toggle_back(),
         Action::Direction(dir) => state.focus_direction(dir),
+        Action::MoveWindow(dir) => state.move_window(dir),
         Action::CycleFocus(forward) => state.focus_cycle(forward),
         Action::CycleLayoutMode => state.cycle_layout_mode(),
         Action::CycleLayoutFamily => state.cycle_layout_family(),
         Action::ToggleFloating => state.toggle_floating(),
         Action::ToggleFullscreen => state.toggle_fullscreen(),
+        Action::ToggleMaximized => state.toggle_maximized(),
         Action::MasterRatio(grow) => state.layout_command(if grow {
             LayoutCommand::IncMasterRatio
         } else {
@@ -198,6 +120,7 @@ fn apply(state: &mut Crawm, action: Action) {
         }),
         Action::PresetWidth => state.layout_command(LayoutCommand::SwitchPresetWidth),
         Action::CenterColumn => state.layout_command(LayoutCommand::CenterColumn),
+        Action::Spawn(argv) => spawn::spawn(&argv, state.wayland_display.as_deref()),
         Action::Close => state.close_focused(),
     }
 }
@@ -217,6 +140,17 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
     // An active move/resize consumes motion; nothing is forwarded to clients.
     if state.update_interaction(position) {
         return;
+    }
+
+    // `[layout] focus_follows_cursor`: hovering a window focuses it. Hovering
+    // empty space leaves the focus alone; only a click clears it.
+    if state.config.focus_follows_cursor && !state.pointer.is_grabbed() {
+        let under = state
+            .surface_under(position)
+            .and_then(|(surface, _)| state.window_id_for(&surface));
+        if under.is_some() && under != state.focused_id() {
+            state.focus_window(under);
+        }
     }
 
     // `motion` sends wl_pointer.enter/leave/motion as needed. The focus

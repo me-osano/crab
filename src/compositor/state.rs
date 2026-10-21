@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use crawm::animation::{Animated, Clocks, Curve, Kind, SpringParams};
-use crawm::config::Config;
+use crawm::config::{Config, WindowRule};
 use crawm::core::{
     ColumnWidth, Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
@@ -42,8 +42,10 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::ShmState;
 
+use crate::compositor::binds::BindTable;
 use crate::compositor::fit::WindowFit;
 use crate::compositor::layout;
+use crate::compositor::spawn;
 
 /// Size a new toplevel is configured to before the layout first sizes it, in
 /// logical pixels. Floating windows pick their own size instead.
@@ -104,6 +106,8 @@ pub(crate) struct ManagedWindow {
     /// snaps, so a new window appears where the layout put it instead of flying
     /// in from its default rectangle.
     visual_placed: bool,
+    /// Whether the matching `[window_rule]` (if any) has already been applied.
+    rule_applied: bool,
     /// What the client has been asked to be, and how it has answered.
     configure: Configure,
 }
@@ -491,6 +495,13 @@ pub(crate) struct Crawm {
     pub(crate) output: Output,
     /// The loaded configuration.
     pub(crate) config: Config,
+    /// The compiled keyboard binds (built-ins plus `[binds.*]`).
+    pub(crate) binds: BindTable,
+    /// crawm's own Wayland socket name, once the backend has bound it.
+    ///
+    /// `spawn:` and `[autostart]` pass this as `WAYLAND_DISPLAY` so launched
+    /// clients connect to crawm rather than to the host compositor.
+    pub(crate) wayland_display: Option<String>,
     /// The pure output/space model for the single nested output.
     pub(crate) output_state: OutputModel,
     /// Managed toplevels, in layout order (first = first tile).
@@ -506,7 +517,7 @@ pub(crate) struct Crawm {
     /// Most-recently-used focus order, used for stacking and fallback focus.
     pub(crate) focus_stack: FocusStack,
     /// Keycodes swallowed by a keybind, so the matching release is swallowed
-    /// too (the M2 hardcoded binds; config binds land in M5).
+    /// too.
     pub(crate) bound_keys: HashSet<u32>,
     /// An in-progress interactive move/resize, if any.
     pub(crate) interaction: Option<Interaction>,
@@ -552,7 +563,11 @@ impl Crawm {
         // Focus is pointless without a keyboard, and adding it can only fail if
         // keymap creation fails, which is not recoverable at startup.
         let keyboard = seat
-            .add_keyboard(Default::default(), 200, 25)
+            .add_keyboard(
+                Default::default(),
+                config.input.repeat_delay.max(0),
+                config.input.repeat_rate.max(0),
+            )
             .expect("failed to add the default keyboard to the seat");
         let pointer = seat.add_pointer();
 
@@ -593,6 +608,17 @@ impl Crawm {
             space_state,
         );
 
+        let (binds, issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
+        for issue in issues {
+            tracing::warn!(
+                chord = %issue.chord,
+                action = %issue.action,
+                reason = %issue.reason,
+                "ignoring a key binding"
+            );
+        }
+        tracing::debug!(binds = binds.len(), "compiled key bindings");
+
         Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
@@ -603,6 +629,8 @@ impl Crawm {
             pointer,
             output,
             config: config.clone(),
+            binds,
+            wayland_display: None,
             output_state,
             windows: Vec::new(),
             popup_manager: PopupManager::default(),
@@ -619,6 +647,31 @@ impl Crawm {
             cursor_image: CursorImageStatus::default_named(),
             size: (0, 0).into(),
             next_window_id: 1,
+        }
+    }
+
+    /// Sets crawm's own Wayland socket name; spawned and autostarted clients
+    /// receive it as `WAYLAND_DISPLAY`.
+    pub(crate) fn set_wayland_display(&mut self, name: String) {
+        self.wayland_display = Some(name);
+    }
+
+    /// Runs the `[autostart] exec_once` commands.
+    ///
+    /// This is called once the socket exists, so `WAYLAND_DISPLAY` can point at
+    /// crawm. A command that fails to parse or spawn is logged and skipped: a
+    /// bad autostart entry must not stop the session.
+    pub(crate) fn run_autostart(&mut self) {
+        for line in &self.config.autostart.exec_once {
+            match spawn::parse_command(line) {
+                Ok(argv) => {
+                    tracing::info!(command = %line, "starting an autostart command");
+                    spawn::spawn(&argv, self.wayland_display.as_deref());
+                }
+                Err(reason) => {
+                    tracing::warn!(command = %line, %reason, "invalid autostart command");
+                }
+            }
         }
     }
 
@@ -724,8 +777,13 @@ impl Crawm {
                 Kind::WindowMove,
             ),
             visual_placed: false,
+            rule_applied: false,
             configure,
         });
+
+        // A rule that matches any app id can be applied right away; one that
+        // names an app id waits for `app_id_changed`.
+        self.apply_window_rules(id);
 
         // A first window on the empty space past the end turns that space into
         // space 1 (the view moves with it).
@@ -831,13 +889,22 @@ impl Crawm {
             // A floating window owns its size; adopt whatever it committed,
             // measured by its window geometry rather than by its buffer (which
             // carries client-side decoration margins the layout must not see).
+            // If a rule asked for a size, wait until the client answers that
+            // configure (or refuses it) before letting the commit take over.
             if window.window.floating && geometry.size.w > 0 && geometry.size.h > 0 {
-                if window.size != geometry.size {
-                    window.size = geometry.size;
-                    relayout = true;
+                let asked = window.configure.asked();
+                let complied = asked == Some(geometry.size);
+                if asked.is_some() {
+                    window.on_committed_size(geometry.size);
                 }
-                let rect = window.rect();
-                window.window.float_geometry = Some(rect);
+                if complied || asked.is_none() || window.is_size_refusing() {
+                    if window.size != geometry.size {
+                        window.size = geometry.size;
+                        relayout = true;
+                    }
+                    let rect = window.rect();
+                    window.window.float_geometry = Some(rect);
+                }
             } else if geometry.size.w > 0 && geometry.size.h > 0 {
                 // A tiled window is the size we configured it to, or it is
                 // behind, or it is refusing; this is where the three are told
@@ -895,14 +962,77 @@ impl Crawm {
     /// Re-reads the `xdg_toplevel` title and app id into the window model.
     pub(crate) fn update_toplevel_info(&mut self, surface: &ToplevelSurface) {
         let (title, app_id) = read_toplevel_info(surface);
-        if let Some(window) = self
-            .windows
-            .iter_mut()
-            .find(|window| window.wl_surface() == surface.wl_surface())
-        {
+        let Some(id) = self.window_id_for(surface.wl_surface()) else {
+            return;
+        };
+        if let Some(window) = self.window_mut(id) {
             window.window.title = title;
             window.window.app_id = app_id;
         }
+        // `set_app_id` is not double buffered and arrives before the first
+        // commit, so this is where an `app_id` rule gets its chance.
+        self.apply_window_rules(id);
+    }
+
+    /// Applies the first matching `[window_rule]` to a window, once.
+    ///
+    /// Rules with an `app_id` wait until the client has announced one; a rule
+    /// with no `app_id` matches every window and can run at creation. The size
+    /// and offset place a floating window at the centre of the usable area plus
+    /// the rule's offset (the mango convention), and the size is asked for with
+    /// a configure so the client can honour it.
+    fn apply_window_rules(&mut self, id: WindowId) {
+        let Some(index) = self
+            .windows
+            .iter()
+            .position(|window| window.window.id == id)
+        else {
+            return;
+        };
+        if self.windows[index].rule_applied {
+            return;
+        }
+        let app_id = self.windows[index].window.app_id.clone();
+        let rule = self
+            .config
+            .window_rules
+            .iter()
+            .find(|rule| match app_id.as_deref() {
+                Some(app_id) => rule_matches(rule, app_id),
+                None => rule.app_id.is_empty(),
+            })
+            .cloned();
+        if app_id.is_none() && rule.is_none() {
+            // The app id may still arrive; try again then.
+            return;
+        }
+        self.windows[index].rule_applied = true;
+        let Some(rule) = rule else {
+            return;
+        };
+        if !rule.open_floating {
+            return;
+        }
+
+        let area = self.output_state.usable_area;
+        let window = &mut self.windows[index];
+        let requested = rule
+            .size
+            .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
+        let size = clamp_to_hints(requested, window.window.min_size, window.window.max_size);
+        let rect = rule_rect(&rule, size, area);
+        window.size = size;
+        window.location = (rect.x as i32, rect.y as i32).into();
+        window.float_at(rect);
+        window.snap_visual_to(rect);
+        window.configure_to(size);
+        tracing::debug!(
+            app_id = app_id.as_deref().unwrap_or(""),
+            ?size,
+            x = window.location.x,
+            y = window.location.y,
+            "applied a floating window rule"
+        );
     }
 
     /// Drops `ids` from the focus stack and per-space history and refocuses.
@@ -1171,6 +1301,30 @@ impl Crawm {
         self.relayout();
     }
 
+    /// Steps the view one dynamic space left/normal or right/next.
+    ///
+    /// The step stops at space 1 and at the empty space past the last occupied
+    /// one, so it can always reach a fresh space but never a hole beyond it.
+    pub(crate) fn view_space_step(&mut self, step: i8) {
+        let Some(current) = self.output_state.current_space_index() else {
+            return;
+        };
+        let occupied = self.occupied_spaces().iter_indices().count();
+        let last = u8::try_from(occupied)
+            .unwrap_or(SpaceSet::COUNT)
+            .saturating_add(1)
+            .min(SpaceSet::COUNT);
+        let index = u8::try_from(current).unwrap_or(0).saturating_add(1);
+        let target = if step < 0 {
+            index.saturating_sub(step.unsigned_abs()).max(1)
+        } else {
+            index.saturating_add(step.unsigned_abs()).min(last)
+        };
+        if target != index {
+            self.view_space(target);
+        }
+    }
+
     /// Swaps to the previously-viewed space set.
     pub(crate) fn toggle_back(&mut self) {
         self.output_state.toggle_back();
@@ -1307,6 +1461,33 @@ impl Crawm {
         self.relayout();
     }
 
+    /// Moves the focused window toward `direction` in the layout order.
+    ///
+    /// The neighbor is the one directional focus would reach, so `MOVE` follows
+    /// the same geometry focus does; swapping their places reorders the tile or
+    /// scroll column order without changing which space the window is on. On a
+    /// free space the geometry does not come from the order, so this is a no-op.
+    pub(crate) fn move_window(&mut self, direction: Direction) {
+        let Some(id) = self.focused_id() else {
+            return;
+        };
+        let Some(neighbor) = layout::directional_target(self, id, direction) else {
+            return;
+        };
+        let (Some(from), Some(to)) = (
+            self.windows
+                .iter()
+                .position(|window| window.window.id == id),
+            self.windows
+                .iter()
+                .position(|window| window.window.id == neighbor),
+        ) else {
+            return;
+        };
+        self.windows.swap(from, to);
+        self.relayout();
+    }
+
     /// Where an un-floated window should re-enter the tiling order.
     fn tiled_insert_index(&self, id: WindowId) -> usize {
         for target in self.focus_stack.iter() {
@@ -1371,6 +1552,16 @@ impl Crawm {
             }
         });
         window.surface.send_configure();
+    }
+
+    /// Flips maximized for the focused window.
+    pub(crate) fn toggle_maximized(&mut self) {
+        let Some(id) = self.focused_id() else {
+            return;
+        };
+        let to = self.window(id).is_some_and(|w| !w.window.maximized);
+        self.set_maximized(id, to);
+        self.relayout();
     }
 
     /// Asks the focused window to close.
@@ -1626,6 +1817,22 @@ fn read_toplevel_info(surface: &ToplevelSurface) -> (Option<String>, Option<Stri
     })
 }
 
+/// Whether a `[window_rule]` applies to a window's `app_id`.
+///
+/// An empty rule `app_id` matches every window; otherwise the client's app id
+/// must equal one of the listed values.
+fn rule_matches(rule: &WindowRule, app_id: &str) -> bool {
+    rule.app_id.is_empty() || rule.app_id.iter().any(|expected| expected == app_id)
+}
+
+/// Where a rule's floating window goes: centred in the usable area, then moved
+/// by the rule's offsets (so `-90,-90` is 90 px up and left of centre).
+fn rule_rect(rule: &WindowRule, size: Size<i32, Logical>, area: Rect) -> Rect {
+    let x = area.x + (area.w - f64::from(size.w)) / 2.0 + f64::from(rule.offset_x.unwrap_or(0));
+    let y = area.y + (area.h - f64::from(size.h)) / 2.0 + f64::from(rule.offset_y.unwrap_or(0));
+    Rect::new(x.round(), y.round(), f64::from(size.w), f64::from(size.h))
+}
+
 /// The client's min/max size hints, as logical sizes (`None` = unconstrained).
 fn read_size_hints(surface: &WlSurface) -> (Option<CoreSize>, Option<CoreSize>) {
     with_states(surface, |states| {
@@ -1805,6 +2012,36 @@ mod tests {
         assert_eq!(
             resize(ResizeEdge::BottomRight).rect_after(origin, -500.0, -500.0),
             rect(100.0, 100.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn window_rules_match_by_app_id() {
+        let mut rule = WindowRule {
+            app_id: vec!["brave".to_owned(), "obsidian".to_owned()],
+            ..WindowRule::default()
+        };
+        assert!(rule_matches(&rule, "brave"));
+        assert!(rule_matches(&rule, "obsidian"));
+        assert!(!rule_matches(&rule, "Nautilus"));
+        // An empty list is a catch-all rule.
+        rule.app_id.clear();
+        assert!(rule_matches(&rule, "anything"));
+    }
+
+    #[test]
+    fn a_rule_centres_and_offsets_its_window() {
+        let rule = WindowRule {
+            open_floating: true,
+            size: Some((800, 500)),
+            offset_x: Some(-90),
+            offset_y: Some(-90),
+            ..WindowRule::default()
+        };
+        // 1920x1080: (1920-800)/2 - 90 = 470, (1080-500)/2 - 90 = 200.
+        assert_eq!(
+            rule_rect(&rule, size(800, 500), rect(0.0, 0.0, 1920.0, 1080.0)),
+            rect(470.0, 200.0, 800.0, 500.0)
         );
     }
 }

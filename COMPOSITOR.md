@@ -847,17 +847,22 @@ layer_name = ["rofi", "alacritty"]
 "SUPER+UP" = "viewtoleft_have_client"
 ```
 
-**Status:** `[layout]` and `[animations] enabled` are applied at startup; the
-open/close styles are read when those animations land (M3). The other sections parse
-and validate so the file can be written once, but their behavior lands with M4
-(`[input]`, `[output]`), M5.3/M5.4 (`[binds.*]`, `[mousebinds]`, `[autostart]`, rules)
-and M6 (gestures, layer rules). The built-in key table is still what runs.
+**Status:** `[layout]` (including `focus_follows_cursor`), `[animations] enabled`,
+`[binds.default]`/`[binds.locked]`, `[autostart] exec_once` and the current
+`[[window_rule]]` subset (app-id, floating, size, offset) are applied at startup.
+The open/close styles are read when those animations land (M3). The other sections
+parse and validate so the file can be written once, but their behavior lands with
+M4 (`[input]`, `[output]`), M5.3/M5.4 (`[mousebinds]`, layer rules, the rest of the
+rule schema) and M6 (gestures, layer rules). The built-in key table is the fallback
+layer; a config bind replaces the built-in for the same chord.
 
 ### 13.4 Window rules
 
 Rules live in `[window_rule]` (one table) or `[[window_rule]]` (several). The
 current schema matches `app_id` (a string or a list of app_ids) and sets
-`open_floating`, `size = [width, height]`, `offset_x` and `offset_y`; M5.4 expands
+`open_floating`, `size = [width, height]`, `offset_x` and `offset_y`; the subset
+is applied at map time (the first matching rule floats the window, asks for the
+size and centres it plus the offset). M5.4 expands
 it to match `title`, `is-floating`,
 `is-fullscreen`, `output`, `space` and X11-vs-Wayland, with actions for initial
 space, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned,

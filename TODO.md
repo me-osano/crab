@@ -370,7 +370,12 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 ### 5.3 Binds & input config
 - [x] Parse `[binds.default]`/`[binds.locked]` (and the mouse/gesture/axis tables)
       as `chord = action` strings, kept verbatim.
-- [ ] Keyboard binds (modifiers + key), **`Mod` remap**; mouse binds; axis binds; gesture binds; switch (lid) binds.
+- [x] Keyboard binds (modifiers + key) compiled at startup and layered over the
+      built-ins; config chords override a built-in with the same chord. Keys are
+      matched by base keysym, so Shift still selects the chord's modifiers.
+- [x] `spawn:<command>` actions (shell-style quoting, no shell) and
+      `[autostart] exec_once`, with `WAYLAND_DISPLAY` pointed at crawm's socket.
+- [ ] `Mod` remap; mouse binds; axis binds; gesture binds; switch (lid) binds.
 - [ ] Bind flags: `repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass-through.
 - [ ] **Key modes / submaps** (resize, passthrough).
 - [ ] Per-device `device_rule` (by name/type); xkb/input blocks from §5.1.
@@ -379,11 +384,13 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
 - [x] Parse `[window_rule]` / `[[window_rule]]`: `app_id`, `open_floating`, `width`,
       `height`, `offset_x`, `offset_y`; parse `[layer_rule]` / `[[layer_rule]]`.
-- [ ] Match and apply rules (the parsed rules are inert).
-- [ ] Window rules: match `app-id`, `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11-vs-Wayland.
-- [ ] Actions: initial space, floating, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
+- [x] Match and apply the current rule subset at map time: the first rule matching
+      the window's `app_id` floats it, sizes it (clamped to its hints) and centres
+      it at the rule's offset. A rule with no `app_id` matches any window.
+- [ ] Window rules: match `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11-vs-Wayland.
+- [ ] Actions: initial space, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
 - [ ] Space rules, layer rules, monitor rules (name/make/model/serial regex), device rules.
-- [ ] Apply at map time; **re-evaluate on title/app-id change** for rules marked `dynamic`.
+- [ ] Re-evaluate rules on title/app-id change for rules marked `dynamic`.
 
 ### 5.5 `crawm-ipc` + socket (`COMPOSITOR.md` §14)
 - [ ] Unix socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; export `CRAWM_SOCKET`.
