@@ -359,7 +359,21 @@ pub struct Autostart {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowRule {
     /// `app_id`s to match (`app_id`, one or many); empty matches any window.
+    ///
+    /// app ids must match exactly, because they are stable protocol
+    /// identifiers rather than text shown to the user.
     pub app_id: Vec<String>,
+    /// Title fragments to match (`title`, one or many); empty matches any.
+    ///
+    /// A title matches when it contains one of these fragments, ignoring case.
+    /// Titles are human text and often carry a document or status suffix.
+    pub title: Vec<String>,
+    /// Require the window to be floating when the rule is matched
+    /// (`is_floating`).
+    pub is_floating: Option<bool>,
+    /// Require the window to be fullscreen when the rule is matched
+    /// (`is_fullscreen`).
+    pub is_fullscreen: Option<bool>,
     /// Open the window floating (`open_floating`).
     pub open_floating: bool,
     /// Initial size in logical pixels (`size = [width, height]`).
@@ -368,6 +382,14 @@ pub struct WindowRule {
     pub offset_x: Option<i32>,
     /// Initial y offset in logical pixels (`offset_y`).
     pub offset_y: Option<i32>,
+    /// Initial space, as a 1-based dynamic index (`space`).
+    pub space: Option<u8>,
+    /// Pin the window to every space (`pinned`).
+    pub pinned: bool,
+    /// Draw the window above other floating windows (`always_on_top`).
+    pub always_on_top: bool,
+    /// Exclude the window from keyboard focus (`no_focus`).
+    pub no_focus: bool,
 }
 
 /// One `[layer_rule]` entry, matched against layer-shell surfaces.
@@ -551,10 +573,17 @@ struct RawAutostart {
 #[serde(default)]
 struct RawWindowRule {
     app_id: Option<OneOrMany<String>>,
+    title: Option<OneOrMany<String>>,
+    is_floating: Option<RawFlag>,
+    is_fullscreen: Option<RawFlag>,
     open_floating: Option<RawFlag>,
     size: Option<[i64; 2]>,
     offset_x: Option<i64>,
     offset_y: Option<i64>,
+    space: Option<i64>,
+    pinned: Option<RawFlag>,
+    always_on_top: Option<RawFlag>,
+    no_focus: Option<RawFlag>,
 }
 
 /// One `[layer_rule]` entry.
@@ -819,12 +848,39 @@ impl RawWindowRule {
             )),
             None => None,
         };
+        let flag = |value: Option<RawFlag>, field: &str| -> Result<bool, ConfigError> {
+            match value {
+                Some(flag) => flag.to_bool(&key(field)),
+                None => Ok(false),
+            }
+        };
+        let space = self
+            .space
+            .map(|value| {
+                u8::try_from(value)
+                    .ok()
+                    .filter(|value| (1..=crate::core::SpaceSet::COUNT).contains(value))
+                    .ok_or_else(|| {
+                        ConfigError::Invalid(format!(
+                            "`{}` must be within 1..={}",
+                            key("space"),
+                            crate::core::SpaceSet::COUNT
+                        ))
+                    })
+            })
+            .transpose()?;
         Ok(WindowRule {
             app_id: self.app_id.map(OneOrMany::into_vec).unwrap_or_default(),
-            open_floating: match self.open_floating {
-                Some(flag) => flag.to_bool(&key("open_floating"))?,
-                None => false,
+            title: self.title.map(OneOrMany::into_vec).unwrap_or_default(),
+            is_floating: match self.is_floating {
+                Some(flag) => Some(flag.to_bool(&key("is_floating"))?),
+                None => None,
             },
+            is_fullscreen: match self.is_fullscreen {
+                Some(flag) => Some(flag.to_bool(&key("is_fullscreen"))?),
+                None => None,
+            },
+            open_floating: flag(self.open_floating, "open_floating")?,
             size,
             offset_x: self
                 .offset_x
@@ -834,6 +890,10 @@ impl RawWindowRule {
                 .offset_y
                 .map(|value| checked_i32(value, &key("offset_y")))
                 .transpose()?,
+            space,
+            pinned: flag(self.pinned, "pinned")?,
+            always_on_top: flag(self.always_on_top, "always_on_top")?,
+            no_focus: flag(self.no_focus, "no_focus")?,
         })
     }
 }
@@ -1234,20 +1294,34 @@ mod tests {
             r#"
             [window_rule]
             app_id = "Nautilus"
+            title = ["Save As", "Properties"]
+            is_floating = 0
+            is_fullscreen = false
             open_floating = 1
             size = [800, 500]
             offset_x = -90
             offset_y = -90
+            space = 2
+            pinned = 1
+            always_on_top = 1
+            no_focus = 0
             "#,
         )
         .unwrap();
         assert_eq!(one.window_rules.len(), 1);
         let rule = &one.window_rules[0];
         assert_eq!(rule.app_id, ["Nautilus"]);
+        assert_eq!(rule.title, ["Save As", "Properties"]);
+        assert_eq!(rule.is_floating, Some(false));
+        assert_eq!(rule.is_fullscreen, Some(false));
         assert!(rule.open_floating);
         assert_eq!(rule.size, Some((800, 500)));
         assert_eq!(rule.offset_x, Some(-90));
         assert_eq!(rule.offset_y, Some(-90));
+        assert_eq!(rule.space, Some(2));
+        assert!(rule.pinned);
+        assert!(rule.always_on_top);
+        assert!(!rule.no_focus);
 
         let many = parse(
             r#"
@@ -1265,6 +1339,17 @@ mod tests {
         assert_eq!(many.window_rules[0].size, Some((400, 300)));
         assert_eq!(many.window_rules[1].app_id, ["b", "c"]);
         assert_eq!(many.window_rules[1].size, None);
+    }
+
+    #[test]
+    fn rejects_a_window_rule_space_out_of_range() {
+        for space in ["0", "33", "-1"] {
+            let error = parse(&format!("[[window_rule]]\nspace = {space}\n")).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::Invalid(message) if message.contains("1..=32")),
+                "unexpected error for space {space}: {error}"
+            );
+        }
     }
 
     #[test]

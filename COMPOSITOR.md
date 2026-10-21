@@ -827,10 +827,15 @@ exec_once = ["waybar"]
 
 [[window_rule]]                               # `[window_rule]` also works for one
 app_id = "Nautilus"                           # a string or a list of app_ids
+title = "Properties"                          # title fragment(s), case-insensitive
 open_floating = 1
 size = [800, 500]
 offset_x = -90
 offset_y = -90
+# space = 2                                   # 1-based dynamic space index
+# pinned = 1                                  # show on every space
+# always_on_top = 1                           # above ordinary floating windows
+# no_focus = 1                                # never take keyboard focus
 
 [layer_rule]
 animation_type_open = "zoom"
@@ -860,27 +865,48 @@ layer_name = ["rofi", "alacritty"]
 **Status:** `[layout]` (including `focus_follows_cursor`), `[animations]` (enabled
 and the open/close styles), `[binds.default]`/`[binds.locked]`, `[mousebinds]`
 (including Super+drag defaults and the `view*_have_client` axis actions),
-`[axisbinds]`, `[autostart] exec_once` and the current `[[window_rule]]` subset
-(app-id, floating, size, offset) are applied at startup. The other sections parse
-and validate so the file can be written once, but their behavior lands with M4
-(`[input]`, `[output]`), M5.4 (layer rules, the rest of the rule schema) and M6
-(gestures, layer rules). The built-in key and mouse tables are the fallback layer;
-a config bind replaces the built-in for the same chord.
+`[axisbinds]`, `[autostart] exec_once` and `[[window_rule]]` matching (`app_id`,
+`title`, `is_floating`, `is_fullscreen`) with floating/size/offset, initial
+space, `pinned`, `always_on_top` and `no_focus` actions are applied at startup.
+The other sections parse and validate so the file can be written once, but their
+behavior lands with M4 (`[input]`, `[output]`), M5.4 (layer rules, the rest of the
+rule schema) and M6 (gestures, layer rules). The built-in key and mouse tables are
+the fallback layer; a config bind replaces the built-in for the same chord.
 
 ### 13.4 Window rules
 
-Rules live in `[window_rule]` (one table) or `[[window_rule]]` (several). The
-current schema matches `app_id` (a string or a list of app_ids) and sets
-`open_floating`, `size = [width, height]`, `offset_x` and `offset_y`; the subset
-is applied at map time (the first matching rule floats the window, asks for the
-size and centres it plus the offset). M5.4 expands
-it to match `title`, `is-floating`,
-`is-fullscreen`, `output`, `space` and X11-vs-Wayland, with actions for initial
-space, size/position, opacity, blur/shadow/corner overrides, `no-focus`, pinned,
-always-on-top, `block-out-from` (screencast privacy) and default column width
-(scroller).
+Rules live in `[window_rule]` (one table) or `[[window_rule]]` (several) and
+are scanned in config order. The first matching rule wins.
 
-Apply rules **at map time** and **re-evaluate on title/app-id change** for rules marked `dynamic`.
+Matchers:
+
+- `app_id` — one or many app ids; an app id must match exactly (case-sensitive).
+- `title` — one or many fragments; a title matches when it contains a fragment,
+  ignoring case.
+- `is_floating` / `is_fullscreen` — require the window's state at match time.
+- An omitted matcher is a wildcard; a rule with only actions matches every
+  window.
+
+Actions:
+
+- `open_floating` with optional `size = [width, height]`, `offset_x` and
+  `offset_y` — float the window, ask for the size (clamped to its hints), and
+  centre it in the usable area plus the offset.
+- `space` — move the window to a 1-based **dynamic** space index. Like a bind,
+  an index past the last occupied space lands on the next new space.
+- `pinned` — show the window on every space.
+- `always_on_top` — draw the window above ordinary floating windows; fullscreen
+  and maximized windows still cover it.
+- `no_focus` — never give the window keyboard focus. Clicking it does not move
+  focus away from the current window.
+
+Rules are applied once, at map time, but a rule naming `app_id` or `title`
+waits until the client has sent that information. A late title/app-id therefore
+still applies its rule and triggers the compact/relayout it needs. Dynamic
+re-evaluation after a title or app-id changes (for rules marked `dynamic`) is
+still TODO; the rest of the rule schema — `output`, X11-vs-Wayland, opacity,
+blur/shadow/corner overrides, `block-out-from` and default column width — is
+also pending.
 
 ---
 

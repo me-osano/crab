@@ -98,11 +98,12 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             .filter_map(|closing| ClosingSurface::new(&mut *renderer, closing, &state.frame_clock))
             .collect();
 
-        // Collect in stacking order: tiled, then floating, then fullscreen on
-        // top. Popups draw over everything. Borders are a separate pass so the
-        // window surfaces stay above their own frames, and the popups are
-        // separate again because they keep their own size: they are placed by
-        // the client against the window geometry, not by the layout.
+        // Collect in stacking order: tiled, then floating, then always-on-top
+        // floating, then fullscreen on top. Popups draw over everything. Borders
+        // are a separate pass so the window surfaces stay above their own
+        // frames, and the popups are separate again because they keep their own
+        // size: they are placed by the client against the window geometry, not
+        // by the layout.
         let mut borders: Vec<SolidColorRenderElement> = Vec::new();
         let mut surfaces: Vec<FittedSurface<GlesRenderer>> = Vec::new();
         let mut popups: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
@@ -114,6 +115,15 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             window.mapped
                 && window.visible
                 && window.window.floating
+                && !window.window.always_on_top
+                && !window.window.fullscreen
+                && !window.window.maximized
+        });
+        let floating_on_top = state.windows.iter().filter(|window| {
+            window.mapped
+                && window.visible
+                && window.window.floating
+                && window.window.always_on_top
                 && !window.window.fullscreen
                 && !window.window.maximized
         });
@@ -136,6 +146,15 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             border_width,
             focused,
             floating,
+            &mut borders,
+            &mut surfaces,
+        );
+        collect_pass(
+            state,
+            &mut *renderer,
+            border_width,
+            focused,
+            floating_on_top,
             &mut borders,
             &mut surfaces,
         );

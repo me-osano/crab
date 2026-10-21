@@ -257,6 +257,11 @@ impl ManagedWindow {
         self.window.id
     }
 
+    /// Whether window rules let this window take keyboard focus.
+    pub(crate) fn is_focusable(&self) -> bool {
+        !self.window.rules.no_focus
+    }
+
     /// The underlying `wl_surface`.
     pub(crate) fn wl_surface(&self) -> &WlSurface {
         self.surface.wl_surface()
@@ -983,14 +988,24 @@ impl Crawm {
             configure,
         });
 
-        // A rule that matches any app id can be applied right away; one that
-        // names an app id waits for `app_id_changed`.
+        // A rule that has all the information it needs can be applied right
+        // away; one that names a title or app id waits for `update_toplevel_info`.
         self.apply_window_rules(id);
 
         // A first window on the empty space past the end turns that space into
-        // space 1 (the view moves with it).
+        // space 1 (the view moves with it). A rule may also have sent the window
+        // somewhere else, in which case focusing it would put the keyboard on a
+        // hidden surface.
         self.compact_spaces();
-        self.focus_window(Some(id));
+        let on_view = self
+            .window(id)
+            .is_some_and(|window| window.window.is_on(self.output_state.view.visible));
+        if on_view {
+            self.focus_window(Some(id));
+        }
+        if self.focused_id().is_none() {
+            self.refocus_after_view_change();
+        }
         self.relayout();
     }
 
@@ -1240,69 +1255,109 @@ impl Crawm {
             window.window.app_id = app_id;
         }
         // `set_app_id` is not double buffered and arrives before the first
-        // commit, so this is where an `app_id` rule gets its chance.
-        self.apply_window_rules(id);
+        // commit, so this is where an `app_id` rule gets its chance. A title
+        // usually arrives through the same path, and either may be the last
+        // matcher a rule was waiting for.
+        if self.apply_window_rules(id) {
+            self.compact_spaces();
+            self.relayout();
+        }
     }
 
     /// Applies the first matching `[window_rule]` to a window, once.
     ///
-    /// Rules with an `app_id` wait until the client has announced one; a rule
-    /// with no `app_id` matches every window and can run at creation. The size
-    /// and offset place a floating window at the centre of the usable area plus
-    /// the rule's offset (the mango convention), and the size is asked for with
-    /// a configure so the client can honour it.
-    fn apply_window_rules(&mut self, id: WindowId) {
+    /// A rule waits until every matcher it names can be decided: an app-id rule
+    /// waits for `app_id`, a title rule for `title`. The first rule in config
+    /// order wins, even when a later catch-all could already match, so the
+    /// outcome does not depend on protocol event order. The size and offset
+    /// place a floating window at the centre of the usable area plus the rule's
+    /// offset (the mango convention), and the size is asked for with a configure
+    /// so the client can honour it.
+    ///
+    /// Returns whether a rule matched, so a late title/app-id can trigger the
+    /// compact/relayout that its action may need.
+    fn apply_window_rules(&mut self, id: WindowId) -> bool {
         let Some(index) = self
             .windows
             .iter()
             .position(|window| window.window.id == id)
         else {
-            return;
+            return false;
         };
         if self.windows[index].rule_applied {
-            return;
+            return false;
         }
         let app_id = self.windows[index].window.app_id.clone();
-        let rule = self
-            .config
-            .window_rules
-            .iter()
-            .find(|rule| match app_id.as_deref() {
-                Some(app_id) => rule_matches(rule, app_id),
-                None => rule.app_id.is_empty(),
-            })
-            .cloned();
-        if app_id.is_none() && rule.is_none() {
-            // The app id may still arrive; try again then.
-            return;
-        }
-        self.windows[index].rule_applied = true;
-        let Some(rule) = rule else {
-            return;
+        let title = self.windows[index].window.title.clone();
+        let floating = self.windows[index].window.floating;
+        let fullscreen = self.windows[index].window.fullscreen;
+        let rule = match find_window_rule(
+            &self.config.window_rules,
+            app_id.as_deref(),
+            title.as_deref(),
+            floating,
+            fullscreen,
+        ) {
+            RuleSearch::Pending => return false,
+            RuleSearch::NoMatch => {
+                self.windows[index].rule_applied = true;
+                return false;
+            }
+            RuleSearch::Matched(rule) => rule.clone(),
         };
-        if !rule.open_floating {
-            return;
-        }
+        self.windows[index].rule_applied = true;
 
+        let occupied = self.occupied_spaces();
         let area = self.output_state.usable_area;
         let window = &mut self.windows[index];
-        let requested = rule
-            .size
-            .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
-        let size = clamp_to_hints(requested, window.window.min_size, window.window.max_size);
-        let rect = rule_rect(&rule, size, area);
-        window.size = size;
-        window.location = (rect.x as i32, rect.y as i32).into();
-        window.float_at(rect);
-        window.snap_visual_to(rect);
-        window.configure_to(size);
-        tracing::debug!(
-            app_id = app_id.as_deref().unwrap_or(""),
-            ?size,
-            x = window.location.x,
-            y = window.location.y,
-            "applied a floating window rule"
-        );
+        window.window.pinned |= rule.pinned;
+        window.window.always_on_top |= rule.always_on_top;
+        window.window.rules.pinned |= rule.pinned;
+        window.window.rules.always_on_top |= rule.always_on_top;
+        window.window.rules.no_focus |= rule.no_focus;
+        if let Some(space) = rule.space {
+            if let Some(mask) = SpaceSet::from_dynamic_index(space, occupied) {
+                window.window.move_to_space(mask);
+                window.window.rules.spaces = Some(mask);
+            }
+        }
+
+        if rule.open_floating {
+            window.window.rules.floating = Some(true);
+            let requested = rule
+                .size
+                .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
+            let size = clamp_to_hints(requested, window.window.min_size, window.window.max_size);
+            let rect = rule_rect(&rule, size, area);
+            window.size = size;
+            window.location = (rect.x as i32, rect.y as i32).into();
+            window.float_at(rect);
+            window.snap_visual_to(rect);
+            window.configure_to(size);
+            tracing::debug!(
+                app_id = app_id.as_deref().unwrap_or(""),
+                title = title.as_deref().unwrap_or(""),
+                ?size,
+                x = window.location.x,
+                y = window.location.y,
+                "applied a floating window rule"
+            );
+        } else if rule.space.is_some() {
+            tracing::debug!(
+                app_id = app_id.as_deref().unwrap_or(""),
+                title = title.as_deref().unwrap_or(""),
+                spaces = ?window.window.spaces,
+                "applied a window rule's initial space"
+            );
+        }
+
+        // A late title/app-id can make a rule match after the window was already
+        // focused. If the rule now hides it or excludes it from focus, hand the
+        // keyboard to something else.
+        if self.focus.window() == Some(id) {
+            self.refocus_after_view_change();
+        }
+        true
     }
 
     /// Drops `ids` from the focus stack and per-space history and refocuses.
@@ -1398,6 +1453,12 @@ impl Crawm {
     /// Every focus change goes through here (`COMPOSITOR.md` §6) so the
     /// protocol state, the focus stack, and the space history stay in step.
     pub(crate) fn focus_window(&mut self, id: Option<WindowId>) {
+        if id
+            .and_then(|id| self.window(id))
+            .is_some_and(|window| !window.is_focusable())
+        {
+            return;
+        }
         let previous = self.focus;
         let target = id.map_or(FocusTarget::None, FocusTarget::Window);
         self.focus = target;
@@ -1440,14 +1501,40 @@ impl Crawm {
         let hits = |window: &ManagedWindow| {
             window.mapped && window.visible && window.visual_rect(&self.frame_clock).contains(point)
         };
-        // Floating windows stack by focus, most recent on top.
-        for target in self.focus_stack.iter() {
-            if let Some(id) = target.window() {
+        let covering = |window: &ManagedWindow| {
+            window.mapped
+                && window.visible
+                && (window.window.fullscreen || window.window.maximized)
+                && hits(window)
+        };
+        // Fullscreen and maximized windows are drawn last, over every floating
+        // window, so they are tested first.
+        if let Some(window) = self.windows.iter().rev().find(|window| covering(window)) {
+            return Some(window.id());
+        }
+        // Floating windows stack by focus, most recent on top. An always-on-top
+        // window wins over every ordinary floating window, matching `render`.
+        for on_top in [true, false] {
+            for target in self.focus_stack.iter() {
+                let Some(id) = target.window() else {
+                    continue;
+                };
                 if let Some(window) = self.window(id) {
-                    if window.window.floating && hits(window) {
+                    if window.window.floating
+                        && window.window.always_on_top == on_top
+                        && hits(window)
+                    {
                         return Some(id);
                     }
                 }
+            }
+        }
+        // Floating windows that were never focused are not in the focus stack.
+        for on_top in [true, false] {
+            if let Some(window) = self.windows.iter().rev().find(|window| {
+                window.window.floating && window.window.always_on_top == on_top && hits(window)
+            }) {
+                return Some(window.id());
             }
         }
         self.windows
@@ -1512,7 +1599,7 @@ impl Crawm {
         let ids: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|window| window.mapped && window.window.is_on(view))
+            .filter(|window| window.mapped && window.window.is_on(view) && window.is_focusable())
             .map(ManagedWindow::id)
             .collect();
         if ids.is_empty() {
@@ -1537,8 +1624,10 @@ impl Crawm {
             return;
         };
         if let Some(next) = layout::directional_target(self, current, direction) {
-            self.focus_window(Some(next));
-            self.relayout();
+            if self.window(next).is_some_and(ManagedWindow::is_focusable) {
+                self.focus_window(Some(next));
+                self.relayout();
+            }
         }
     }
 
@@ -1655,7 +1744,9 @@ impl Crawm {
     /// clears focus if the new view is empty.
     fn refocus_after_view_change(&mut self) {
         let view = self.output_state.view.visible;
-        let on_screen = |window: &ManagedWindow| window.mapped && window.window.is_on(view);
+        let on_screen = |window: &ManagedWindow| {
+            window.mapped && window.window.is_on(view) && window.is_focusable()
+        };
         if self
             .focused_id()
             .and_then(|id| self.window(id))
@@ -2102,12 +2193,68 @@ fn read_toplevel_info(surface: &ToplevelSurface) -> (Option<String>, Option<Stri
     })
 }
 
-/// Whether a `[window_rule]` applies to a window's `app_id`.
+/// The result of scanning the rule list for a window.
+enum RuleSearch<'a> {
+    /// An earlier rule needs a title or app id the client has not sent yet.
+    Pending,
+    /// Every rule was decided and none matched.
+    NoMatch,
+    /// The first matching rule.
+    Matched(&'a WindowRule),
+}
+
+/// Finds the first rule that matches, waiting for matchers that are still unknown.
 ///
-/// An empty rule `app_id` matches every window; otherwise the client's app id
-/// must equal one of the listed values.
-fn rule_matches(rule: &WindowRule, app_id: &str) -> bool {
-    rule.app_id.is_empty() || rule.app_id.iter().any(|expected| expected == app_id)
+/// Rules are ordered: a rule whose app id or title has not arrived blocks the
+/// scan, because it might match and would precede anything after it.
+fn find_window_rule<'a>(
+    rules: &'a [WindowRule],
+    app_id: Option<&str>,
+    title: Option<&str>,
+    floating: bool,
+    fullscreen: bool,
+) -> RuleSearch<'a> {
+    for rule in rules {
+        if !rule.app_id.is_empty() && app_id.is_none() {
+            return RuleSearch::Pending;
+        }
+        if !rule.title.is_empty() && title.is_none() {
+            return RuleSearch::Pending;
+        }
+        if rule
+            .is_floating
+            .is_some_and(|expected| expected != floating)
+        {
+            continue;
+        }
+        if rule
+            .is_fullscreen
+            .is_some_and(|expected| expected != fullscreen)
+        {
+            continue;
+        }
+        if rule_matches(rule, app_id, title) {
+            return RuleSearch::Matched(rule);
+        }
+    }
+    RuleSearch::NoMatch
+}
+
+/// Whether a `[window_rule]`'s text matchers apply.
+///
+/// An empty rule `app_id` or `title` list is a wildcard. app ids match exactly;
+/// title fragments match case-insensitively anywhere in the title.
+fn rule_matches(rule: &WindowRule, app_id: Option<&str>, title: Option<&str>) -> bool {
+    let app_matches = rule.app_id.is_empty()
+        || app_id.is_some_and(|app_id| rule.app_id.iter().any(|expected| expected == app_id));
+    let title_matches = rule.title.is_empty()
+        || title.is_some_and(|title| {
+            let title = title.to_lowercase();
+            rule.title
+                .iter()
+                .any(|fragment| title.contains(&fragment.to_lowercase()))
+        });
+    app_matches && title_matches
 }
 
 /// Where a rule's floating window goes: centred in the usable area, then moved
@@ -2337,12 +2484,77 @@ mod tests {
             app_id: vec!["brave".to_owned(), "obsidian".to_owned()],
             ..WindowRule::default()
         };
-        assert!(rule_matches(&rule, "brave"));
-        assert!(rule_matches(&rule, "obsidian"));
-        assert!(!rule_matches(&rule, "Nautilus"));
+        assert!(rule_matches(&rule, Some("brave"), None));
+        assert!(rule_matches(&rule, Some("obsidian"), None));
+        assert!(!rule_matches(&rule, Some("Nautilus"), None));
         // An empty list is a catch-all rule.
         rule.app_id.clear();
-        assert!(rule_matches(&rule, "anything"));
+        assert!(rule_matches(&rule, Some("anything"), None));
+    }
+
+    #[test]
+    fn window_rules_match_title_fragments_case_insensitively() {
+        let rule = WindowRule {
+            title: vec!["picture".to_owned(), "settings".to_owned()],
+            ..WindowRule::default()
+        };
+        assert!(rule_matches(&rule, None, Some("Save Picture As…")));
+        assert!(rule_matches(&rule, None, Some("SETTINGS")));
+        assert!(!rule_matches(&rule, None, Some("Terminal")));
+        // Both matchers must agree.
+        let both = WindowRule {
+            app_id: vec!["foot".to_owned()],
+            title: vec!["vim".to_owned()],
+            ..WindowRule::default()
+        };
+        assert!(rule_matches(&both, Some("foot"), Some("nvim")));
+        assert!(!rule_matches(&both, Some("foot"), Some("shell")));
+    }
+
+    #[test]
+    fn window_rules_wait_for_unknown_matchers() {
+        let rules = [
+            WindowRule {
+                title: vec!["save".to_owned()],
+                no_focus: true,
+                ..WindowRule::default()
+            },
+            WindowRule {
+                open_floating: true,
+                ..WindowRule::default()
+            },
+        ];
+        // The first rule could still match, so the catch-all must not jump the
+        // queue before the title arrives.
+        assert!(matches!(
+            find_window_rule(&rules, Some("app"), None, false, false),
+            RuleSearch::Pending
+        ));
+        match find_window_rule(&rules, Some("app"), Some("Save As"), false, false) {
+            RuleSearch::Matched(rule) => assert!(rule.no_focus),
+            _ => panic!("the title rule should match"),
+        }
+        assert!(matches!(
+            find_window_rule(&rules, Some("app"), Some("Terminal"), false, false),
+            RuleSearch::Matched(rule) if rule.open_floating
+        ));
+    }
+
+    #[test]
+    fn window_rules_can_match_the_current_state() {
+        let rules = [WindowRule {
+            is_floating: Some(true),
+            open_floating: true,
+            ..WindowRule::default()
+        }];
+        assert!(matches!(
+            find_window_rule(&rules, None, None, true, false),
+            RuleSearch::Matched(_)
+        ));
+        assert!(matches!(
+            find_window_rule(&rules, None, None, false, false),
+            RuleSearch::NoMatch
+        ));
     }
 
     #[test]

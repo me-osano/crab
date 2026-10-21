@@ -398,11 +398,13 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
 - [x] Parse `[window_rule]` / `[[window_rule]]`: `app_id`, `open_floating`, `width`,
       `height`, `offset_x`, `offset_y`; parse `[layer_rule]` / `[[layer_rule]]`.
-- [x] Match and apply the current rule subset at map time: the first rule matching
-      the window's `app_id` floats it, sizes it (clamped to its hints) and centres
-      it at the rule's offset. A rule with no `app_id` matches any window.
-- [ ] Window rules: match `title`, `is-floating`, `is-fullscreen`, `output`, `space`, X11-vs-Wayland.
-- [ ] Actions: initial space, opacity, blur/shadow/corner overrides, `no-focus`, pinned, always-on-top, `block-out-from`, default column width.
+- [x] Match and apply the current rule subset at map time: the first matching
+      rule floats it, sizes it (clamped to its hints) and centres it at the
+      rule's offset. Rules can match `app_id` exactly, title fragments
+      case-insensitively, and the current floating/fullscreen state.
+- [x] Actions: initial dynamic space, `no-focus`, `pinned` and `always-on-top`.
+- [ ] Window rules: match `output` and X11-vs-Wayland.
+- [ ] Actions: opacity, blur/shadow/corner overrides, `block-out-from`, default column width.
 - [ ] Space rules, layer rules, monitor rules (name/make/model/serial regex), device rules.
 - [ ] Re-evaluate rules on title/app-id change for rules marked `dynamic`.
 
