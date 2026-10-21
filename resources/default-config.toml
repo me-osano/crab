@@ -149,9 +149,10 @@ layer_name = ["rofi", "alacritty"]
 
 [mousebinds]
 # Mouse Button Bindings
-"btn_left" = "moveresize,curmove"
+# Left/right moveresize need a modifier; bare left clicks stay with the client.
+"SUPER+btn_left" = "moveresize,curmove"
 "btn_middle" = "togglemaximizescreen"
-"btn_right" = "moveresize,curresize"
+"SUPER+btn_right" = "moveresize,curresize"
 
 [gesturebinds]
 # Gesture Bindings

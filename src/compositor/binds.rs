@@ -14,6 +14,13 @@
 //! scratchpads, gestures) are accepted by the config but skipped here with a
 //! startup warning: a bind for a future feature must not stop the session from
 //! starting, and it must not fail `--validate`.
+//!
+//! `[mousebinds]` and `[axisbinds]` use the same modifier parser as the
+//! keyboard table. A mouse chord ends in a Linux `BTN_*` name (`btn_left`) and
+//! an axis chord in a scroll direction (`UP`, `DOWN`, `LEFT`, `RIGHT`). Mouse
+//! binds replace the built-in Super+drag chords; bare left/right
+//! `moveresize` binds are refused because they would make ordinary clicks
+//! impossible (mango has the same restriction).
 
 use std::collections::BTreeMap;
 
@@ -35,6 +42,8 @@ pub(crate) enum Action {
     ToggleSpace(u8),
     /// Step the view one space left/normal or right/next.
     ViewSpaceStep(i8),
+    /// Step the view to the next occupied space in a direction.
+    ViewSpaceHaveClient(i8),
     /// Swap to the previously-viewed space set.
     ToggleBack,
     /// Directional focus.
@@ -94,6 +103,10 @@ impl Mods {
 
     fn insert(&mut self, bit: u8) {
         self.0 |= bit;
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
     }
 
     /// Modifier names as written in a chord. `Super` and `Logo` are the same
@@ -201,6 +214,181 @@ impl BindTable {
     }
 }
 
+/// A mouse binding's action: an ordinary [`Action`] or the start of a grab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MouseAction {
+    /// Run a compositor action.
+    Action(Action),
+    /// Start an interactive move of the window under the pointer.
+    Move,
+    /// Start an interactive resize of the window under the pointer.
+    Resize,
+}
+
+/// One compiled mouse binding.
+#[derive(Clone, Debug)]
+struct MouseBind {
+    mods: Mods,
+    button: u32,
+    action: MouseAction,
+}
+
+/// The compiled `[mousebinds]` table (built-ins plus config).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MouseBindTable {
+    binds: Vec<MouseBind>,
+}
+
+impl MouseBindTable {
+    /// Compiles the built-in mouse binds plus `[mousebinds]`.
+    ///
+    /// The built-ins keep Super+drag moving and resizing; a config entry with
+    /// the same chord replaces one. A bare left/right `moveresize` entry is
+    /// skipped with an issue instead of swallowing every click.
+    #[must_use]
+    pub(crate) fn compile(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in mouse_builtins() {
+            if let Err(issue) = table.insert(&chord, &action) {
+                issues.push(issue);
+            }
+        }
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
+    }
+
+    /// Number of compiled mouse bindings (used by startup logging).
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.binds.len()
+    }
+
+    /// The action a button press triggers, if any.
+    #[must_use]
+    pub(crate) fn action(&self, modifiers: &ModifiersState, button: u32) -> Option<MouseAction> {
+        let mods = Mods::from_state(modifiers);
+        self.binds
+            .iter()
+            .rev()
+            .find(|bind| bind.mods == mods && bind.button == button)
+            .map(|bind| bind.action.clone())
+    }
+
+    /// Adds one binding, replacing any existing bind with the same chord.
+    fn insert(&mut self, chord: &str, action: &str) -> Result<(), BindIssue> {
+        let issue = |reason: String| BindIssue {
+            chord: chord.to_owned(),
+            action: action.to_owned(),
+            reason,
+        };
+        let (mods, button) = parse_mouse_chord(chord).map_err(issue)?;
+        let action = parse_mouse_action(action).map_err(issue)?;
+        if mods.is_empty() && matches!(action, MouseAction::Move | MouseAction::Resize) {
+            return Err(issue(
+                "`moveresize` needs a modifier; bare left/right clicks stay with the client"
+                    .to_owned(),
+            ));
+        }
+        self.binds
+            .retain(|bind| bind.mods != mods || bind.button != button);
+        self.binds.push(MouseBind {
+            mods,
+            button,
+            action,
+        });
+        Ok(())
+    }
+}
+
+/// The scroll axis an axis bind fires on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollAxis {
+    /// Horizontal scrolling (wheel tilt or a sideways two-finger swipe).
+    Horizontal,
+    /// Vertical scrolling.
+    Vertical,
+}
+
+/// One compiled axis binding.
+#[derive(Clone, Debug)]
+struct AxisBind {
+    mods: Mods,
+    axis: ScrollAxis,
+    positive: bool,
+    action: Action,
+}
+
+/// The compiled `[axisbinds]` table.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AxisBindTable {
+    binds: Vec<AxisBind>,
+}
+
+impl AxisBindTable {
+    /// Compiles `[axisbinds]` into a lookup table.
+    #[must_use]
+    pub(crate) fn compile(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
+    }
+
+    /// Number of compiled axis bindings (used by startup logging).
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.binds.len()
+    }
+
+    /// The action a scroll event triggers, if any.
+    ///
+    /// `positive` is the direction the content scrolls in (`true` is down or
+    /// right), so `SUPER+UP` maps to a negative vertical delta.
+    #[must_use]
+    pub(crate) fn action(
+        &self,
+        modifiers: &ModifiersState,
+        axis: ScrollAxis,
+        positive: bool,
+    ) -> Option<Action> {
+        let mods = Mods::from_state(modifiers);
+        self.binds
+            .iter()
+            .rev()
+            .find(|bind| bind.mods == mods && bind.axis == axis && bind.positive == positive)
+            .map(|bind| bind.action.clone())
+    }
+
+    /// Adds one binding, replacing any existing bind with the same chord.
+    fn insert(&mut self, chord: &str, action: &str) -> Result<(), BindIssue> {
+        let issue = |reason: String| BindIssue {
+            chord: chord.to_owned(),
+            action: action.to_owned(),
+            reason,
+        };
+        let (mods, axis, positive) = parse_axis_chord(chord).map_err(issue)?;
+        let action = parse_action(action).map_err(issue)?;
+        self.binds
+            .retain(|bind| bind.mods != mods || bind.axis != axis || bind.positive != positive);
+        self.binds.push(AxisBind {
+            mods,
+            axis,
+            positive,
+            action,
+        });
+        Ok(())
+    }
+}
+
 /// Parses `MOD+MOD+KEY` into the modifier set and base key it fires on.
 fn parse_chord(chord: &str) -> Result<BindKey, String> {
     let mut parts: Vec<&str> = chord.split('+').map(str::trim).collect();
@@ -208,19 +396,86 @@ fn parse_chord(chord: &str) -> Result<BindKey, String> {
     if key_name.is_empty() {
         return Err("missing key name".to_owned());
     }
-    let mut mods = Mods::default();
-    for part in parts {
-        if part.is_empty() {
-            return Err("empty modifier in chord".to_owned());
-        }
-        let bit = Mods::parse(part).ok_or_else(|| format!("unknown modifier `{part}`"))?;
-        mods.insert(bit);
-    }
+    let mods = parse_mods(&parts)?;
     let keysym = lookup_keysym(key_name);
     if keysym == keysyms::KEY_NoSymbol {
         return Err(format!("unknown key `{key_name}`"));
     }
     Ok(BindKey { mods, keysym })
+}
+
+/// Parses `MOD+MOD+btn_left` into modifiers and a Linux `BTN_*` code.
+fn parse_mouse_chord(chord: &str) -> Result<(Mods, u32), String> {
+    let mut parts: Vec<&str> = chord.split('+').map(str::trim).collect();
+    let button_name = parts.pop().unwrap_or_default();
+    if button_name.is_empty() {
+        return Err("missing button name".to_owned());
+    }
+    let mods = parse_mods(&parts)?;
+    let button = lookup_button(button_name)
+        .ok_or_else(|| format!("unknown mouse button `{button_name}`"))?;
+    Ok((mods, button))
+}
+
+/// Parses `MOD+MOD+UP` into modifiers and a scroll direction.
+fn parse_axis_chord(chord: &str) -> Result<(Mods, ScrollAxis, bool), String> {
+    let mut parts: Vec<&str> = chord.split('+').map(str::trim).collect();
+    let direction = parts.pop().unwrap_or_default();
+    if direction.is_empty() {
+        return Err("missing axis direction".to_owned());
+    }
+    let mods = parse_mods(&parts)?;
+    let (axis, positive) = match direction.to_ascii_lowercase().as_str() {
+        "up" | "wheel_up" => (ScrollAxis::Vertical, false),
+        "down" | "wheel_down" => (ScrollAxis::Vertical, true),
+        "left" | "wheel_left" => (ScrollAxis::Horizontal, false),
+        "right" | "wheel_right" => (ScrollAxis::Horizontal, true),
+        other => return Err(format!("unknown axis direction `{other}`")),
+    };
+    Ok((mods, axis, positive))
+}
+
+/// Parses the modifier parts of a chord. `NONE` is accepted as an explicit
+/// empty modifier set, as in mango's `none+left+3`.
+fn parse_mods(parts: &[&str]) -> Result<Mods, String> {
+    let mut mods = Mods::default();
+    for part in parts {
+        if part.is_empty() {
+            return Err("empty modifier in chord".to_owned());
+        }
+        if part.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        let bit = Mods::parse(part).ok_or_else(|| format!("unknown modifier `{part}`"))?;
+        mods.insert(bit);
+    }
+    Ok(mods)
+}
+
+/// Turns a mouse button name into a Linux `BTN_*` code.
+fn lookup_button(name: &str) -> Option<u32> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "btn_left" => 0x110,
+        "btn_right" => 0x111,
+        "btn_middle" => 0x112,
+        "btn_side" => 0x113,
+        "btn_extra" => 0x114,
+        "btn_forward" => 0x115,
+        "btn_back" => 0x116,
+        "btn_task" => 0x117,
+        _ => return None,
+    })
+}
+
+/// Turns a mouse action string into a [`MouseAction`].
+fn parse_mouse_action(authored: &str) -> Result<MouseAction, String> {
+    let action = authored.trim();
+    let action = action.strip_suffix(',').unwrap_or(action).trim();
+    match action.to_ascii_lowercase().as_str() {
+        "moveresize,curmove" | "moveresize,move" => Ok(MouseAction::Move),
+        "moveresize,curresize" | "moveresize,resize" => Ok(MouseAction::Resize),
+        _ => parse_action(action).map(MouseAction::Action),
+    }
 }
 
 /// Turns a key name into a keysym.
@@ -301,12 +556,8 @@ fn parse_action(authored: &str) -> Result<Action, String> {
             Err("minimizing windows is not implemented yet".to_owned())
         }
         "toggle_scratchpad" => Err("scratchpads are not implemented yet".to_owned()),
-        "viewprev_have_client"
-        | "viewnext_have_client"
-        | "viewtoleft_have_client"
-        | "viewtoright_have_client" => {
-            Err("this gesture/axis action is not implemented yet".to_owned())
-        }
+        "viewprev_have_client" | "viewtoleft_have_client" => Ok(Action::ViewSpaceHaveClient(-1)),
+        "viewnext_have_client" | "viewtoright_have_client" => Ok(Action::ViewSpaceHaveClient(1)),
         other => Err(format!("unknown action `{other}`")),
     }
 }
@@ -334,6 +585,18 @@ fn parse_index(value: &str) -> Result<u8, String> {
             SpaceSet::COUNT
         ))
     }
+}
+
+/// The mouse binds crawm has without a config: Super+drag moves, Super+right
+/// drag resizes. A config entry with the same chord replaces one.
+fn mouse_builtins() -> Vec<(String, String)> {
+    vec![
+        ("SUPER+btn_left".to_owned(), "moveresize,curmove".to_owned()),
+        (
+            "SUPER+btn_right".to_owned(),
+            "moveresize,curresize".to_owned(),
+        ),
+    ]
 }
 
 /// The binds crawm has without a config, using the same chord/action syntax the
@@ -528,5 +791,145 @@ mod tests {
         let (table, issues) = BindTable::compile(&BTreeMap::new(), &BTreeMap::new());
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(table.len(), 36 + 18);
+    }
+
+    fn mouse_table(entries: &[(&str, &str)]) -> MouseBindTable {
+        let map: BTreeMap<String, String> = entries
+            .iter()
+            .map(|(chord, action)| ((*chord).to_owned(), (*action).to_owned()))
+            .collect();
+        MouseBindTable::compile(&map).0
+    }
+
+    #[test]
+    fn mouse_builtins_keep_super_drag_working() {
+        let table = mouse_table(&[]);
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.action(&mods(false, false, false, true), 0x110),
+            Some(MouseAction::Move)
+        );
+        assert_eq!(
+            table.action(&mods(false, false, false, true), 0x111),
+            Some(MouseAction::Resize)
+        );
+    }
+
+    #[test]
+    fn mouse_binds_replace_builtins_and_allow_config_actions() {
+        let table = mouse_table(&[
+            ("SUPER+btn_left", "toggle_floating"),
+            ("NONE+btn_middle", "togglemaximizescreen"),
+        ]);
+        assert_eq!(
+            table.action(&mods(false, false, false, true), 0x110),
+            Some(MouseAction::Action(Action::ToggleFloating))
+        );
+        assert_eq!(
+            table.action(&mods(false, false, false, false), 0x112),
+            Some(MouseAction::Action(Action::ToggleMaximized))
+        );
+        assert_eq!(
+            table.action(&mods(false, false, false, true), 0x111),
+            Some(MouseAction::Resize),
+            "the untouched built-in remains"
+        );
+    }
+
+    #[test]
+    fn bare_left_or_right_moveresize_is_refused() {
+        let map = BTreeMap::from([
+            ("btn_left".to_owned(), "moveresize,curmove".to_owned()),
+            ("btn_right".to_owned(), "moveresize,curresize".to_owned()),
+        ]);
+        let (table, issues) = MouseBindTable::compile(&map);
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().all(|issue| issue.reason.contains("modifier")));
+        assert_eq!(
+            table.action(&mods(false, false, false, false), 0x110),
+            None,
+            "a bare left click must still reach the client"
+        );
+    }
+
+    #[test]
+    fn mouse_chords_reject_unknown_buttons_and_modifiers() {
+        assert!(
+            MouseBindTable::compile(&BTreeMap::from([(
+                "SUPER+btn_nope".to_owned(),
+                "killclient".to_owned()
+            )]))
+            .1[0]
+                .reason
+                .contains("button")
+        );
+        assert!(
+            MouseBindTable::compile(&BTreeMap::from([(
+                "HYPER+btn_left".to_owned(),
+                "killclient".to_owned()
+            )]))
+            .1[0]
+                .reason
+                .contains("HYPER")
+        );
+    }
+
+    fn axis_table(entries: &[(&str, &str)]) -> AxisBindTable {
+        let map: BTreeMap<String, String> = entries
+            .iter()
+            .map(|(chord, action)| ((*chord).to_owned(), (*action).to_owned()))
+            .collect();
+        AxisBindTable::compile(&map).0
+    }
+
+    #[test]
+    fn axis_binds_match_modifiers_axis_and_direction() {
+        let table = axis_table(&[
+            ("SUPER+UP", "viewtoleft_have_client"),
+            ("SUPER+DOWN", "viewtoright_have_client"),
+            ("ALT+LEFT", "view_space_left"),
+        ]);
+        let super_held = mods(false, false, false, true);
+        assert_eq!(
+            table.action(&super_held, ScrollAxis::Vertical, false),
+            Some(Action::ViewSpaceHaveClient(-1))
+        );
+        assert_eq!(
+            table.action(&super_held, ScrollAxis::Vertical, true),
+            Some(Action::ViewSpaceHaveClient(1))
+        );
+        assert_eq!(
+            table.action(&super_held, ScrollAxis::Horizontal, false),
+            None,
+            "the configured LEFT chord needs Alt"
+        );
+        assert_eq!(
+            table.action(
+                &mods(false, true, false, false),
+                ScrollAxis::Horizontal,
+                false
+            ),
+            Some(Action::ViewSpaceStep(-1))
+        );
+    }
+
+    #[test]
+    fn axis_chords_reject_unknown_directions() {
+        let map = BTreeMap::from([("SUPER+DIAGONAL".to_owned(), "viewnext".to_owned())]);
+        let (table, issues) = AxisBindTable::compile(&map);
+        assert_eq!(table.len(), 0);
+        assert!(issues[0].reason.contains("axis direction"));
+    }
+
+    #[test]
+    fn have_client_actions_parse() {
+        assert_eq!(
+            parse_action("viewprev_have_client").unwrap(),
+            Action::ViewSpaceHaveClient(-1)
+        );
+        assert_eq!(
+            parse_action("viewtoright_have_client").unwrap(),
+            Action::ViewSpaceHaveClient(1)
+        );
     }
 }

@@ -386,7 +386,10 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       matched by base keysym, so Shift still selects the chord's modifiers.
 - [x] `spawn:<command>` actions (shell-style quoting, no shell) and
       `[autostart] exec_once`, with `WAYLAND_DISPLAY` pointed at crawm's socket.
-- [ ] `Mod` remap; mouse binds; axis binds; gesture binds; switch (lid) binds.
+- [x] Mouse binds (`[mousebinds]`, compiled over the built-in Super+drag
+      chords; bare left/right `moveresize` is refused) and axis binds
+      (`[axisbinds]`, with `viewtoleft/right_have_client` skipping empty spaces).
+- [ ] `Mod` remap; gesture binds; switch (lid) binds.
 - [ ] Bind flags: `repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass-through.
 - [ ] **Key modes / submaps** (resize, passthrough).
 - [ ] Per-device `device_rule` (by name/type); xkb/input blocks from §5.1.

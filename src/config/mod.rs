@@ -82,14 +82,13 @@ pub struct Config {
     /// the session's bind table at startup. `locked` bindings are active all
     /// the time until a lock screen exists (M6).
     pub binds: Binds,
-    /// Pointer-button binds (`[mousebinds]`), kept as action strings. Parsed,
-    /// not applied yet.
+    /// Pointer-button binds (`[mousebinds]`), compiled at startup over the
+    /// built-in Super+drag chords.
     pub mouse_binds: BTreeMap<String, String>,
     /// Swipe/pinch binds (`[gesturebinds]`), kept as action strings. Parsed,
     /// not applied yet (M6.7).
     pub gesture_binds: BTreeMap<String, String>,
-    /// Axis (scroll) binds (`[axisbinds]`), kept as action strings. Parsed,
-    /// not applied yet.
+    /// Axis (scroll) binds (`[axisbinds]`), compiled at startup.
     pub axis_binds: BTreeMap<String, String>,
 }
 
@@ -140,14 +139,8 @@ impl Config {
         if !self.layer_rules.is_empty() {
             pending.push("layer_rule");
         }
-        if !self.mouse_binds.is_empty() {
-            pending.push("mousebinds");
-        }
         if !self.gesture_binds.is_empty() {
             pending.push("gesturebinds");
-        }
-        if !self.axis_binds.is_empty() {
-            pending.push("axisbinds");
         }
         if self.client_side_decorations != defaults.client_side_decorations {
             pending.push("layout.client_side_decorations");
@@ -1413,15 +1406,11 @@ mod tests {
 
         let cfg = parse(include_str!("../../resources/default-config.toml")).unwrap();
         let pending = cfg.pending_sections();
-        for section in [
-            "output",
-            "layer_rule",
-            "mousebinds",
-            "gesturebinds",
-            "axisbinds",
-        ] {
+        for section in ["output", "layer_rule", "gesturebinds"] {
             assert!(pending.contains(&section), "missing {section}: {pending:?}");
         }
+        assert!(!pending.contains(&"mousebinds"));
+        assert!(!pending.contains(&"axisbinds"));
         // The example's `[input]` matches the built-in defaults, so nothing is
         // lost by not applying it; `[layout]` is applied.
         assert!(!pending.contains(&"input"));
@@ -1478,7 +1467,10 @@ mod tests {
         assert_eq!(config.binds.default["SUPER+Return"], "spawn:alacritty");
         assert_eq!(config.binds.default["SUPER+1"], "view_space:1");
         assert!(config.binds.locked.contains_key("XF86AudioRaiseVolume"));
-        assert_eq!(config.mouse_binds["btn_right"], "moveresize,curresize");
+        assert_eq!(
+            config.mouse_binds["SUPER+btn_right"],
+            "moveresize,curresize"
+        );
         assert_eq!(config.gesture_binds["right+4"], "viewprev_have_client");
         assert_eq!(config.axis_binds["SUPER+UP"], "viewtoleft_have_client");
     }

@@ -1,10 +1,14 @@
-//! Input: turning backend events into seat events, and running keybinds.
+//! Input: turning backend events into seat events, and running binds.
 //!
 //! The keyboard path forwards keys to the focused client unless the compiled
 //! [`BindTable`](crate::compositor::binds::BindTable) claims the chord, in which
 //! case the key press (and its release) is swallowed and the resulting
 //! [`Action`] runs. Binds come from `[binds.default]`/`[binds.locked]`, layered
 //! over crawm's built-ins (`crate::compositor::binds`).
+//!
+//! Pointer buttons and scroll use the same idea: `[mousebinds]` and
+//! `[axisbinds]` are compiled with the keyboard table's modifier rules. A bound
+//! press or scroll is swallowed instead of reaching the client.
 //!
 //! Touch, gestures, and pointer constraints land with the libinput backend (M4)
 //! and protocol breadth (M3); the `_ => {}` arm of [`handle`] is where they will
@@ -20,14 +24,13 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use crate::compositor::binds::Action;
+use crate::compositor::binds::{Action, MouseAction, ScrollAxis};
 use crate::compositor::spawn;
 use crate::compositor::state::{Crawm, GrabMode};
 
-/// `BTN_LEFT`.
-const BTN_LEFT: u32 = 0x110;
-/// `BTN_RIGHT`.
-const BTN_RIGHT: u32 = 0x111;
+/// How much a continuous scroll delta must cover before it counts as one axis
+/// bind step. Discrete wheel events use `amount_v120` and need only one notch.
+const CONTINUOUS_AXIS_STEP: f64 = 10.0;
 
 /// Handles one input event from a backend, updating seat state and focus.
 pub(crate) fn handle<B: InputBackend>(state: &mut Crawm, event: InputEvent<B>) {
@@ -63,8 +66,9 @@ fn keyboard<B: InputBackend>(state: &mut Crawm, event: B::KeyboardKeyEvent) {
         0.into(),
         event.time_msec(),
         |state, modifiers, keysym| {
-            // Track Super so pointer grabs know whether to grab.
-            state.super_held = modifiers.logo;
+            // Both keyboard and pointer chords match the exact modifier set, so
+            // remember what is down even when the key itself is forwarded.
+            state.modifiers = *modifiers;
             if key_state != KeyState::Pressed {
                 return FilterResult::Forward;
             }
@@ -99,6 +103,7 @@ fn apply(state: &mut Crawm, action: Action) {
         Action::ToggleSpaceView(index) => state.toggle_view_space(index),
         Action::ToggleSpace(index) => state.toggle_space(index),
         Action::ViewSpaceStep(step) => state.view_space_step(step),
+        Action::ViewSpaceHaveClient(step) => state.view_space_have_client(step),
         Action::ToggleBack => state.toggle_back(),
         Action::Direction(dir) => state.focus_direction(dir),
         Action::MoveWindow(dir) => state.move_window(dir),
@@ -171,8 +176,10 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
 
 /// Forwards a button press/release, focusing the window under the pointer.
 ///
-/// With Super held, the left button starts an interactive move and the right
-/// button a resize; both are swallowed rather than sent to the client.
+/// A `[mousebinds]` chord (or the built-in Super+left/right move/resize) is
+/// looked up with the current modifier set. A bound press is swallowed, its
+/// action runs against the window under the pointer, and its release is
+/// swallowed too so the client never sees half a click.
 ///
 /// A move/resize that the *client* started (`xdg_toplevel.move` from its own
 /// titlebar) ends on the release too, but that release is forwarded: the client
@@ -184,22 +191,29 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
 fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
     let pressed = event.state();
     let grabbed = state.pointer.is_grabbed();
+    let button = event.button_code();
     let serial = SERIAL_COUNTER.next_serial();
     if pressed == ButtonState::Pressed && !grabbed {
         let position = state.pointer_location;
-        if state.super_held {
-            let mode = match event.button_code() {
-                BTN_LEFT => Some(GrabMode::Move),
-                BTN_RIGHT => Some(GrabMode::Resize {
-                    edges: ResizeEdge::BottomRight,
-                }),
-                _ => None,
-            };
-            if let Some(mode) = mode {
-                if state.begin_interaction(mode, position, event.button_code()) {
-                    return;
+        if let Some(action) = state.mouse_binds.action(&state.modifiers, button) {
+            state.bound_buttons.insert(button);
+            state.focus_at(position);
+            match action {
+                MouseAction::Move => {
+                    state.begin_interaction(GrabMode::Move, position, button);
                 }
+                MouseAction::Resize => {
+                    state.begin_interaction(
+                        GrabMode::Resize {
+                            edges: ResizeEdge::BottomRight,
+                        },
+                        position,
+                        button,
+                    );
+                }
+                MouseAction::Action(action) => apply(state, action),
             }
+            return;
         }
         state.focus_at(position);
     } else if pressed == ButtonState::Released {
@@ -208,12 +222,16 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
         // very release, and that is exactly the case a client-started drag is
         // in. A real client grab (a popup) never starts an interaction, so
         // ending one here takes nothing away from it.
-        if let Some(interaction) = state.end_interaction(event.button_code()) {
+        if let Some(interaction) = state.end_interaction(button) {
             if !interaction.from_client {
                 // A compositor grab swallowed the press, so it swallows the
                 // release too: the client never saw the button go down.
                 return;
             }
+        }
+        if state.bound_buttons.remove(&button) {
+            // A mouse bind ran on the press; the client never saw it.
+            return;
         }
     }
 
@@ -234,8 +252,20 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
     state.pointer.clone().frame(state);
 }
 
-/// Forwards scroll to the focused client.
+/// Forwards scroll to the focused client, unless an `[axisbinds]` chord claims
+/// it (for example Super+wheel-up to view the previous occupied space).
+///
+/// One event is one bind step. Discrete wheel notches use `amount_v120`;
+/// continuous sources need [`CONTINUOUS_AXIS_STEP`] so a tiny touchpad delta
+/// does not fire on every frame.
 fn axis<B: InputBackend>(state: &mut Crawm, event: &B::PointerAxisEvent) {
+    if let Some((axis, positive)) = axis_step::<B>(event) {
+        if let Some(action) = state.axis_binds.action(&state.modifiers, axis, positive) {
+            apply(state, action);
+            return;
+        }
+    }
+
     let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
     for axis in [Axis::Horizontal, Axis::Vertical] {
         if let Some(amount) = event.amount(axis) {
@@ -247,4 +277,26 @@ fn axis<B: InputBackend>(state: &mut Crawm, event: &B::PointerAxisEvent) {
     }
     state.pointer.clone().axis(state, frame);
     state.pointer.clone().frame(state);
+}
+
+/// The axis and direction a scroll event names, if it is large enough to be a
+/// bind step.
+fn axis_step<B: InputBackend>(event: &B::PointerAxisEvent) -> Option<(ScrollAxis, bool)> {
+    for (axis, bind_axis) in [
+        (Axis::Vertical, ScrollAxis::Vertical),
+        (Axis::Horizontal, ScrollAxis::Horizontal),
+    ] {
+        let amount = event
+            .amount_v120(axis)
+            .filter(|steps| steps.abs() >= 1.0)
+            .or_else(|| {
+                event
+                    .amount(axis)
+                    .filter(|amount| amount.abs() >= CONTINUOUS_AXIS_STEP)
+            });
+        if let Some(amount) = amount {
+            return Some((bind_axis, amount > 0.0));
+        }
+    }
+    None
 }

@@ -847,8 +847,8 @@ layer_name = ["rofi", "alacritty"]
 "XF86AudioMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 
 [mousebinds]
-"btn_left" = "moveresize,curmove"
-"btn_right" = "moveresize,curresize"
+"SUPER+btn_left" = "moveresize,curmove"
+"SUPER+btn_right" = "moveresize,curresize"
 
 [gesturebinds]
 "left+3" = "focusdir:left"
@@ -858,13 +858,14 @@ layer_name = ["rofi", "alacritty"]
 ```
 
 **Status:** `[layout]` (including `focus_follows_cursor`), `[animations]` (enabled
-and the open/close styles), `[binds.default]`/`[binds.locked]`,
-`[autostart] exec_once` and the current `[[window_rule]]` subset (app-id, floating,
-size, offset) are applied at startup. The other sections parse and validate so the
-file can be written once, but their behavior lands with M4 (`[input]`, `[output]`),
-M5.3/M5.4 (`[mousebinds]`, layer rules, the rest of the rule schema) and M6
-(gestures, layer rules). The built-in key table is the fallback layer; a config
-bind replaces the built-in for the same chord.
+and the open/close styles), `[binds.default]`/`[binds.locked]`, `[mousebinds]`
+(including Super+drag defaults and the `view*_have_client` axis actions),
+`[axisbinds]`, `[autostart] exec_once` and the current `[[window_rule]]` subset
+(app-id, floating, size, offset) are applied at startup. The other sections parse
+and validate so the file can be written once, but their behavior lands with M4
+(`[input]`, `[output]`), M5.4 (layer rules, the rest of the rule schema) and M6
+(gestures, layer rules). The built-in key and mouse tables are the fallback layer;
+a config bind replaces the built-in for the same chord.
 
 ### 13.4 Window rules
 

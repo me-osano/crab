@@ -27,7 +27,7 @@ use smithay::backend::renderer::utils::{Buffer, with_renderer_surface_state};
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
 use smithay::input::SeatState;
-use smithay::input::keyboard::KeyboardHandle;
+use smithay::input::keyboard::{KeyboardHandle, ModifiersState};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -43,7 +43,7 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::ShmState;
 
-use crate::compositor::binds::BindTable;
+use crate::compositor::binds::{AxisBindTable, BindIssue, BindTable, MouseBindTable};
 use crate::compositor::fit::WindowFit;
 use crate::compositor::layout;
 use crate::compositor::spawn;
@@ -64,6 +64,32 @@ const MIN_VISIBLE: f64 = 32.0;
 /// and a client that keeps answering with fresh sizes of its own still only
 /// buys itself two retries.
 const MAX_SIZE_REFUSALS: u8 = 3;
+
+/// The nearest occupied space before (`step < 0`) or after (`step > 0`)
+/// `current`, skipping empty spaces.
+fn occupied_target(occupied: SpaceSet, current: u8, step: i8) -> Option<u8> {
+    if step < 0 {
+        occupied
+            .iter_indices()
+            .filter(|&index| index < current)
+            .max()
+    } else if step > 0 {
+        occupied.iter_indices().find(|&index| index > current)
+    } else {
+        None
+    }
+}
+
+/// Logs one bind the config author wrote but crawm could not compile.
+fn log_bind_issue(kind: &str, issue: &BindIssue) {
+    tracing::warn!(
+        kind,
+        chord = %issue.chord,
+        action = %issue.action,
+        reason = %issue.reason,
+        "ignoring a binding"
+    );
+}
 
 /// The curve a window's rectangle moves along when the layout moves it.
 ///
@@ -642,6 +668,12 @@ pub(crate) struct Crawm {
     pub(crate) config: Config,
     /// The compiled keyboard binds (built-ins plus `[binds.*]`).
     pub(crate) binds: BindTable,
+    /// The compiled pointer-button binds (built-ins plus `[mousebinds]`).
+    pub(crate) mouse_binds: MouseBindTable,
+    /// The compiled scroll binds (`[axisbinds]`).
+    pub(crate) axis_binds: AxisBindTable,
+    /// Current keyboard modifiers, used by pointer and axis chords.
+    pub(crate) modifiers: ModifiersState,
     /// crawm's own Wayland socket name, once the backend has bound it.
     ///
     /// `spawn:` and `[autostart]` pass this as `WAYLAND_DISPLAY` so launched
@@ -666,6 +698,9 @@ pub(crate) struct Crawm {
     /// Keycodes swallowed by a keybind, so the matching release is swallowed
     /// too.
     pub(crate) bound_keys: HashSet<u32>,
+    /// Buttons swallowed by a mouse bind, so the matching release is swallowed
+    /// too.
+    pub(crate) bound_buttons: HashSet<u32>,
     /// An in-progress interactive move/resize, if any.
     pub(crate) interaction: Option<Interaction>,
     /// Serial of the last pointer press sent to a client.
@@ -674,8 +709,6 @@ pub(crate) struct Crawm {
     /// request whose serial is not this one is stale (or not ours) and is
     /// ignored.
     pub(crate) last_pointer_press: Option<Serial>,
-    /// Whether Super is currently held (drives pointer grabs).
-    pub(crate) super_held: bool,
     /// Time of the first frame, used for `wl_surface.frame` timestamps.
     pub(crate) start_time: Instant,
     /// The frame clock every animation is sampled against (COMPOSITOR.md §9).
@@ -755,16 +788,24 @@ impl Crawm {
             space_state,
         );
 
-        let (binds, issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
-        for issue in issues {
-            tracing::warn!(
-                chord = %issue.chord,
-                action = %issue.action,
-                reason = %issue.reason,
-                "ignoring a key binding"
-            );
+        let (binds, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
+        for issue in key_issues {
+            log_bind_issue("key", &issue);
         }
-        tracing::debug!(binds = binds.len(), "compiled key bindings");
+        let (mouse_binds, mouse_issues) = MouseBindTable::compile(&config.mouse_binds);
+        for issue in mouse_issues {
+            log_bind_issue("mouse", &issue);
+        }
+        let (axis_binds, axis_issues) = AxisBindTable::compile(&config.axis_binds);
+        for issue in axis_issues {
+            log_bind_issue("axis", &issue);
+        }
+        tracing::debug!(
+            key = binds.len(),
+            mouse = mouse_binds.len(),
+            axis = axis_binds.len(),
+            "compiled bindings"
+        );
 
         Self {
             compositor_state: CompositorState::new::<Self>(display),
@@ -777,6 +818,9 @@ impl Crawm {
             output,
             config: config.clone(),
             binds,
+            mouse_binds,
+            axis_binds,
+            modifiers: ModifiersState::default(),
             wayland_display: None,
             output_state,
             windows: Vec::new(),
@@ -785,9 +829,9 @@ impl Crawm {
             focus: FocusTarget::None,
             focus_stack: FocusStack::new(),
             bound_keys: HashSet::new(),
+            bound_buttons: HashSet::new(),
             interaction: None,
             last_pointer_press: None,
-            super_held: false,
             start_time: Instant::now(),
             frame_clock: Clocks::new(),
             pointer_location: (0.0, 0.0).into(),
@@ -1551,6 +1595,21 @@ impl Crawm {
         }
     }
 
+    /// Steps the view to the next occupied space in a direction.
+    ///
+    /// This powers `viewtoleft_have_client`/`viewtoright_have_client` (and the
+    /// `viewprev`/`viewnext` aliases): empty spaces in between are skipped and
+    /// the view stops at the outermost occupied space.
+    pub(crate) fn view_space_have_client(&mut self, step: i8) {
+        let Some(current) = self.output_state.current_space_index() else {
+            return;
+        };
+        let index = u8::try_from(current).unwrap_or(0).saturating_add(1);
+        if let Some(target) = occupied_target(self.occupied_spaces(), index, step) {
+            self.view_space(target);
+        }
+    }
+
     /// Swaps to the previously-viewed space set.
     pub(crate) fn toggle_back(&mut self) {
         self.output_state.toggle_back();
@@ -2080,6 +2139,18 @@ mod tests {
     /// A size in logical pixels, the way the protocol spells it.
     fn size(w: i32, h: i32) -> Size<i32, Logical> {
         (w, h).into()
+    }
+
+    #[test]
+    fn have_client_steps_skip_empty_spaces_and_stop_at_the_edges() {
+        let occupied = SpaceSet::SPACE_1 | SpaceSet::SPACE_3 | SpaceSet::SPACE_4;
+        assert_eq!(occupied_target(occupied, 1, 1), Some(3));
+        assert_eq!(occupied_target(occupied, 2, 1), Some(3));
+        assert_eq!(occupied_target(occupied, 4, 1), None);
+        assert_eq!(occupied_target(occupied, 4, -1), Some(3));
+        assert_eq!(occupied_target(occupied, 2, -1), Some(1));
+        assert_eq!(occupied_target(occupied, 1, -1), None);
+        assert_eq!(occupied_target(occupied, 3, 0), None);
     }
 
     #[test]
