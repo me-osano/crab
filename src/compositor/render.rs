@@ -24,6 +24,8 @@
 //! buffer, and the backends hide the host cursor so only this one is visible
 //! (TODO.md §1.3).
 
+use crawm::animation::Clocks;
+use crawm::config::AnimationStyle;
 use crawm::core::Color;
 use crawm::core::WindowId;
 use smithay::backend::renderer::Color32F;
@@ -33,8 +35,9 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
+use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, RenderElement, UnderlyingStorage};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesFrame, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet};
 use smithay::backend::renderer::{Frame as _, ImportAll, Renderer, Texture};
@@ -50,10 +53,16 @@ use smithay::wayland::compositor::{
 };
 
 use crate::compositor::fit::WindowFit;
-use crate::compositor::state::{Crawm, ManagedWindow};
+use crate::compositor::state::{ClosingWindow, Crawm, ManagedWindow};
 
 /// Background color of the compositor (dark slate).
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
+
+/// How far a sliding window falls while it closes, in logical pixels.
+const CLOSE_SLIDE: f64 = 16.0;
+
+/// How small a zooming window gets by the end of its close.
+const CLOSE_ZOOM: f64 = 0.94;
 
 /// Renders the whole scene into the winit window and presents it.
 pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
@@ -78,6 +87,16 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
             .map_or(0.0, |space| space.params.border_width)
             .max(0.0) as i32;
         let focused = state.focused_id();
+
+        // Windows that are gone but still fading out, built from their kept
+        // last buffer below the popups and above the living windows. The
+        // texture is imported afresh on each frame of the fade; there are only
+        // a handful of such frames, and it keeps the renderer out of the state.
+        let closing_surfaces: Vec<ClosingSurface> = state
+            .closings
+            .iter()
+            .filter_map(|closing| ClosingSurface::new(&mut *renderer, closing, &state.frame_clock))
+            .collect();
 
         // Collect in stacking order: tiled, then floating, then fullscreen on
         // top. Popups draw over everything. Borders are a separate pass so the
@@ -135,13 +154,14 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
         // window; a popup without a buffer yet yields no elements.
         for window in state.windows.iter().filter(|w| w.mapped && w.visible) {
             let origin = window.visual_origin(&state.frame_clock);
+            let alpha = window.open_alpha(&state.frame_clock);
             for (popup, offset) in crate::compositor::state::popup_offsets(window) {
                 popups.extend(render_elements_from_surface_tree(
                     &mut *renderer,
                     popup.wl_surface(),
                     (origin + offset).to_physical(1),
                     1.0,
-                    1.0,
+                    alpha,
                     Kind::Unspecified,
                 ));
             }
@@ -209,6 +229,14 @@ pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRende
                 ) {
                     tracing::error!(?err, "failed to draw the scene");
                 }
+                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
+                    &mut frame,
+                    1.0,
+                    &closing_surfaces,
+                    &[damage],
+                ) {
+                    tracing::error!(?err, "failed to draw the closing windows");
+                }
                 if let Err(err) =
                     draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &popups, &[damage])
                 {
@@ -274,6 +302,7 @@ fn collect_pass<'a>(
     for window in windows {
         let location = window.visual_origin(&state.frame_clock);
         let size = window.visual_size(&state.frame_clock);
+        let alpha = window.open_alpha(&state.frame_clock);
         // A fullscreen or maximized window covers the screen, so a border would
         // only clip it.
         if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
@@ -282,6 +311,7 @@ fn collect_pass<'a>(
             } else {
                 border_color(state.config.unfocused_border_color)
             };
+            let color = Color32F::new(color.r(), color.g(), color.b(), color.a() * alpha);
             borders.extend(borders_for(location, size, border_width, color));
         }
         // The toplevel is drawn from its geometry origin pulled back out by the
@@ -294,6 +324,7 @@ fn collect_pass<'a>(
             renderer,
             window.wl_surface(),
             window.fit(&state.frame_clock),
+            alpha,
         ));
     }
 }
@@ -313,6 +344,7 @@ fn fitted_surface_tree(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     fit: WindowFit,
+    alpha: f32,
 ) -> Vec<FittedSurface<GlesRenderer>> {
     let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         render_elements_from_surface_tree(
@@ -320,7 +352,7 @@ fn fitted_surface_tree(
             surface,
             fit.surface_origin().to_physical(1),
             1.0,
-            1.0,
+            alpha,
             Kind::Unspecified,
         );
     elements
@@ -331,6 +363,98 @@ fn fitted_surface_tree(
             Some(FittedSurface { inner, src, dst })
         })
         .collect()
+}
+
+/// A closing window's kept buffer, mapped onto the rectangle its fade is
+/// shrinking or sliding.
+struct ClosingSurface {
+    /// Smithay's texture element, built from the client's last buffer. Only its
+    /// alpha, transform and kind are used; the geometry and source below
+    /// override its placement.
+    inner: TextureRenderElement<GlesTexture>,
+    /// What to take of the kept buffer.
+    src: Rectangle<f64, BufferCoords>,
+    /// Where to put it, after the close style's slide/zoom.
+    dst: Rectangle<i32, Physical>,
+}
+
+impl ClosingSurface {
+    /// Imports `closing`'s buffer and maps it to where the window was drawn,
+    /// moved by the close animation's progress.
+    fn new(renderer: &mut GlesRenderer, closing: &ClosingWindow, clocks: &Clocks) -> Option<Self> {
+        let texture = match renderer.import_buffer(&closing.buffer, None, &[]) {
+            Some(Ok(texture)) => texture,
+            Some(Err(err)) => {
+                tracing::debug!(?err, "failed to import a closing window's last buffer");
+                return None;
+            }
+            None => return None,
+        };
+        let progress = closing.progress.value(clocks).clamp(0.0, 1.0);
+        let texture_size = texture.size();
+        let natural_size = texture_size.to_logical(
+            smithay::utils::Scale::from(closing.buffer_scale),
+            closing.buffer_transform,
+        );
+        let natural = Rectangle::<i32, Physical>::new(
+            closing.fit.surface_origin().to_physical(1),
+            natural_size.to_physical(1),
+        );
+        let (src, dst) = closing
+            .fit
+            .map_element(natural, Rectangle::from_size(texture_size.to_f64()))?;
+        let dst = close_dst(dst, closing.style, closing.visual, progress);
+        let alpha = (f64::from(closing.alpha) * (1.0 - progress)) as f32;
+        tracing::trace!(?dst, alpha, "drawing a closing window");
+        let inner = TextureRenderElement::from_static_texture(
+            Id::new(),
+            renderer.context_id(),
+            Point::<f64, Physical>::from((f64::from(dst.loc.x), f64::from(dst.loc.y))),
+            texture,
+            1,
+            closing.buffer_transform,
+            Some(alpha),
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        );
+        Some(Self { inner, src, dst })
+    }
+}
+
+/// Applies the configured close style to a window's drawn rectangle.
+///
+/// The snapshot's source is left alone: slide moves the whole window down and
+/// zoom shrinks it around the rectangle it had when it closed, and the fade
+/// makes either read as the window leaving rather than being squashed.
+fn close_dst(
+    dst: Rectangle<i32, Physical>,
+    style: AnimationStyle,
+    visual: crawm::core::Rect,
+    progress: f64,
+) -> Rectangle<i32, Physical> {
+    match style {
+        AnimationStyle::Slide => {
+            let dy = (CLOSE_SLIDE * progress).round() as i32;
+            Rectangle::new((dst.loc.x, dst.loc.y + dy).into(), dst.size)
+        }
+        AnimationStyle::Zoom => {
+            let scale = 1.0 - (1.0 - CLOSE_ZOOM) * progress;
+            let anchor = Point::<f64, Physical>::from((
+                visual.x + visual.w / 2.0,
+                visual.y + visual.h / 2.0,
+            ));
+            let location =
+                Point::<f64, Physical>::from((f64::from(dst.loc.x), f64::from(dst.loc.y)));
+            let location = anchor + (location - anchor).upscale(scale);
+            let size = Size::<i32, Physical>::from((
+                (f64::from(dst.size.w) * scale).round() as i32,
+                (f64::from(dst.size.h) * scale).round() as i32,
+            ));
+            Rectangle::new(location.to_i32_round(), size)
+        }
+    }
 }
 
 /// A surface element mapped onto the rectangle its window is drawn at.
@@ -420,6 +544,70 @@ where
     }
 
     fn underlying_storage(&self, renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
+        self.inner.underlying_storage(renderer)
+    }
+}
+
+impl Element for ClosingSurface {
+    fn id(&self) -> &Id {
+        self.inner.id()
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.inner.current_commit()
+    }
+
+    fn src(&self) -> Rectangle<f64, BufferCoords> {
+        self.src
+    }
+
+    fn transform(&self) -> Transform {
+        self.inner.transform()
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.dst
+    }
+
+    fn damage_since(
+        &self,
+        _scale: Scale<f64>,
+        _commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        // The rectangle moves every frame of the fade, so earlier damage says
+        // nothing about where the snapshot is drawn now.
+        DamageSet::from_slice(&[Rectangle::from_size(self.dst.size)])
+    }
+
+    fn alpha(&self) -> f32 {
+        self.inner.alpha()
+    }
+
+    fn kind(&self) -> Kind {
+        self.inner.kind()
+    }
+}
+
+impl RenderElement<GlesRenderer> for ClosingSurface {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        _src: Rectangle<f64, BufferCoords>,
+        _dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+    ) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+        RenderElement::<GlesRenderer>::draw(
+            &self.inner,
+            frame,
+            self.src,
+            self.dst,
+            damage,
+            opaque_regions,
+        )
+    }
+
+    fn underlying_storage(&self, renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
         self.inner.underlying_storage(renderer)
     }
 }
@@ -616,6 +804,29 @@ fn send_frame_callbacks(surface: &WlSurface, time: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closing_slide_falls_and_keeps_its_size() {
+        let dst = Rectangle::<i32, Physical>::new((10, 20).into(), (100, 50).into());
+        let visual = crawm::core::Rect::new(10.0, 20.0, 100.0, 50.0);
+        let start = close_dst(dst, AnimationStyle::Slide, visual, 0.0);
+        let end = close_dst(dst, AnimationStyle::Slide, visual, 1.0);
+        assert_eq!(start, dst, "a close starts exactly where the window was");
+        assert_eq!(end.size, dst.size, "sliding does not change the size");
+        assert_eq!(end.loc.y - dst.loc.y, CLOSE_SLIDE as i32);
+    }
+
+    #[test]
+    fn a_closing_zoom_shrinks_around_the_window_center() {
+        let dst = Rectangle::<i32, Physical>::new((100, 100).into(), (200, 100).into());
+        let visual = crawm::core::Rect::new(100.0, 100.0, 200.0, 100.0);
+        let end = close_dst(dst, AnimationStyle::Zoom, visual, 1.0);
+        assert_eq!(end.size.w, (200.0 * CLOSE_ZOOM).round() as i32);
+        assert_eq!(end.size.h, (100.0 * CLOSE_ZOOM).round() as i32);
+        // The centre of the drawn rectangle stays put while it shrinks.
+        assert!((f64::from(end.loc.x) + f64::from(end.size.w) / 2.0 - 200.0).abs() <= 1.0);
+        assert!((f64::from(end.loc.y) + f64::from(end.size.h) / 2.0 - 150.0).abs() <= 1.0);
+    }
 
     #[test]
     fn the_tip_sits_at_the_origin() {

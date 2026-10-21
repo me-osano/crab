@@ -579,9 +579,14 @@ switches and scrolling, which are the same thing seen from different angles (a s
 retargets every window to the rectangle its column now occupies). The window, its border
 and its popups are all drawn at the animated rectangle, and hit-testing, drag origins and
 popup placement read the same rectangle, so nothing lags behind the picture while it
-moves. The space-switch *slide*, the scroller's *own* offset (for free scrolling and
-gestures), open/close and border colour blends still land with the rest of M3 (their
-properties need the snapshot and crop/scale machinery described below).
+moves. **Open and close** are alpha fades on the same clock: `slide` also moves the
+rectangle a little (up into place on open, down on close), while `zoom` scales it around
+its centre; on open the surface, border and popups fade together. A closing window keeps
+its last committed buffer (and therefore the pixels the client would otherwise free) and
+draws it through its last fit while it fades, so the client can unmap and destroy at once.
+The space-switch *slide*, the scroller's *own* offset (for free scrolling and gestures),
+and border colour blends still land with the rest of M3 (their properties need the
+crop/scale machinery described below).
 
 ### Resize handling
 
@@ -603,7 +608,11 @@ Clients commit new buffers after being configured, not instantly. For smooth vis
   `position - origin` land on the surface-local point *drawn* there, not the one the
   placement puts there (`WindowFit::input_origin`). A window that is cut back is drawn 1:1
   and reports its plain surface origin. Popups are never stretched and keep their placement.
-- For close animations, capture the last buffer into an offscreen texture before the surface goes away.
+- For close animations, keep the last buffer committed with a real geometry alive until
+  the fade ends, then import it into a texture and draw it through the fit the window had.
+  Holding the buffer keeps its pixels (and the shm pool or dmabuf behind them) alive even
+  after the client destroys the surface, so the snapshot does not have to be taken while
+  the surface is still mapped.
 
 ---
 
@@ -747,7 +756,8 @@ plus the event stream.
   example is `resources/default-config.toml`.
 - **Toggles accept both spellings:** TOML `true`/`false` and mango's `0`/`1`.
 - **Sections land as their features do:** the current schema is the full example
-  (see §13.3), but only `[layout]` and `[animations] enabled` are applied so far. A
+  (see §13.3), but only `[layout]`, `[animations]` (enabled and the open/close
+  styles) and the bind/autostart/rule sections below are applied so far. A
   section whose feature is still missing parses and validates, so a config can be
   written once; unknown keys are ignored and a present-but-wrongly-typed key is an
   error. The pre-`[layout]` flat form is rejected with a message rather than silently reset.
@@ -847,14 +857,14 @@ layer_name = ["rofi", "alacritty"]
 "SUPER+UP" = "viewtoleft_have_client"
 ```
 
-**Status:** `[layout]` (including `focus_follows_cursor`), `[animations] enabled`,
-`[binds.default]`/`[binds.locked]`, `[autostart] exec_once` and the current
-`[[window_rule]]` subset (app-id, floating, size, offset) are applied at startup.
-The open/close styles are read when those animations land (M3). The other sections
-parse and validate so the file can be written once, but their behavior lands with
-M4 (`[input]`, `[output]`), M5.3/M5.4 (`[mousebinds]`, layer rules, the rest of the
-rule schema) and M6 (gestures, layer rules). The built-in key table is the fallback
-layer; a config bind replaces the built-in for the same chord.
+**Status:** `[layout]` (including `focus_follows_cursor`), `[animations]` (enabled
+and the open/close styles), `[binds.default]`/`[binds.locked]`,
+`[autostart] exec_once` and the current `[[window_rule]]` subset (app-id, floating,
+size, offset) are applied at startup. The other sections parse and validate so the
+file can be written once, but their behavior lands with M4 (`[input]`, `[output]`),
+M5.3/M5.4 (`[mousebinds]`, layer rules, the rest of the rule schema) and M6
+(gestures, layer rules). The built-in key table is the fallback layer; a config
+bind replaces the built-in for the same chord.
 
 ### 13.4 Window rules
 

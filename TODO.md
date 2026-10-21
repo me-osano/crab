@@ -289,8 +289,19 @@ are smooth, interruptible, and free of pops.
   outside the surface. The same run turned up a missing `wl_pointer.frame` after motion and
   buttons, without which clients that batch events (`smithay-client-toolkit`, GTK, Qt) see
   none at all — every batch now ends with one.
-- [ ] Open: alpha, scale, offset.
-- [ ] Close: alpha, scale — **snapshot the last buffer** into a texture after unmap (`COMPOSITOR.md` §9 resize handling).
+- [x] Open: alpha, scale, offset. The first mapped frame starts a fixed-duration
+  ease-out ([`Kind::WindowOpen`]): `slide` starts the rectangle a little below its
+  resting place and rises into it, `zoom` starts it smaller around its centre. The
+  surface, border and popups all fade with the same progress, and the rectangle is
+  the one hit-testing and popup placement read, so nothing is drawn somewhere a click
+  would not land.
+- [x] Close: alpha, scale — **snapshot the last buffer** after unmap
+  (`COMPOSITOR.md` §9 resize handling). The last buffer committed with a real
+  geometry is kept alive (which keeps its cached `wl_buffer` data, and the shm pool or
+  dmabuf, alive too), then imported into a texture on the fade's frames and drawn
+  through the window's last fit. `slide` falls and `zoom` shrinks around the window's
+  centre while the alpha goes to zero; the client can detach its buffer and destroy
+  the surface immediately without the animation losing its pixels.
 - [x] Layout switch: per-window rect — windows spring to their new tile.
 - [ ] Space switch: per-output slide of window groups.
 - [ ] Scroll view offset; border/focus-ring color blend. *(A scroll already slides, because

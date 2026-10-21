@@ -16,13 +16,14 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use crawm::animation::{Animated, Clocks, Curve, Kind, SpringParams};
-use crawm::config::{Config, WindowRule};
+use crawm::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
+use crawm::config::{AnimationStyle, Config, WindowRule};
 use crawm::core::{
     ColumnWidth, Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
     Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
     Window, WindowId,
 };
+use smithay::backend::renderer::utils::{Buffer, with_renderer_surface_state};
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
 use smithay::input::SeatState;
@@ -72,6 +73,28 @@ const MAX_SIZE_REFUSALS: u8 = 3;
 /// the first instead of restarting.
 const WINDOW_CURVE: Curve = Curve::Spring(SpringParams::DEFAULT);
 
+/// The curve a window follows when it appears.
+///
+/// Open and close are fixed-duration eases rather than springs: an appearance
+/// should arrive without bouncing, and a disappearance should not overshoot the
+/// point where the window is gone.
+const OPEN_CURVE: Curve = Curve::Easing {
+    duration_ms: 180,
+    kind: Easing::EaseOutCubic,
+};
+
+/// The curve a window follows when it goes away.
+const CLOSE_CURVE: Curve = Curve::Easing {
+    duration_ms: 150,
+    kind: Easing::EaseOutCubic,
+};
+
+/// How far a sliding window travels when it opens, in logical pixels.
+const OPEN_SLIDE: f64 = 24.0;
+
+/// How much smaller than its resting size a zooming window starts.
+const OPEN_ZOOM: f64 = 0.92;
+
 /// One managed toplevel: the protocol object and its pure model.
 pub(crate) struct ManagedWindow {
     /// The xdg toplevel this describes.
@@ -102,14 +125,104 @@ pub(crate) struct ManagedWindow {
     /// what the client is configured with, what a drag grabs, what the next
     /// relocation starts from. While the two differ the window is in motion.
     visual: Animated<Rect>,
+    /// How far the window has appeared: 0 at its first mapped frame, 1 at rest.
+    ///
+    /// Sampled by the renderer to fade in the surface, its border and its
+    /// popups. It is separate from [`Self::visual`] because the open animation
+    /// also moves the rectangle, and the two must share one clock
+    /// ([`Kind::WindowOpen`]) so the fade and the motion end together.
+    open: Animated<f64>,
     /// Whether [`Self::visual`] has had a real placement yet. The first one
     /// snaps, so a new window appears where the layout put it instead of flying
     /// in from its default rectangle.
     visual_placed: bool,
+    /// The last buffer committed while the window had a real geometry.
+    ///
+    /// A client usually detaches its buffer (and then destroys the surface) as
+    /// it closes, so by the time `toplevel_destroyed` runs there is nothing left
+    /// to read. Keeping this between commits is what lets the close animation
+    /// still draw the window's last frame (`COMPOSITOR.md` §9).
+    last_frame: Option<FrameSnapshot>,
     /// Whether the matching `[window_rule]` (if any) has already been applied.
     rule_applied: bool,
     /// What the client has been asked to be, and how it has answered.
     configure: Configure,
+}
+
+/// The last committed frame of a window, kept for its close animation.
+struct FrameSnapshot {
+    /// The buffer, held so the client cannot free its pixels (see [`Buffer`]).
+    buffer: Buffer,
+    /// The scale the buffer was committed with.
+    buffer_scale: i32,
+    /// The transform the buffer was committed with.
+    buffer_transform: Transform,
+    /// The window geometry that went with it.
+    geometry: Rectangle<i32, Logical>,
+}
+
+/// A toplevel whose protocol object is gone but whose last frame is still
+/// fading out.
+///
+/// The client's buffer is kept alive with the [`Buffer`] handle, so its pixels
+/// survive the `wl_surface` and `wl_buffer` being destroyed; the renderer
+/// imports it into a texture on the frames the close animation runs and draws
+/// it through the window's last [`WindowFit`]. That is the "snapshot" the
+/// close animation needs without copying the framebuffer (`COMPOSITOR.md` §9).
+pub(crate) struct ClosingWindow {
+    /// The last committed buffer, held so the client cannot free its pixels.
+    pub(crate) buffer: Buffer,
+    /// The scale and transform the buffer was committed with.
+    pub(crate) buffer_scale: i32,
+    /// The transform the buffer was committed with.
+    pub(crate) buffer_transform: Transform,
+    /// Where the window was drawn when it went away.
+    pub(crate) fit: WindowFit,
+    /// The window's drawn rectangle at that instant, used as a zoom anchor.
+    pub(crate) visual: Rect,
+    /// The configured `animation_type_close`.
+    pub(crate) style: AnimationStyle,
+    /// The opacity the window had when it went away, so closing one that is
+    /// still appearing does not make it flash to fully opaque.
+    pub(crate) alpha: f32,
+    /// How far the close has progressed: 0 at the last frame, 1 when gone.
+    pub(crate) progress: Animated<f64>,
+}
+
+/// Where a window's open animation starts, for the configured style.
+///
+/// Slide starts a little below the resting rectangle and rises into place;
+/// zoom starts smaller around the resting rectangle's centre and grows. Both
+/// are purely the rectangle the window is drawn at, so hit-testing and popup
+/// placement follow the picture without a second transform.
+fn open_start_rect(target: Rect, style: AnimationStyle) -> Rect {
+    match style {
+        AnimationStyle::Slide => Rect::new(target.x, target.y + OPEN_SLIDE, target.w, target.h),
+        AnimationStyle::Zoom => {
+            let w = target.w * OPEN_ZOOM;
+            let h = target.h * OPEN_ZOOM;
+            Rect::new(
+                target.x + (target.w - w) / 2.0,
+                target.y + (target.h - h) / 2.0,
+                w,
+                h,
+            )
+        }
+    }
+}
+
+/// The buffer `surface` currently has attached, with its scale and transform.
+///
+/// Called on every commit to keep [`ManagedWindow::last_frame`] up to date
+/// while the client still has pixels to show.
+fn committed_frame(surface: &WlSurface) -> Option<(Buffer, i32, Transform)> {
+    with_renderer_surface_state(surface, |state| {
+        state
+            .buffer()
+            .cloned()
+            .map(|buffer| (buffer, state.buffer_scale(), state.buffer_transform()))
+    })
+    .flatten()
 }
 
 impl ManagedWindow {
@@ -185,11 +298,43 @@ impl ManagedWindow {
     /// to call on every re-layout.
     pub(crate) fn animate_to(&mut self, rect: Rect, kind: Kind, clocks: &Clocks) {
         if self.visual_placed {
+            // An appearance runs on its own fixed-duration curve. A real layout
+            // change during it takes the rectangle over and returns to the
+            // spring; repeating the same target must not swap the curve under
+            // the running segment.
+            if self.visual.target() != rect {
+                self.visual.set_curve(WINDOW_CURVE);
+            }
             self.visual.animate(rect, kind, clocks);
         } else {
             self.visual.snap_to(rect);
             self.visual_placed = true;
         }
+    }
+
+    /// Starts the configured open animation at the window's first mapped
+    /// frame: the rectangle flies in from its slide/zoom start while the alpha
+    /// fades up.
+    ///
+    /// Called only when `[animations] enabled` is true; without it the window
+    /// is simply at rest on its placement and [`Self::open_alpha`] is 1.
+    pub(crate) fn start_opening(&mut self, style: AnimationStyle, clocks: &Clocks) {
+        tracing::trace!(?style, title = ?self.window.title, "starting the open animation");
+        let target = self.visual.target();
+        let start = open_start_rect(target, style);
+        self.open.snap_to(0.0);
+        self.open.animate(1.0, Kind::WindowOpen, clocks);
+        if start != target {
+            self.visual.set_curve(OPEN_CURVE);
+            self.visual.snap_to(start);
+            self.visual.animate(target, Kind::WindowOpen, clocks);
+        }
+    }
+
+    /// How opaque the window is while it appears: 1 once open or when
+    /// animations are off.
+    pub(crate) fn open_alpha(&self, clocks: &Clocks) -> f32 {
+        self.open.value(clocks).clamp(0.0, 1.0) as f32
     }
 
     /// Pins the drawn rectangle to `rect`, dropping any motion.
@@ -506,6 +651,8 @@ pub(crate) struct Crawm {
     pub(crate) output_state: OutputModel,
     /// Managed toplevels, in layout order (first = first tile).
     pub(crate) windows: Vec<ManagedWindow>,
+    /// Toplevels that are gone but still fading out, drawn above the scene.
+    pub(crate) closings: Vec<ClosingWindow>,
     /// The xdg popup trees, one per toplevel, plus their grabs.
     ///
     /// Smithay's manager is the source of truth: it descends each popup's
@@ -633,6 +780,7 @@ impl Crawm {
             wayland_display: None,
             output_state,
             windows: Vec::new(),
+            closings: Vec::new(),
             popup_manager: PopupManager::default(),
             focus: FocusTarget::None,
             focus_stack: FocusStack::new(),
@@ -715,6 +863,10 @@ impl Crawm {
     /// pass the real one (TODO.md §3.2).
     pub(crate) fn advance_frame(&mut self, frame_time: f64) {
         self.frame_clock.advance(frame_time);
+        // A close whose fade has finished has nothing left to draw; retire it
+        // before the frame that would sample it at zero opacity.
+        self.closings
+            .retain(|closing| closing.progress.is_animating(&self.frame_clock));
     }
 
     /// Whether anything on screen is still moving.
@@ -723,9 +875,13 @@ impl Crawm {
     /// machine keeps requesting frames; once it stops, the compositor goes back
     /// to drawing nothing at all (ROADMAP.md §9, COMPOSITOR.md §9).
     pub(crate) fn is_animating(&self) -> bool {
-        self.windows
+        self.windows.iter().any(|window| {
+            window.visual.is_animating(&self.frame_clock)
+                || window.open.is_animating(&self.frame_clock)
+        }) || self
+            .closings
             .iter()
-            .any(|window| window.visual.is_animating(&self.frame_clock))
+            .any(|closing| closing.progress.is_animating(&self.frame_clock))
     }
 
     /// Registers a newly created toplevel with the space/layout model.
@@ -776,7 +932,9 @@ impl Crawm {
                 WINDOW_CURVE,
                 Kind::WindowMove,
             ),
+            open: Animated::new(1.0, OPEN_CURVE, Kind::WindowOpen),
             visual_placed: false,
+            last_frame: None,
             rule_applied: false,
             configure,
         });
@@ -860,10 +1018,12 @@ impl Crawm {
     /// when something the layout cares about changed.
     pub(crate) fn on_commit(&mut self, surface: &WlSurface) {
         let mut relayout = false;
+        let mut newly_mapped = Vec::new();
 
         let (min_size, max_size) = read_size_hints(surface);
         let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
         let geometry = window_geometry(surface, bbox);
+        let committed = committed_frame(surface);
         for window in &mut self.windows {
             if window.wl_surface() != surface {
                 continue;
@@ -877,6 +1037,16 @@ impl Crawm {
                 window.geometry = geometry;
                 relayout = true;
             }
+            if geometry.size.w > 0 && geometry.size.h > 0 {
+                if let Some((buffer, buffer_scale, buffer_transform)) = &committed {
+                    window.last_frame = Some(FrameSnapshot {
+                        buffer: buffer.clone(),
+                        buffer_scale: *buffer_scale,
+                        buffer_transform: *buffer_transform,
+                        geometry,
+                    });
+                }
+            }
             if window.window.min_size != min_size || window.window.max_size != max_size {
                 window.window.min_size = min_size;
                 window.window.max_size = max_size;
@@ -884,6 +1054,7 @@ impl Crawm {
             }
             if !window.mapped {
                 window.mapped = true;
+                newly_mapped.push(window.id());
                 relayout = true;
             }
             // A floating window owns its size; adopt whatever it committed,
@@ -920,6 +1091,19 @@ impl Crawm {
         if relayout {
             self.relayout();
         }
+
+        // The first buffer is where the window becomes visible: start its open
+        // animation after the layout has settled on the rectangle it is heading
+        // for, so the animation does not immediately retarget.
+        if self.config.animations.enabled {
+            let style = self.config.animations.open;
+            let clocks = self.frame_clock;
+            for id in newly_mapped {
+                if let Some(window) = self.window_mut(id) {
+                    window.start_opening(style, &clocks);
+                }
+            }
+        }
     }
 
     /// Drops entries whose client object is gone.
@@ -938,6 +1122,9 @@ impl Crawm {
     }
 
     /// Removes the window owning `surface` (from `toplevel_destroyed`).
+    ///
+    /// If it was on screen and animations are on, its last buffer is kept and
+    /// the window becomes a [`ClosingWindow`] that fades out over the scene.
     pub(crate) fn remove_window(&mut self, surface: &WlSurface) {
         let Some(index) = self
             .windows
@@ -947,7 +1134,46 @@ impl Crawm {
             return;
         };
         let id = self.windows[index].window.id;
+        let closing = if self.config.animations.enabled
+            && self.windows[index].mapped
+            && self.windows[index].visible
+        {
+            let window = &self.windows[index];
+            let style = self.config.animations.close;
+            let alpha = window.open_alpha(&self.frame_clock);
+            let visual = window.visual_rect(&self.frame_clock);
+            let origin = window.visual_origin(&self.frame_clock);
+            let size = window.visual_size(&self.frame_clock);
+            window.last_frame.as_ref().map(|frame| {
+                // Map the kept buffer through the fit it had when it was last
+                // committed, even though the client detached it before closing.
+                let fit = WindowFit::new(
+                    Rectangle::new(origin, size),
+                    origin - frame.geometry.loc,
+                    frame.geometry.size,
+                    !window.is_size_refusing(),
+                );
+                let mut progress = Animated::new(0.0, CLOSE_CURVE, Kind::WindowClose);
+                progress.animate(1.0, Kind::WindowClose, &self.frame_clock);
+                ClosingWindow {
+                    buffer: frame.buffer.clone(),
+                    buffer_scale: frame.buffer_scale,
+                    buffer_transform: frame.buffer_transform,
+                    fit,
+                    visual,
+                    style,
+                    alpha,
+                    progress,
+                }
+            })
+        } else {
+            None
+        };
         self.windows.remove(index);
+        if let Some(closing) = closing {
+            tracing::trace!("fading out a window whose toplevel is gone");
+            self.closings.push(closing);
+        }
         self.forget_windows(&[id]);
     }
 
@@ -1854,6 +2080,25 @@ mod tests {
     /// A size in logical pixels, the way the protocol spells it.
     fn size(w: i32, h: i32) -> Size<i32, Logical> {
         (w, h).into()
+    }
+
+    #[test]
+    fn opening_slides_up_into_the_rect() {
+        let target = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let start = open_start_rect(target, AnimationStyle::Slide);
+        assert_eq!(start.x, target.x);
+        assert_eq!(start.y, target.y + OPEN_SLIDE);
+        assert_eq!((start.w, start.h), (target.w, target.h));
+    }
+
+    #[test]
+    fn opening_zoom_starts_smaller_around_the_centre() {
+        let target = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let start = open_start_rect(target, AnimationStyle::Zoom);
+        assert_eq!(start.w, target.w * OPEN_ZOOM);
+        assert_eq!(start.h, target.h * OPEN_ZOOM);
+        assert_eq!(start.x + start.w / 2.0, target.x + target.w / 2.0);
+        assert_eq!(start.y + start.h / 2.0, target.y + target.h / 2.0);
     }
 
     #[test]
