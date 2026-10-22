@@ -22,6 +22,7 @@ use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
+use smithay::utils::Transform;
 
 use crate::compositor::state::{ClientState, Crab};
 use crate::compositor::{input, render};
@@ -44,7 +45,7 @@ struct LoopData {
 /// it; `Output::finish_frame` then reports the follow-up frame, so no request
 /// is lost (`COMPOSITOR.md` §8.2).
 fn request_redraw(data: &mut LoopData) {
-    if data.state.output_state.queue_redraw() {
+    if data.state.output.model.queue_redraw() {
         data.backend.window().request_redraw();
     }
 }
@@ -58,7 +59,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     let display: Display<Crab> =
         Display::new().map_err(|err| anyhow::anyhow!("create the Wayland display: {err:?}"))?;
     let dh = display.handle();
-    let mut state = Crab::new(&dh, config);
+    // Winit's default GL framebuffer is bottom-up, so the renderer must flip
+    // it; this is not the output's Wayland transform, which stays Normal.
+    let mut state = Crab::new(&dh, config, Transform::Flipped180);
 
     let socket = ListeningSocket::bind_auto(SOCKET_BASENAME, 0..32)
         .map_err(|err| anyhow::anyhow!("bind a Wayland socket: {err:?}"))?;
@@ -75,7 +78,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     backend.window().set_cursor_visible(false);
     state.set_size(backend.window_size());
     // Seed the redraw state machine so every later frame takes the same path.
-    state.output_state.queue_redraw();
+    state.output.model.queue_redraw();
     backend.window().request_redraw();
 
     let mut event_loop: EventLoop<'static, LoopData> =
@@ -95,8 +98,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 WinitEvent::Redraw => {
                     // winit's frame events are requests themselves (an expose or
                     // a resize), so fold them in before starting the frame.
-                    data.state.output_state.queue_redraw();
-                    if data.state.output_state.begin_frame() {
+                    data.state.output.model.queue_redraw();
+                    if data.state.output.model.begin_frame() {
                         // Re-time the animation clock to the frame being drawn.
                         // winit reports no presentation timestamp, so the loop
                         // clock read here stands in for the vertical blank; the
@@ -110,11 +113,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                         // schedules it; once everything settles the loop stops
                         // requesting frames and the compositor goes idle.
                         if data.state.is_animating() {
-                            data.state.output_state.queue_redraw();
+                            data.state.output.model.queue_redraw();
                         }
                         // The swap in `render` waits for the vertical blank; a
                         // request that arrived during it needs another frame.
-                        if data.state.output_state.finish_frame() {
+                        if data.state.output.model.finish_frame() {
                             data.backend.window().request_redraw();
                         }
                     }
@@ -187,7 +190,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     tracing::error!(?err, "failed to flush Wayland clients");
                 }
                 state.prune_dead();
-                if state.output_state.queue_redraw() {
+                if state.output.model.queue_redraw() {
                     backend.window().request_redraw();
                 }
                 Ok(PostAction::Continue)

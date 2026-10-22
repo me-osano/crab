@@ -38,7 +38,7 @@ pub(crate) fn handle<B: InputBackend>(state: &mut Crab, event: InputEvent<B>) {
         InputEvent::Keyboard { event } => keyboard::<B>(state, event),
         InputEvent::PointerMotion { event } => motion_relative::<B>(state, &event),
         InputEvent::PointerMotionAbsolute { event } => {
-            let position = event.position_transformed(state.size);
+            let position = event.position_transformed(state.output.size);
             motion(state, position, event.time_msec());
         }
         InputEvent::PointerButton { event } => button::<B>(state, &event),
