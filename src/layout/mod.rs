@@ -1,4 +1,4 @@
-//! Pure layout engine for crawm.
+//! Pure layout engine for crab.
 //!
 //! A [`Layout`] is a **pure function** from a [`LayoutInput`] to a list of
 //! [`Placement`]s: no globals, no I/O, no Smithay. That is what makes layouts

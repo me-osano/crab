@@ -1,4 +1,4 @@
-//! Pure data model for crawm: identifiers, geometry, colors, spaces, windows,
+//! Pure data model for crab: identifiers, geometry, colors, spaces, windows,
 //! outputs, focus, and rules.
 //!
 //! This module has **no** Smithay or Wayland dependencies (see `ROADMAP.md` §5),

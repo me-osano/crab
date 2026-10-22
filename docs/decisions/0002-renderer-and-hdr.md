@@ -8,7 +8,7 @@
 
 `COMPOSITOR.md` §4 assumes Smithay's **GLES** renderer. mango implements HDR/colour
 management only on a separate **Vulkan** branch, which raised the question: does
-`crawm` need Vulkan to support HDR?
+`crab` need Vulkan to support HDR?
 
 Verified state of the stack (2026-10-16):
 

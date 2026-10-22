@@ -1,16 +1,16 @@
 [Unit]
-Description=crawm compositor
+Description=crab compositor
 PartOf=graphical-session.target
 After=graphical-session-pre.target
 Before=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/crawm
+ExecStart=/usr/bin/crab
 Restart=on-failure
 RestartSec=2
 # The compositor needs to talk to the session manager and take over DRM.
-Environment=XDG_CURRENT_DESKTOP=crawm
+Environment=XDG_CURRENT_DESKTOP=crab
 Environment=XDG_SESSION_TYPE=wayland
 
 [Install]

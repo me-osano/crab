@@ -1,11 +1,17 @@
-//! Drawing one frame: clear, borders, every visible surface, then the cursor.
+//! Drawing one frame: borders, every visible surface, then the cursor.
 //!
-//! M1 was a full-surface redraw with no damage tracking and no z-ordering. M2
-//! adds the parts of the scene the pure layout engine deliberately does not
+//! The whole scene is one ordered list of [`SceneElement`]s, handed to
+//! Smithay's [`OutputDamageTracker`](smithay::backend::renderer::damage::OutputDamageTracker).
+//! The tracker clears and repaints only what changed, subtracts opaque content
+//! from the layers below, and reports which elements were actually presented.
+//! When it finds no damage the frame is not submitted and no `wl_surface.frame`
+//! callbacks fire for a picture the clients never saw.
+//!
+//! The scene includes the parts the pure layout engine deliberately does not
 //! describe: **borders** around tiled and floating windows, the **z-order**
 //! (tiled below floating below fullscreen below popups), skipping the windows
-//! the current view hides (`COMPOSITOR.md` §7.1), and the compositor's own
-//! **cursor**. Real damage tracking lands later.
+//! the current view hides (`COMPOSITOR.md` §7.1), fading-out windows in their
+//! former stacking group, and the compositor's own **cursor**.
 //!
 //! Windows are drawn at their **animated** rectangle (`ManagedWindow::visual_*`),
 //! sampled from the frame clock the backend has just re-timed, so the borders
@@ -24,13 +30,15 @@
 //! buffer, and the backends hide the host cursor so only this one is visible
 //! (TODO.md §1.3).
 
-use crawm::animation::Clocks;
-use crawm::config::AnimationStyle;
-use crawm::core::Color;
-use crawm::core::WindowId;
+use crab::animation::Clocks;
+use crab::config::AnimationStyle;
+use crab::core::Color;
+use crab::core::WindowId;
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::RenderElementStates;
+use smithay::backend::renderer::element::render_elements;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
@@ -38,10 +46,10 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::{GlesFrame, GlesRenderer, GlesTexture};
-use smithay::backend::renderer::utils::draw_render_elements;
-use smithay::backend::renderer::utils::{CommitCounter, DamageSet};
-use smithay::backend::renderer::{Frame as _, ImportAll, Renderer, Texture};
+use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
+use smithay::backend::renderer::{ImportAll, Renderer, Texture};
 use smithay::backend::winit::WinitGraphicsBackend;
+use smithay::desktop::{LayerMap, PopupManager, layer_map_for_output};
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -51,9 +59,10 @@ use smithay::utils::{
 use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
 };
+use smithay::wayland::shell::wlr_layer::Layer;
 
 use crate::compositor::fit::WindowFit;
-use crate::compositor::state::{ClosingWindow, Crawm, ManagedWindow};
+use crate::compositor::state::{ClosingWindow, Crab, ManagedWindow, WindowLayer};
 
 /// Background color of the compositor (dark slate).
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
@@ -64,288 +73,400 @@ const CLOSE_SLIDE: f64 = 16.0;
 /// How small a zooming window gets by the end of its close.
 const CLOSE_ZOOM: f64 = 0.94;
 
+render_elements! {
+    /// Every kind of element the scene is made of, so a whole frame is one
+    /// ordered list. That is what lets Smithay's damage tracker account for
+    /// opaque regions and changed elements across borders, surfaces, snapshots
+    /// and the cursor together.
+    SceneElement<=GlesRenderer>;
+    Solid=SolidColorRenderElement,
+    Surface=WaylandSurfaceRenderElement<GlesRenderer>,
+    Fitted=FittedSurface<GlesRenderer>,
+    Closing=ClosingSurface,
+}
+
 /// Renders the whole scene into the winit window and presents it.
-pub(crate) fn render(state: &Crawm, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
+pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
     let size = backend.window_size();
-    let damage = Rectangle::from_size(size);
     tracing::trace!(width = size.w, height = size.h, "rendering a frame");
+    // The buffer we are about to draw into may still hold an older frame. The
+    // damage tracker must repaint everything that changed since that frame, not
+    // just since the previous one. `0` means "nothing is known", which makes the
+    // tracker repaint the whole output.
+    let age = backend.buffer_age().unwrap_or(0);
 
-    {
-        let (renderer, mut framebuffer) = match backend.bind() {
-            Ok(bound) => bound,
-            Err(err) => {
-                tracing::error!(?err, "failed to bind the framebuffer");
-                return;
-            }
+    let (renderer, mut framebuffer) = match backend.bind() {
+        Ok(bound) => bound,
+        Err(err) => {
+            tracing::error!(?err, "failed to bind the framebuffer");
+            return;
+        }
+    };
+
+    // Positions are logical; with M2's `Scale::Integer(1)` output they map
+    // one-to-one onto the renderer's physical pixels.
+    let border_width = state
+        .output_state
+        .current_space_state()
+        .map_or(0.0, |space| space.params.border_width)
+        .max(0.0) as i32;
+    let focused = state.focused_id();
+
+    // Build the scene back-to-front. The damage tracker wants front-to-back, so
+    // the list is reversed once, after everything has been collected.
+    let mut elements: Vec<SceneElement> = Vec::new();
+    let mut frame_surfaces: Vec<WlSurface> = Vec::new();
+
+    // Layer-shell surfaces are arranged by Smithay's layer map. Background and
+    // bottom layers go under ordinary windows; top and overlay layers go over
+    // them and over window popups, matching the protocol's order.
+    let layer_map = layer_map_for_output(&state.output);
+    collect_layer_pass(
+        state,
+        &mut *renderer,
+        &layer_map,
+        &[Layer::Background, Layer::Bottom],
+        &mut elements,
+    );
+
+    // Tiled, floating, always-on-top floating, then fullscreen/maximized. The
+    // floating groups are ordered by the focus stack, least recently focused
+    // first, so focusing a floating window raises it above its peers.
+    let windows = state.stacked_windows();
+    for layer in [
+        WindowLayer::Tiled,
+        WindowLayer::Floating,
+        WindowLayer::FloatingOnTop,
+        WindowLayer::Covering,
+    ] {
+        collect_window_layer(
+            state,
+            &mut *renderer,
+            border_width,
+            focused,
+            layer,
+            &windows,
+            &mut elements,
+        );
+    }
+
+    // Popups draw over every toplevel. Each popup belongs to a toplevel
+    // (`PopupManager` tracks the tree), so they are gathered per window; a popup
+    // without a buffer yet yields no elements.
+    for id in &windows {
+        let Some(window) = state.window(*id) else {
+            continue;
         };
-
-        // Positions are logical; with M2's `Scale::Integer(1)` output they map
-        // one-to-one onto the renderer's physical pixels.
-        let border_width = state
-            .output_state
-            .current_space_state()
-            .map_or(0.0, |space| space.params.border_width)
-            .max(0.0) as i32;
-        let focused = state.focused_id();
-
-        // Windows that are gone but still fading out, built from their kept
-        // last buffer below the popups and above the living windows. The
-        // texture is imported afresh on each frame of the fade; there are only
-        // a handful of such frames, and it keeps the renderer out of the state.
-        let closing_surfaces: Vec<ClosingSurface> = state
-            .closings
-            .iter()
-            .filter_map(|closing| ClosingSurface::new(&mut *renderer, closing, &state.frame_clock))
-            .collect();
-
-        // Collect in stacking order: tiled, then floating, then always-on-top
-        // floating, then fullscreen on top. Popups draw over everything. Borders
-        // are a separate pass so the window surfaces stay above their own
-        // frames, and the popups are separate again because they keep their own
-        // size: they are placed by the client against the window geometry, not
-        // by the layout.
-        let mut borders: Vec<SolidColorRenderElement> = Vec::new();
-        let mut surfaces: Vec<FittedSurface<GlesRenderer>> = Vec::new();
-        let mut popups: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-
-        let tiled = state.windows.iter().filter(|window| {
-            window.mapped && window.visible && window.window.is_tiled() && !window.window.maximized
-        });
-        let floating = state.windows.iter().filter(|window| {
-            window.mapped
-                && window.visible
-                && window.window.floating
-                && !window.window.always_on_top
-                && !window.window.fullscreen
-                && !window.window.maximized
-        });
-        let floating_on_top = state.windows.iter().filter(|window| {
-            window.mapped
-                && window.visible
-                && window.window.floating
-                && window.window.always_on_top
-                && !window.window.fullscreen
-                && !window.window.maximized
-        });
-        let covering = state.windows.iter().filter(|window| {
-            window.mapped && window.visible && (window.window.fullscreen || window.window.maximized)
-        });
-
-        collect_pass(
-            state,
-            &mut *renderer,
-            border_width,
-            focused,
-            tiled,
-            &mut borders,
-            &mut surfaces,
-        );
-        collect_pass(
-            state,
-            &mut *renderer,
-            border_width,
-            focused,
-            floating,
-            &mut borders,
-            &mut surfaces,
-        );
-        collect_pass(
-            state,
-            &mut *renderer,
-            border_width,
-            focused,
-            floating_on_top,
-            &mut borders,
-            &mut surfaces,
-        );
-        collect_pass(
-            state,
-            &mut *renderer,
-            border_width,
-            focused,
-            covering,
-            &mut borders,
-            &mut surfaces,
-        );
-
-        // Popups last: they draw over every toplevel. Each popup belongs to a
-        // toplevel (`PopupManager` tracks the tree), so they are gathered per
-        // window; a popup without a buffer yet yields no elements.
-        for window in state.windows.iter().filter(|w| w.mapped && w.visible) {
-            let origin = window.visual_origin(&state.frame_clock);
-            let alpha = window.open_alpha(&state.frame_clock);
-            for (popup, offset) in crate::compositor::state::popup_offsets(window) {
-                popups.extend(render_elements_from_surface_tree(
+        let origin = window.visual_origin(&state.frame_clock);
+        let alpha = window.open_alpha(&state.frame_clock);
+        for (popup, offset) in crate::compositor::state::popup_offsets(window) {
+            elements.extend(
+                render_elements_from_surface_tree(
                     &mut *renderer,
                     popup.wl_surface(),
                     (origin + offset).to_physical(1),
                     1.0,
                     alpha,
                     Kind::Unspecified,
-                ));
-            }
-        }
-
-        // And the cursor on top of all of it. A client's own cursor surface and
-        // the built-in arrow are mutually exclusive, so they stay in separate
-        // element lists (they would otherwise need one enum implementing
-        // `RenderElement`). Until the backend reports where the pointer is
-        // there is nothing to draw.
-        let mut cursor_shape: Vec<SolidColorRenderElement> = Vec::new();
-        let mut cursor_surface: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-        if state.pointer_seen {
-            match &state.cursor_image {
-                CursorImageStatus::Hidden => {}
-                CursorImageStatus::Named(_) => {
-                    // One arrow for every named icon until the icon set ships (M6).
-                    cursor_shape = arrow_cursor(state.pointer_location);
-                }
-                CursorImageStatus::Surface(surface) if surface.is_alive() => {
-                    let hotspot = hotspot_of(surface);
-                    // Everything is drawn at scale 1, so logical and physical
-                    // pixels are the same and only the hotspot offset is applied.
-                    let location = Point::<i32, Physical>::from((
-                        (state.pointer_location.x - f64::from(hotspot.x)).round() as i32,
-                        (state.pointer_location.y - f64::from(hotspot.y)).round() as i32,
-                    ));
-                    cursor_surface = render_elements_from_surface_tree(
-                        &mut *renderer,
-                        surface,
-                        location,
-                        1.0,
-                        1.0,
-                        Kind::Cursor,
-                    );
-                }
-                // The client destroyed its cursor surface without setting a new one.
-                CursorImageStatus::Surface(_) => {}
-            }
-            // A cursor surface with no buffer yet would leave the pointer
-            // invisible; show the arrow until the client commits one.
-            if cursor_shape.is_empty()
-                && cursor_surface.is_empty()
-                && !matches!(state.cursor_image, CursorImageStatus::Hidden)
-            {
-                cursor_shape = arrow_cursor(state.pointer_location);
-            }
-        }
-
-        match renderer.render(&mut framebuffer, size, Transform::Flipped180) {
-            Ok(mut frame) => {
-                if let Err(err) = frame.clear(BACKGROUND.into(), &[damage]) {
-                    tracing::error!(?err, "failed to clear the frame");
-                }
-                if let Err(err) =
-                    draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &borders, &[damage])
-                {
-                    tracing::error!(?err, "failed to draw the borders");
-                }
-                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
-                    &mut frame,
-                    1.0,
-                    &surfaces,
-                    &[damage],
-                ) {
-                    tracing::error!(?err, "failed to draw the scene");
-                }
-                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
-                    &mut frame,
-                    1.0,
-                    &closing_surfaces,
-                    &[damage],
-                ) {
-                    tracing::error!(?err, "failed to draw the closing windows");
-                }
-                if let Err(err) =
-                    draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &popups, &[damage])
-                {
-                    tracing::error!(?err, "failed to draw the popups");
-                }
-                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
-                    &mut frame,
-                    1.0,
-                    &cursor_shape,
-                    &[damage],
-                ) {
-                    tracing::error!(?err, "failed to draw the cursor shape");
-                }
-                if let Err(err) = draw_render_elements::<GlesRenderer, _, _>(
-                    &mut frame,
-                    1.0,
-                    &cursor_surface,
-                    &[damage],
-                ) {
-                    tracing::error!(?err, "failed to draw the client cursor");
-                }
-                if let Err(err) = frame.finish() {
-                    tracing::error!(?err, "failed to finish the frame");
-                }
-            }
-            Err(err) => tracing::error!(?err, "failed to begin the frame"),
-        }
-
-        let time = state.frame_clock.now_ms();
-        for window in state
-            .windows
-            .iter()
-            .filter(|window| window.mapped && window.visible)
-        {
-            send_frame_callbacks(window.wl_surface(), time);
-            for (popup, _) in crate::compositor::state::popup_offsets(window) {
-                send_frame_callbacks(popup.wl_surface(), time);
-            }
-        }
-        // A client's cursor surface animates like any other (busy spinners).
-        if let CursorImageStatus::Surface(surface) = &state.cursor_image {
-            send_frame_callbacks(surface, time);
+                )
+                .into_iter()
+                .map(SceneElement::Surface),
+            );
         }
     }
 
-    // Clients must have seen the frame before we block in the swap.
-    if let Err(err) = backend.submit(Some(&[damage])) {
+    collect_layer_pass(
+        state,
+        &mut *renderer,
+        &layer_map,
+        &[Layer::Top, Layer::Overlay],
+        &mut elements,
+    );
+
+    // Frame callbacks are only for surfaces that made it into a presented
+    // frame. Collect the surface roots now; the per-surface check happens after
+    // rendering, against the tracker's presentation states.
+    for id in &windows {
+        let Some(window) = state.window(*id) else {
+            continue;
+        };
+        if !window.mapped || !window.visible {
+            continue;
+        }
+        frame_surfaces.push(window.wl_surface().clone());
+        for (popup, _) in crate::compositor::state::popup_offsets(window) {
+            frame_surfaces.push(popup.wl_surface().clone());
+        }
+    }
+    for layer in layer_map.layers() {
+        frame_surfaces.push(layer.wl_surface().clone());
+        for (popup, _) in PopupManager::popups_for_surface(layer.wl_surface()) {
+            frame_surfaces.push(popup.wl_surface().clone());
+        }
+    }
+    drop(layer_map);
+
+    // And the cursor on top of all of it. A client's own cursor surface and the
+    // built-in arrow are mutually exclusive; the arrow is made of solid runs so
+    // no icon set or texture is needed.
+    if state.pointer_seen {
+        let mut drew_cursor = false;
+        match &state.cursor_image {
+            CursorImageStatus::Hidden => {}
+            CursorImageStatus::Named(_) => {
+                // `wp_cursor_shape` is not advertised yet, so a named icon is
+                // Smithay's default. Clients that want text or resize cursors
+                // send their own surface through `wl_pointer.set_cursor` until
+                // icon-theme loading lands.
+                elements.extend(
+                    arrow_cursor(state.pointer_location)
+                        .into_iter()
+                        .map(SceneElement::Solid),
+                );
+                drew_cursor = true;
+            }
+            CursorImageStatus::Surface(surface) if surface.is_alive() => {
+                let hotspot = hotspot_of(surface);
+                // Everything is drawn at scale 1, so logical and physical pixels
+                // are the same and only the hotspot offset is applied.
+                let location = Point::<i32, Physical>::from((
+                    (state.pointer_location.x - f64::from(hotspot.x)).round() as i32,
+                    (state.pointer_location.y - f64::from(hotspot.y)).round() as i32,
+                ));
+                let cursor = render_elements_from_surface_tree(
+                    &mut *renderer,
+                    surface,
+                    location,
+                    1.0,
+                    1.0,
+                    Kind::Cursor,
+                );
+                drew_cursor = !cursor.is_empty();
+                elements.extend(cursor.into_iter().map(SceneElement::Surface));
+                frame_surfaces.push(surface.clone());
+            }
+            // The client destroyed its cursor surface without setting a new one.
+            CursorImageStatus::Surface(_) => {}
+        }
+        // A cursor surface with no buffer yet would leave the pointer invisible;
+        // show the arrow until the client commits one.
+        if !drew_cursor && !matches!(state.cursor_image, CursorImageStatus::Hidden) {
+            elements.extend(
+                arrow_cursor(state.pointer_location)
+                    .into_iter()
+                    .map(SceneElement::Solid),
+            );
+        }
+    }
+
+    // The scene was collected bottom-to-top; the tracker walks it top-to-bottom
+    // so it can subtract opaque regions before deciding what is damaged.
+    elements.reverse();
+
+    let (damage, states) = match state.damage_tracker.render_output(
+        &mut *renderer,
+        &mut framebuffer,
+        age,
+        &elements,
+        BACKGROUND,
+    ) {
+        Ok(result) => (result.damage.cloned(), result.states),
+        Err(err) => {
+            tracing::error!(?err, "failed to render the output");
+            return;
+        }
+    };
+
+    // Nothing changed: do not present a new frame, and do not fire frame
+    // callbacks for a frame the clients never saw.
+    let Some(damage) = damage.filter(|damage| !damage.is_empty()) else {
+        return;
+    };
+
+    // The framebuffer borrows `backend`; end it before asking it to swap.
+    drop(framebuffer);
+
+    tracing::trace!(
+        damage = ?damage,
+        elements = elements.len(),
+        surfaces = states.states.len(),
+        "presenting a frame"
+    );
+
+    // Present first: a frame callback promises that its surface was shown, so
+    // it must not fire if the swap fails.
+    if let Err(err) = backend.submit(Some(&damage)) {
         tracing::error!(?err, "failed to submit the frame");
+        return;
+    }
+
+    let time = state.frame_clock.now_ms();
+    for surface in &frame_surfaces {
+        send_frame_callbacks(surface, time, &states);
     }
 }
 
-/// Appends one pass of windows: their borders, then their surfaces.
+/// Appends one layer-shell pass (background/bottom or top/overlay), including
+/// each surface's popups.
+fn collect_layer_pass(
+    state: &Crab,
+    renderer: &mut GlesRenderer,
+    map: &LayerMap,
+    kinds: &[Layer],
+    out: &mut Vec<SceneElement>,
+) {
+    for &kind in kinds {
+        for layer in map.layers_on(kind) {
+            let Some(geometry) = map.layer_geometry(layer) else {
+                continue;
+            };
+            let origin = geometry.loc + state.layer_offset(layer.wl_surface());
+            let alpha = state.layer_alpha(layer.wl_surface());
+            out.extend(
+                render_elements_from_surface_tree(
+                    renderer,
+                    layer.wl_surface(),
+                    origin.to_physical(1),
+                    1.0,
+                    alpha,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(SceneElement::Surface),
+            );
+            // Popups are positioned against their parent's surface origin.
+            for (popup, location) in PopupManager::popups_for_surface(layer.wl_surface()) {
+                let offset = location - popup.geometry().loc;
+                out.extend(
+                    render_elements_from_surface_tree(
+                        renderer,
+                        popup.wl_surface(),
+                        (origin + offset).to_physical(1),
+                        1.0,
+                        alpha,
+                        Kind::Unspecified,
+                    )
+                    .into_iter()
+                    .map(SceneElement::Surface),
+                );
+            }
+        }
+    }
+}
+
+/// Appends one stacking group of windows and the closing windows that belong
+/// to it.
+///
+/// A closing window keeps the group and index it had when it went away, so it
+/// fades out where it was instead of jumping above the windows that are still
+/// alive. The index is clamped to the group's current length, so removing a
+/// neighbour cannot make a snapshot disappear or jump to another group.
 #[allow(clippy::too_many_arguments)]
-fn collect_pass<'a>(
-    state: &Crawm,
+fn collect_window_layer(
+    state: &Crab,
     renderer: &mut GlesRenderer,
     border_width: i32,
     focused: Option<WindowId>,
-    windows: impl Iterator<Item = &'a ManagedWindow>,
-    borders: &mut Vec<SolidColorRenderElement>,
-    surfaces: &mut Vec<FittedSurface<GlesRenderer>>,
+    layer: WindowLayer,
+    order: &[WindowId],
+    out: &mut Vec<SceneElement>,
 ) {
-    for window in windows {
-        let location = window.visual_origin(&state.frame_clock);
-        let size = window.visual_size(&state.frame_clock);
-        let alpha = window.open_alpha(&state.frame_clock);
-        // A fullscreen or maximized window covers the screen, so a border would
-        // only clip it.
-        if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
-            let color = if focused == Some(window.id()) {
-                border_color(state.config.border_color)
-            } else {
-                border_color(state.config.unfocused_border_color)
-            };
-            let color = Color32F::new(color.r(), color.g(), color.b(), color.a() * alpha);
-            borders.extend(borders_for(location, size, border_width, color));
+    let live: Vec<&ManagedWindow> = order
+        .iter()
+        .filter_map(|id| state.window(*id))
+        .filter(|window| window.mapped && window.visible && window.stack_layer() == layer)
+        .collect();
+
+    let closings: Vec<&ClosingWindow> = state
+        .closings
+        .iter()
+        .filter(|closing| closing.layer == layer)
+        .collect();
+    let mut slots = closing_slots(
+        closings.iter().map(|closing| closing.stack_index),
+        live.len(),
+    )
+    .into_iter()
+    .peekable();
+
+    for index in 0..=live.len() {
+        while let Some((position, closing)) = slots.peek().copied() {
+            if position != index {
+                break;
+            }
+            slots.next();
+            if let Some(surface) =
+                ClosingSurface::new(renderer, closings[closing], &state.frame_clock)
+            {
+                out.push(SceneElement::Closing(surface));
+            }
         }
-        // The toplevel is drawn from its geometry origin pulled back out by the
-        // client's own decoration inset, so the *window geometry* — what the
-        // layout placed and what `borders_for` frames — lands on the rect.
-        // `WindowFit` then maps whatever the client has committed onto that
-        // rect, which is the same thing while it is the size it was asked to
-        // be; pointer input reads the same fit backwards.
-        surfaces.extend(fitted_surface_tree(
+        if let Some(window) = live.get(index) {
+            collect_window(state, renderer, border_width, focused, window, out);
+        }
+    }
+}
+
+/// Places closing snapshots among a layer's live windows.
+///
+/// Each snapshot keeps the index it had when its window went away; the index
+/// is clamped to the live group's current length, so removing a neighbour
+/// cannot make the snapshot disappear or jump to another group. The stable
+/// sort keeps several snapshots captured at the same index in the order they
+/// closed.
+fn closing_slots(indices: impl IntoIterator<Item = usize>, live_len: usize) -> Vec<(usize, usize)> {
+    let mut slots: Vec<(usize, usize)> = indices
+        .into_iter()
+        .enumerate()
+        .map(|(closing, index)| (index.min(live_len), closing))
+        .collect();
+    slots.sort_by_key(|(position, _)| *position);
+    slots
+}
+
+/// Appends one live window's border and surfaces, in that order.
+fn collect_window(
+    state: &Crab,
+    renderer: &mut GlesRenderer,
+    border_width: i32,
+    focused: Option<WindowId>,
+    window: &ManagedWindow,
+    out: &mut Vec<SceneElement>,
+) {
+    let location = window.visual_origin(&state.frame_clock);
+    let size = window.visual_size(&state.frame_clock);
+    let alpha = window.open_alpha(&state.frame_clock);
+    // A fullscreen or maximized window covers the screen, so a border would
+    // only clip it.
+    if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
+        let color = if focused == Some(window.id()) {
+            border_color(state.config.border_color)
+        } else {
+            border_color(state.config.unfocused_border_color)
+        };
+        let color = Color32F::new(color.r(), color.g(), color.b(), color.a() * alpha);
+        out.extend(
+            borders_for(location, size, border_width, color)
+                .into_iter()
+                .map(SceneElement::Solid),
+        );
+    }
+    // The toplevel is drawn from its geometry origin pulled back out by the
+    // client's own decoration inset, so the *window geometry* — what the layout
+    // placed and what `borders_for` frames — lands on the rect. `WindowFit` then
+    // maps whatever the client has committed onto that rect, which is the same
+    // thing while it is the size it was asked to be; pointer input reads the
+    // same fit backwards.
+    out.extend(
+        fitted_surface_tree(
             renderer,
             window.wl_surface(),
             window.fit(&state.frame_clock),
             alpha,
-        ));
-    }
+        )
+        .into_iter()
+        .map(SceneElement::Fitted),
+    );
 }
 
 /// Converts a config color into the renderer's representation.
@@ -379,7 +500,13 @@ fn fitted_surface_tree(
         .filter_map(|inner| {
             let natural = inner.geometry(Scale::from(1.0));
             let (src, dst) = fit.map_element(natural, inner.src())?;
-            Some(FittedSurface { inner, src, dst })
+            Some(FittedSurface {
+                inner,
+                src,
+                dst,
+                natural,
+                fit,
+            })
         })
         .collect()
 }
@@ -450,7 +577,7 @@ impl ClosingSurface {
 fn close_dst(
     dst: Rectangle<i32, Physical>,
     style: AnimationStyle,
-    visual: crawm::core::Rect,
+    visual: crab::core::Rect,
     progress: f64,
 ) -> Rectangle<i32, Physical> {
     match style {
@@ -495,6 +622,11 @@ where
     src: Rectangle<f64, BufferCoords>,
     /// Where to put it.
     dst: Rectangle<i32, Physical>,
+    /// Where smithay would have drawn the element before the fit moved it.
+    natural: Rectangle<i32, Physical>,
+    /// The fit this element was mapped through, kept so damage can be mapped
+    /// through the same transform as the pixels.
+    fit: WindowFit,
 }
 
 impl<R> Element for FittedSurface<R>
@@ -524,13 +656,38 @@ where
 
     fn damage_since(
         &self,
-        _scale: Scale<f64>,
-        _commit: Option<CommitCounter>,
+        scale: Scale<f64>,
+        commit: Option<CommitCounter>,
     ) -> DamageSet<i32, Physical> {
-        // The mapping moves with every animated frame, so damage from an
-        // earlier commit says nothing about where this element draws now.
-        // Real damage tracking (M5) will have to recompute it from the fit.
-        DamageSet::from_slice(&[Rectangle::from_size(self.dst.size)])
+        // The inner element reports damage relative to its own natural origin;
+        // run each rectangle through the same fit as the pixels so the output
+        // only repaints what actually changed *and* where it was drawn.
+        self.inner
+            .damage_since(scale, commit)
+            .into_iter()
+            .filter_map(|damage| {
+                let natural = Rectangle::new(self.natural.loc + damage.loc, damage.size);
+                self.fit
+                    .map_rect(natural)
+                    .map(|dst| Rectangle::new(dst.loc - self.dst.loc, dst.size))
+            })
+            .collect()
+    }
+
+    fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        // Map the client's opaque regions through the fit, exactly like damage.
+        // Without this the tracker cannot tell that a fully covered window is
+        // hidden, so it would repaint it and fire its frame callbacks.
+        self.inner
+            .opaque_regions(scale)
+            .into_iter()
+            .filter_map(|region| {
+                let natural = Rectangle::new(self.natural.loc + region.loc, region.size);
+                self.fit
+                    .map_rect(natural)
+                    .map(|dst| Rectangle::new(dst.loc - self.dst.loc, dst.size))
+            })
+            .collect()
     }
 
     fn alpha(&self) -> f32 {
@@ -799,14 +956,22 @@ fn arrow_cursor(origin: Point<f64, Logical>) -> Vec<SolidColorRenderElement> {
 /// The timestamp is the frame clock's, i.e. the presentation time of the frame
 /// the client's callback fired in — the same instant every animation drawn in
 /// this frame was sampled at.
-fn send_frame_callbacks(surface: &WlSurface, time: u32) {
+///
+/// Only surfaces whose element was presented are answered. A surface that is
+/// fully hidden behind opaque content, or wholly outside the output, is not
+/// redrawn this frame, so telling its client it was would make it animate
+/// against a picture nobody saw.
+fn send_frame_callbacks(surface: &WlSurface, time: u32, states: &RenderElementStates) {
     with_surface_tree_downward(
         surface,
         (),
         |_, _, &()| TraversalAction::DoChildren(()),
-        |_surface, states, &()| {
+        |surface, surface_states, &()| {
+            if !states.element_was_presented(Id::from_wayland_resource(surface)) {
+                return;
+            }
             // A subsurface may not have surface state until its first commit.
-            for callback in states
+            for callback in surface_states
                 .cached_state
                 .get::<SurfaceAttributes>()
                 .current()
@@ -825,9 +990,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closing_snapshots_keep_their_slot_and_close_order() {
+        assert_eq!(
+            closing_slots([2, 0, 5, 1], 3),
+            vec![(0, 1), (1, 3), (2, 0), (3, 2)],
+            "indices past the live group clamp to its end"
+        );
+        assert_eq!(
+            closing_slots([1, 1, 0], 2),
+            vec![(0, 2), (1, 0), (1, 1)],
+            "snapshots captured at the same index keep their close order"
+        );
+    }
+
+    #[test]
     fn a_closing_slide_falls_and_keeps_its_size() {
         let dst = Rectangle::<i32, Physical>::new((10, 20).into(), (100, 50).into());
-        let visual = crawm::core::Rect::new(10.0, 20.0, 100.0, 50.0);
+        let visual = crab::core::Rect::new(10.0, 20.0, 100.0, 50.0);
         let start = close_dst(dst, AnimationStyle::Slide, visual, 0.0);
         let end = close_dst(dst, AnimationStyle::Slide, visual, 1.0);
         assert_eq!(start, dst, "a close starts exactly where the window was");
@@ -838,7 +1017,7 @@ mod tests {
     #[test]
     fn a_closing_zoom_shrinks_around_the_window_center() {
         let dst = Rectangle::<i32, Physical>::new((100, 100).into(), (200, 100).into());
-        let visual = crawm::core::Rect::new(100.0, 100.0, 200.0, 100.0);
+        let visual = crab::core::Rect::new(100.0, 100.0, 200.0, 100.0);
         let end = close_dst(dst, AnimationStyle::Zoom, visual, 1.0);
         assert_eq!(end.size.w, (200.0 * CLOSE_ZOOM).round() as i32);
         assert_eq!(end.size.h, (100.0 * CLOSE_ZOOM).round() as i32);

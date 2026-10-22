@@ -10,7 +10,7 @@ pub fn init(filter: Option<&str>) {
     let directives = filter
         .map(str::to_owned)
         .or_else(|| std::env::var("RUST_LOG").ok())
-        .unwrap_or_else(|| "crawm=debug,info".to_owned());
+        .unwrap_or_else(|| "crab=debug,info".to_owned());
 
     let env_filter = EnvFilter::try_new(&directives).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -20,7 +20,7 @@ pub fn init(filter: Option<&str>) {
         .init();
 }
 
-/// Installs a panic hook that records a backtrace under `$XDG_STATE_HOME/crawm/`.
+/// Installs a panic hook that records a backtrace under `$XDG_STATE_HOME/crab/`.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -28,8 +28,8 @@ pub fn install_panic_hook() {
         if let Some(path) = crash_log_path() {
             let report = format!("{info}\n\n{backtrace}\n");
             match std::fs::write(&path, report) {
-                Ok(()) => eprintln!("crawm: panic; details written to {}", path.display()),
-                Err(err) => eprintln!("crawm: panic; could not write {}: {err}", path.display()),
+                Ok(()) => eprintln!("crab: panic; details written to {}", path.display()),
+                Err(err) => eprintln!("crab: panic; could not write {}: {err}", path.display()),
             }
         }
         previous(info);
@@ -42,7 +42,7 @@ fn crash_log_path() -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    let dir = base.join("crawm");
+    let dir = base.join("crab");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("crash.log"))
 }

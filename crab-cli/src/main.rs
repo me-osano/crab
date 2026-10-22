@@ -1,19 +1,19 @@
-//! `crawm-cli` — a thin CLI over the crawm IPC socket.
+//! `crab-cli` — a thin CLI over the crab IPC socket.
 //!
 //! ```text
-//! crawm-cli version
-//! crawm-cli outputs | tags | windows | focused-window | layouts
-//! crawm-cli dispatch '{"view-tag":{"index":2}}'
-//! crawm-cli watch
+//! crab-cli version
+//! crab-cli outputs | tags | windows | focused-window | layouts
+//! crab-cli dispatch '{"view-tag":{"index":2}}'
+//! crab-cli watch
 //! ```
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use crawm_ipc::{Action, Client, Request, Response};
+use crab_ipc::{Action, Client, Request, Response};
 
-/// Query and control a running crawm instance.
+/// Query and control a running crab instance.
 #[derive(Debug, Parser)]
-#[command(name = "crawm-cli", version, about)]
+#[command(name = "crab-cli", version, about)]
 struct Args {
     /// Emit compact JSON instead of pretty-printed JSON.
     #[arg(long, global = true)]
@@ -48,7 +48,7 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut client = Client::connect_default().context("connecting to crawm")?;
+    let mut client = Client::connect_default().context("connecting to crab")?;
 
     match args.command {
         Command::Version => print(&client.call(&Request::Version)?, args.raw),
@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
             loop {
                 match client.read_event() {
                     Ok(event) => println!("{}", serde_json::to_string(&event)?),
-                    Err(crawm_ipc::IpcError::Closed) => break,
+                    Err(crab_ipc::IpcError::Closed) => break,
                     Err(err) => return Err(err).context("reading event stream"),
                 }
             }
@@ -85,6 +85,6 @@ fn print(response: &Response, raw: bool) {
     };
     match text {
         Ok(text) => println!("{text}"),
-        Err(err) => eprintln!("crawm-cli: failed to encode response: {err}"),
+        Err(err) => eprintln!("crab-cli: failed to encode response: {err}"),
     }
 }

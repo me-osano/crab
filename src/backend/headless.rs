@@ -5,18 +5,18 @@
 //! config path and returns immediately.
 
 use anyhow::Context as _;
-use crawm::config::Config;
+use crab::config::Config;
 
 /// Runs the headless backend.
 ///
 /// # Errors
 /// Currently only fails if the configuration is invalid.
 pub fn run(config: &Config) -> anyhow::Result<()> {
-    crawm::config::validate(config).context("validating config")?;
+    crab::config::validate(config).context("validating config")?;
     tracing::info!(
         gaps = config.gaps,
         layout = %config.layout,
-        "crawm (headless) validated config; nothing to render"
+        "crab (headless) validated config; nothing to render"
     );
     Ok(())
 }

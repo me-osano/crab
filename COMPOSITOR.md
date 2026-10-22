@@ -1,8 +1,8 @@
-# crawm — Compositor design
+# crab — Compositor design
 
 > Design document and roadmap for a Rust Wayland compositor + window manager that mixes **space-based layouts** (mango), **scrollable tiling and engineering quality** (niri), and **broad protocol coverage and floating/tiling mixing** (COSMIC).
 >
-> Name: `crawm`. Status: **pre-alpha design**.
+> Name: `crab`. Status: **pre-alpha design**.
 > Notes on upstream projects are from memory; verify against current repos before copying any design decision.
 
 ---
@@ -153,12 +153,12 @@ A compositor that treats **layout as a swappable strategy**, not an identity. Us
 ## 5. Repository layout
 
 Use a workspace so layout logic and config can be tested without graphics dependencies.
-The root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style),
+The root `Cargo.toml` is both the `crab` package and the workspace root (niri-style),
 so the compositor lives in a top-level `src/` and the library crates sit beside it.
 
 ```
-crawm/
-├── Cargo.toml                  # `crawm` package + workspace
+crab/
+├── Cargo.toml                  # `crab` package + workspace
 ├── COMPOSITOR.md               # this file
 ├── src/                        # the compositor: Smithay glue, backends, render, handlers
 │   ├── lib.rs                  # library surface: the pure modules only (reusable, testable)
@@ -167,8 +167,8 @@ crawm/
 │   ├── layout/                 # Layout trait + implementations (pure, unit-tested)
 │   └── animation/              # spring/easing curves, animated scalars (pure)
 ├── tests/                      # integration tests using the headless backend
-├── crawm-ipc/                  # IPC types shared by compositor and CLI client
-├── crawm-cli/                  # CLI client: `crawm-cli ...`
+├── crab-ipc/                  # IPC types shared by compositor and CLI client
+├── crab-cli/                  # CLI client: `crab-cli ...`
 ├── resources/
 │   ├── default-config.toml
 │   ├── session/                # .desktop file, systemd units
@@ -191,7 +191,7 @@ src/
 ├── main.rs                     # bin entry point: backend selection, logging, panic hook
 ├── compositor/                 # everything that knows Smithay (binary-side)
 │   ├── mod.rs
-│   ├── state.rs                # Crawm: state + top-level event dispatch
+│   ├── state.rs                # Crab: state + top-level event dispatch
 │   ├── layout.rs               # bridges Smithay windows to the pure layout module
 │   ├── input.rs                # seat events + binds; splits per device class when it earns it
 │   ├── render.rs               # frame composition; splits into render/ when effects need it
@@ -211,7 +211,7 @@ src/
 └── xwayland.rs
 ```
 
-Backends are compiled per cargo feature on the `crawm` package: `backend-winit`
+Backends are compiled per cargo feature on the `crab` package: `backend-winit`
 (nested window, the default dev path) and `backend-tty` (bare-metal DRM/KMS, M4);
 `headless` is always present so tests can run the compositor without graphics.
 
@@ -502,7 +502,7 @@ Idle ──queue_redraw──► Queued ──render──► WaitingForVBlank �
 
 ### 8.4 Damage tracking and scanout
 
-- Use Smithay's `OutputDamageTracker` / `DrmCompositor` so only changed regions are repainted.
+- Use Smithay's `OutputDamageTracker` / `DrmCompositor` so only changed regions are repainted. The winit backend already renders through the tracker; the DRM backend will reuse it for planes.
 - **Direct scanout**: if a single fullscreen window's buffer is scanout-capable (dma-buf, right modifiers), submit it directly to the primary plane. Disable on effect use that touches that window.
 - **Overlay planes**: use for cursor first; video/window overlays are a later optimization.
 - Send `wp_presentation_feedback` and frame callbacks only for surfaces actually shown on that output.
@@ -676,7 +676,7 @@ All effects are optional render passes with a performance budget and a kill swit
 - Super+drag to move, Super+right-drag to resize, as in classic stacking WMs.
 - For tiled windows: dragging converts to floating or reorders, per config.
 - A client may also ask (`xdg_toplevel.move`/`resize`, usually a CSD titlebar drag). The
-  request is accepted only while its serial is the last press crawm sent and the window is
+  request is accepted only while its serial is the last press crab sent and the window is
   still under the pointer; fullscreen and maximized windows ignore it, tiled ones float
   first. Because the press reached the client, its release is forwarded as well — a
   compositor-started drag swallowed the press and swallows the release, but a client that
@@ -697,7 +697,7 @@ Priority: **P0** (needed to boot a usable session), **P1** (needed for a good da
 | `xdg-shell` | P0 | Normal application windows and popups |
 | `linux-dmabuf` | P0 | GPU buffers; needed for performance and most clients |
 | `wlr-layer-shell` | P0 | Bars, launchers, wallpapers, notifications |
-| `xdg-decoration` | P0 | Server-side decoration negotiation |
+| `xdg-decoration` | P0 | Server-side decoration negotiation (prefer server-side) |
 | `viewporter`, `fractional-scale` | P0/P1 | Correct HiDPI behavior |
 | `presentation-time` | P1 | Accurate frame timing for clients |
 | `idle-notify`, `idle-inhibit` | P1 | Idle management (swayidle etc.) |
@@ -750,9 +750,9 @@ plus the event stream.
 
 - **Hot reload** via file watcher with debounce.
 - **Atomic apply:** parse and validate into a new `Config`; only swap if valid.
-- **Errors surface visibly:** on-screen banner plus `crawm-cli validate` for CI/pre-flight.
-- **Default path:** `$XDG_CONFIG_HOME/crawm/config.toml` (falling back to
-  `$HOME/.config/crawm/config.toml`) is read when `--config` is absent. The shipped
+- **Errors surface visibly:** on-screen banner plus `crab-cli validate` for CI/pre-flight.
+- **Default path:** `$XDG_CONFIG_HOME/crab/config.toml` (falling back to
+  `$HOME/.config/crab/config.toml`) is read when `--config` is absent. The shipped
   example is `resources/default-config.toml`.
 - **Toggles accept both spellings:** TOML `true`/`false` and mango's `0`/`1`.
 - **Sections land as their features do:** the current schema is the full example
@@ -762,12 +762,12 @@ plus the event stream.
   written once; unknown keys are ignored and a present-but-wrongly-typed key is an
   error. The pre-`[layout]` flat form is rejected with a message rather than silently reset.
 - `include = ["other.toml"]` support for splitting configs.
-- Provide `crawm-cli config schema` or documented defaults so editors can offer completion later.
+- Provide `crab-cli config schema` or documented defaults so editors can offer completion later.
 
 ### 13.3 Example
 
 The authoritative example is [`resources/default-config.toml`](resources/default-config.toml);
-`crawm --validate --config <path>` checks a copy. Its shape:
+`crab --validate --config <path>` checks a copy. Its shape:
 
 ```toml
 [layout]
@@ -865,13 +865,14 @@ layer_name = ["rofi", "alacritty"]
 **Status:** `[layout]` (including `focus_follows_cursor`), `[animations]` (enabled
 and the open/close styles), `[binds.default]`/`[binds.locked]`, `[mousebinds]`
 (including Super+drag defaults and the `view*_have_client` axis actions),
-`[axisbinds]`, `[autostart] exec_once` and `[[window_rule]]` matching (`app_id`,
+`[axisbinds]`, `[autostart] exec_once`, `[[window_rule]]` matching (`app_id`,
 `title`, `is_floating`, `is_fullscreen`) with floating/size/offset, initial
-space, `pinned`, `always_on_top` and `no_focus` actions are applied at startup.
-The other sections parse and validate so the file can be written once, but their
-behavior lands with M4 (`[input]`, `[output]`), M5.4 (layer rules, the rest of the
-rule schema) and M6 (gestures, layer rules). The built-in key and mouse tables are
-the fallback layer; a config bind replaces the built-in for the same chord.
+space, `pinned`, `always_on_top` and `no_focus` actions, and `[layer_rule]` open
+animations by layer namespace are applied at startup. The other sections parse
+and validate so the file can be written once, but their behavior lands with M4
+(`[input]`, `[output]`), M5.4 (the rest of the rule schema) and M6 (gestures).
+The built-in key and mouse tables are the fallback layer; a config bind replaces
+the built-in for the same chord.
 
 ### 13.4 Window rules
 
@@ -914,9 +915,9 @@ also pending.
 
 ### Transport
 
-- Unix domain socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; path exported as `CRAWM_SOCKET`.
+- Unix domain socket at `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`; path exported as `CRAB_SOCKET`.
 - Newline-delimited JSON, request/response plus an **event stream** subscription.
-- A `crawm-cli` CLI wraps it (`--json` for machine output).
+- A `crab-cli` CLI wraps it (`--json` for machine output).
 
 ### Requests (initial set)
 
@@ -935,7 +936,7 @@ event-stream
 ### Rules
 
 - **Schema is versioned.** Additive changes only within a major version; include a version request.
-- IPC types live in `crawm-ipc` so third-party Rust tools can depend on it.
+- IPC types live in `crab-ipc` so third-party Rust tools can depend on it.
 - Keep action names identical between config binds and IPC (one `Action` enum, serialized both ways).
 - Document the protocol so bar authors can integrate (waybar modules, eww, custom scripts).
 
@@ -983,9 +984,9 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 ## 18. Session and desktop integration
 
 - **Session start:** `.desktop` entry for display managers; wrapper script sets `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE=wayland`, imports env into systemd/D-Bus (`dbus-update-activation-environment`).
-- **systemd:** optional `crawm-session.target` and units for bars/wallpaper (`graphical-session.target` integration).
+- **systemd:** optional `crab-session.target` and units for bars/wallpaper (`graphical-session.target` integration).
 - **Autostart:** `spawn-at-startup` entries in config.
-- **Portals:** ship `crawm-portals.conf` choosing `gtk`/`wlr`/own backends for FileChooser, Screenshot, ScreenCast.
+- **Portals:** ship `crab-portals.conf` choosing `gtk`/`wlr`/own backends for FileChooser, Screenshot, ScreenCast.
 - **Notifications, bar, launcher, wallpaper:** explicitly **not built in**; document recommended pairings (e.g., waybar/ironbar, fuzzel, mako/swaync, swaybg/swww).
 - **Lock/idle:** support `ext-session-lock` and idle protocols; document `swayidle` + `swaylock`/`gtklock` setups.
 - **logind:** handle VT switching, session pause/resume, lid switch, suspend inhibit.
@@ -1012,7 +1013,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 
 - `cargo run -- --backend winit` for nested iteration.
 - Debug HUD: frame time, damage regions, scanout state, animation count.
-- `tracing` filters per module (`RUST_LOG=crawm::render=debug`).
+- `tracing` filters per module (`RUST_LOG=crab::render=debug`).
 - Optional Tracy profiling feature for frame hitches.
 - `WAYLAND_DEBUG=1` on test clients; `wayland-info` / `weston-info` for capability checks.
 - CI: build, clippy, fmt, unit tests, headless integration tests, `cargo deny` for dependency audit.
@@ -1106,11 +1107,13 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 
 ### Milestone 4: Desktop essentials, P0/P1 protocols (4-6 weeks)
 
-- [ ] `wlr-layer-shell` with exclusive zones feeding `usable_area`
-- [ ] `xdg-decoration`, `cursor-shape`, `fractional-scale`
+- [x] `wlr-layer-shell` with exclusive zones feeding `usable_area`
+- [x] `xdg-decoration` (client-side for now), `fractional-scale`
+- [ ] `cursor-shape` (needs icon-theme loading; not advertised yet)
 - [ ] `xdg-activation`, `primary-selection`, `data-control`
 - [ ] `idle-notify/inhibit`, `ext-session-lock`
-- [ ] `wlr-output-management`, `output-power-management`, `xdg-output`
+- [x] `xdg-output`
+- [ ] `wlr-output-management`, `output-power-management`
 - [ ] `ext-foreign-toplevel-list` / foreign-toplevel-management, `ext-workspace`
 - [ ] `pointer-constraints`, `relative-pointer`, `keyboard-shortcuts-inhibit`, `text-input/input-method`
 - [ ] Verified with waybar, fuzzel, swaybg, swaylock/gtklock, swayidle, wl-clipboard
@@ -1122,7 +1125,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] Hot reload with atomic apply and error banner
 - [ ] Keybinds (keyboard, mouse, modes), hotkey overlay
 - [ ] Window rules (app-id/title match, floating, space, size, opacity, focus)
-- [ ] IPC socket, JSON protocol, event stream, `crawm-cli`
+- [ ] IPC socket, JSON protocol, event stream, `crab-cli`
 - [ ] Documentation of config and IPC; default config shipped
 - **Exit criteria:** bars can show spaces/windows via IPC; config edits apply live
 

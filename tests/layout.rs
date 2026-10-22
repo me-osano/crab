@@ -5,8 +5,8 @@
 //! rectangles for small window counts. Randomized invariants live in
 //! `tests/layout_props.rs`.
 
-use crawm::core::{Direction, LayoutKind, LayoutParams, Rect, ScrollState, WindowId};
-use crawm::layout::{Layout as _, LayoutInput, LayoutWindow, Monocle, Tile, by_name};
+use crab::core::{Direction, LayoutKind, LayoutParams, Rect, ScrollState, WindowId};
+use crab::layout::{Layout as _, LayoutInput, LayoutWindow, Monocle, Tile, by_name};
 
 fn windows(count: usize) -> Vec<LayoutWindow> {
     (0..count)
@@ -22,7 +22,7 @@ fn params(gaps: f64) -> LayoutParams {
 }
 
 fn arrange(
-    layout: &dyn crawm::layout::Layout,
+    layout: &dyn crab::layout::Layout,
     windows: &[LayoutWindow],
     params: &LayoutParams,
 ) -> Vec<Rect> {

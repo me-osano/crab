@@ -4,7 +4,7 @@
 //! [`BindTable`](crate::compositor::binds::BindTable) claims the chord, in which
 //! case the key press (and its release) is swallowed and the resulting
 //! [`Action`] runs. Binds come from `[binds.default]`/`[binds.locked]`, layered
-//! over crawm's built-ins (`crate::compositor::binds`).
+//! over crab's built-ins (`crate::compositor::binds`).
 //!
 //! Pointer buttons and scroll use the same idea: `[mousebinds]` and
 //! `[axisbinds]` are compiled with the keyboard table's modifier rules. A bound
@@ -14,7 +14,7 @@
 //! and protocol breadth (M3); the `_ => {}` arm of [`handle`] is where they will
 //! arrive.
 
-use crawm::core::LayoutCommand;
+use crab::core::LayoutCommand;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, ButtonState, Event as _, InputBackend, InputEvent, KeyState,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
@@ -26,14 +26,14 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
 use crate::compositor::binds::{Action, MouseAction, ScrollAxis};
 use crate::compositor::spawn;
-use crate::compositor::state::{Crawm, GrabMode};
+use crate::compositor::state::{Crab, GrabMode, Interaction};
 
 /// How much a continuous scroll delta must cover before it counts as one axis
 /// bind step. Discrete wheel events use `amount_v120` and need only one notch.
 const CONTINUOUS_AXIS_STEP: f64 = 10.0;
 
 /// Handles one input event from a backend, updating seat state and focus.
-pub(crate) fn handle<B: InputBackend>(state: &mut Crawm, event: InputEvent<B>) {
+pub(crate) fn handle<B: InputBackend>(state: &mut Crab, event: InputEvent<B>) {
     match event {
         InputEvent::Keyboard { event } => keyboard::<B>(state, event),
         InputEvent::PointerMotion { event } => motion_relative::<B>(state, &event),
@@ -47,8 +47,8 @@ pub(crate) fn handle<B: InputBackend>(state: &mut Crawm, event: InputEvent<B>) {
     }
 }
 
-/// Forwards a key to the focused client, intercepting crawm's own binds.
-fn keyboard<B: InputBackend>(state: &mut Crawm, event: B::KeyboardKeyEvent) {
+/// Forwards a key to the focused client, intercepting crab's own binds.
+fn keyboard<B: InputBackend>(state: &mut Crab, event: B::KeyboardKeyEvent) {
     let keycode = event.key_code();
     let key_state = event.state();
 
@@ -96,7 +96,7 @@ fn keyboard<B: InputBackend>(state: &mut Crawm, event: B::KeyboardKeyEvent) {
 }
 
 /// Runs the action a bind produced.
-fn apply(state: &mut Crawm, action: Action) {
+fn apply(state: &mut Crab, action: Action) {
     match action {
         Action::ViewSpace(index) => state.view_space(index),
         Action::MoveToSpace(index) => state.move_to_space(index),
@@ -131,13 +131,13 @@ fn apply(state: &mut Crawm, action: Action) {
 }
 
 /// Moves the pointer by a relative delta and updates focus.
-fn motion_relative<B: InputBackend>(state: &mut Crawm, event: &B::PointerMotionEvent) {
+fn motion_relative<B: InputBackend>(state: &mut Crab, event: &B::PointerMotionEvent) {
     let position = state.pointer_location + event.delta();
     motion(state, position, event.time_msec());
 }
 
 /// Moves the pointer to an absolute position and updates focus.
-fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
+fn motion(state: &mut Crab, position: Point<f64, Logical>, time: u32) {
     let position = state.clamp_to_output(position);
     state.pointer_location = position;
     state.pointer_seen = true;
@@ -187,8 +187,8 @@ fn motion(state: &mut Crawm, position: Point<f64, Logical>, time: u32) {
 ///
 /// When a client holds a pointer grab (an open menu, `xdg_popup.grab`), the grab
 /// owns the button instead: it dismisses the popup on a click outside of it and
-/// forwards the rest, so crawm stays out of the way.
-fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
+/// forwards the rest, so crab stays out of the way.
+fn button<B: InputBackend>(state: &mut Crab, event: &B::PointerButtonEvent) {
     let pressed = event.state();
     let grabbed = state.pointer.is_grabbed();
     let button = event.button_code();
@@ -217,20 +217,17 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
         }
         state.focus_at(position);
     } else if pressed == ButtonState::Released {
+        // Remove the bind entry before any early return: a compositor grab
+        // (move/resize) also inserted this button, and leaving it behind would
+        // swallow the release of a later, ordinary click.
+        let was_bound = state.bound_buttons.remove(&button);
         // The release ends an interaction even when `grabbed` is set: a press
         // we forwarded leaves smithay's implicit click grab active until this
         // very release, and that is exactly the case a client-started drag is
         // in. A real client grab (a popup) never starts an interaction, so
         // ending one here takes nothing away from it.
-        if let Some(interaction) = state.end_interaction(button) {
-            if !interaction.from_client {
-                // A compositor grab swallowed the press, so it swallows the
-                // release too: the client never saw the button go down.
-                return;
-            }
-        }
-        if state.bound_buttons.remove(&button) {
-            // A mouse bind ran on the press; the client never saw it.
+        let interaction = state.end_interaction(button);
+        if release_outcome(was_bound, interaction.as_ref()) == ReleaseOutcome::Swallow {
             return;
         }
     }
@@ -252,13 +249,35 @@ fn button<B: InputBackend>(state: &mut Crawm, event: &B::PointerButtonEvent) {
     state.pointer.clone().frame(state);
 }
 
+/// What to do with a pointer-button release after the interaction ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseOutcome {
+    /// The client never saw the press, so it must not see the release either.
+    Swallow,
+    /// Forward the release to the focused client.
+    Forward,
+}
+
+/// Decides whether a release stays inside the compositor.
+///
+/// This is separate from [`button`] so the two cases that used to leak or
+/// mis-forward a release are directly testable: a mouse bind whose press was
+/// swallowed, and a client-started drag whose press *was* forwarded.
+fn release_outcome(was_bound: bool, interaction: Option<&Interaction>) -> ReleaseOutcome {
+    if was_bound || interaction.is_some_and(|interaction| !interaction.from_client) {
+        ReleaseOutcome::Swallow
+    } else {
+        ReleaseOutcome::Forward
+    }
+}
+
 /// Forwards scroll to the focused client, unless an `[axisbinds]` chord claims
 /// it (for example Super+wheel-up to view the previous occupied space).
 ///
 /// One event is one bind step. Discrete wheel notches use `amount_v120`;
 /// continuous sources need [`CONTINUOUS_AXIS_STEP`] so a tiny touchpad delta
 /// does not fire on every frame.
-fn axis<B: InputBackend>(state: &mut Crawm, event: &B::PointerAxisEvent) {
+fn axis<B: InputBackend>(state: &mut Crab, event: &B::PointerAxisEvent) {
     if let Some((axis, positive)) = axis_step::<B>(event) {
         if let Some(action) = state.axis_binds.action(&state.modifiers, axis, positive) {
             apply(state, action);
@@ -299,4 +318,60 @@ fn axis_step<B: InputBackend>(event: &B::PointerAxisEvent) -> Option<(ScrollAxis
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crab::core::{Rect, WindowId};
+
+    fn interaction(from_client: bool) -> Interaction {
+        Interaction {
+            id: WindowId::new(1),
+            mode: GrabMode::Move,
+            grab: (0.0, 0.0).into(),
+            origin: Rect::new(0.0, 0.0, 100.0, 100.0),
+            button: Some(0x110),
+            from_client,
+        }
+    }
+
+    #[test]
+    fn ordinary_release_is_forwarded() {
+        assert_eq!(release_outcome(false, None), ReleaseOutcome::Forward);
+    }
+
+    #[test]
+    fn bound_press_swallows_its_release() {
+        // Regression: the bound-button entry must be removed before this
+        // decision, or every later ordinary click of the same button is eaten.
+        assert_eq!(release_outcome(true, None), ReleaseOutcome::Swallow);
+    }
+
+    #[test]
+    fn compositor_grab_swallows_its_release() {
+        let interaction = interaction(false);
+        assert_eq!(
+            release_outcome(false, Some(&interaction)),
+            ReleaseOutcome::Swallow
+        );
+    }
+
+    #[test]
+    fn client_started_drag_forwards_its_release() {
+        let interaction = interaction(true);
+        assert_eq!(
+            release_outcome(false, Some(&interaction)),
+            ReleaseOutcome::Forward
+        );
+    }
+
+    #[test]
+    fn a_bound_button_still_swallows_a_client_started_release() {
+        let interaction = interaction(true);
+        assert_eq!(
+            release_outcome(true, Some(&interaction)),
+            ReleaseOutcome::Swallow
+        );
+    }
 }

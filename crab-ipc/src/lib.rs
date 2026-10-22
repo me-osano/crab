@@ -1,8 +1,8 @@
-//! Typed IPC protocol and client for crawm.
+//! Typed IPC protocol and client for crab.
 //!
-//! This is a **leaf** crate: it depends on no other `crawm-*` crate, so third
+//! This is a **leaf** crate: it depends on no other `crab-*` crate, so third
 //! party tools (bars, scripts) can depend on it alone. The wire format is
-//! newline-delimited JSON over a Unix socket at `$CRAWM_SOCKET` (see
+//! newline-delimited JSON over a Unix socket at `$CRAB_SOCKET` (see
 //! [`socket_path`]).
 
 #![forbid(unsafe_code)]

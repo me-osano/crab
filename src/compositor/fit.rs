@@ -126,6 +126,31 @@ impl WindowFit {
         Some((src, dst))
     }
 
+    /// Maps a rectangle of a surface element onto the window's drawn
+    /// rectangle, without caring which part of the buffer it samples.
+    ///
+    /// This is [`Self::map_element`] without the source half, for damage
+    /// tracking: an element reports damage in its own natural coordinates and
+    /// the output needs it in the coordinates the window is drawn at.
+    pub(crate) fn map_rect(
+        &self,
+        natural: Rectangle<i32, Physical>,
+    ) -> Option<Rectangle<i32, Physical>> {
+        let (x, y) = (self.x(), self.y());
+        let ((dx, dw), _) = x.cut(
+            x.map(f64::from(natural.loc.x)),
+            f64::from(natural.size.w) * x.scale,
+        )?;
+        let ((dy, dh), _) = y.cut(
+            y.map(f64::from(natural.loc.y)),
+            f64::from(natural.size.h) * y.scale,
+        )?;
+        Some(Rectangle::new(
+            Point::from((dx, dy)).to_i32_round(),
+            Size::from((dw, dh)).to_i32_round(),
+        ))
+    }
+
     /// The horizontal axis of this fit.
     fn x(&self) -> Axis {
         Axis::fit(
@@ -277,6 +302,22 @@ mod tests {
             .expect("the whole window is beside its rectangle");
         assert_eq!(dst, natural);
         assert_eq!(src, element((0, 0), (0, 0), (519.0, 1080.0)).1);
+    }
+
+    #[test]
+    fn damage_maps_through_the_same_fit_as_the_pixels() {
+        let (natural, src) = element((100, 200), (469, 1030), (469.0, 1030.0));
+        let fit = fit((100, 200, 940, 1030), (469, 1030), true);
+        let (_, dst) = fit.map_element(natural, src).expect("inside the rectangle");
+        assert_eq!(fit.map_rect(natural), Some(dst));
+
+        // A ten-pixel-wide strip near the left is twice as wide once the
+        // rectangle stretches; damage must grow with the pixels it covers.
+        let damage = Rectangle::new((120, 220).into(), (10, 20).into());
+        assert_eq!(
+            fit.map_rect(damage),
+            Some(Rectangle::new((140, 220).into(), (20, 20).into()))
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-# crawm — Roadmap
+# crab — Roadmap
 
-> **Name:** `crawm` (binary `crawm`, CLI `crawm-cli`).
+> **Name:** `crab` (binary `crab`, CLI `crab-cli`).
 > **Companion docs:** [`COMPOSITOR.md`](./COMPOSITOR.md) is the *design* (what and
 > why). This file is the *roadmap*: what to build, in what order, which verified
 > upstream feature it comes from, and how we prove the feature is complete.
@@ -47,18 +47,18 @@ identity.
 
 | Project | Role | Relationship |
 |---|---|---|
-| `crawm` (this) | The compositor | Server: owns DRM/KMS, input, windows |
-| `crawl-desktop` | The desktop shell | Client: its `crawl-compositor` adapter gains a **`crawm` backend** (§7) |
+| `crab` (this) | The compositor | Server: owns DRM/KMS, input, windows |
+| `crawl-desktop` | The desktop shell | Client: its `crawl-compositor` adapter gains a **`crab` backend** (§7) |
 | `crawl` v1 | The service daemon | Unchanged; runs under any compositor |
 | `amane` / `suzuha` | Reference immediate-mode shell | Unchanged; a model for how a shell consumes standard protocols |
 
 **The strategic payoff:** `crawl-desktop` was designed to run on *other people's*
-compositors (niri/mango/Hyprland/Sway). `crawm` makes the ecosystem
+compositors (niri/mango/Hyprland/Sway). `crab` makes the ecosystem
 self-contained: the shell drives our compositor through the **same standard
 protocols and the same `Compositor` trait**, so the shell never learns a
 crawl-specific API. This is the original "from-scratch compositor" idea, but kept
 as a **separate, independently-versioned project** so `crawl-desktop` ships on
-niri today and on `crawm` later without a rewrite.
+niri today and on `crab` later without a rewrite.
 
 ### Non-goals (initially)
 
@@ -237,7 +237,7 @@ property-testable.
 
 | Feature | Source | Prio | MS |
 |---|---|---|---|
-| Unix-socket, newline-JSON, typed Rust crate (`crawm-ipc`) | niri | P0 | M5 |
+| Unix-socket, newline-JSON, typed Rust crate (`crab-ipc`) | niri | P0 | M5 |
 | Request/response + `version` handshake | niri | P0 | M5 |
 | `event-stream` (open/close/focus/space/output/config) | niri | P0 | M5 |
 | `get` / `watch` / `dispatch <action>` CLI | mango (`mmsg`) | P0 | M5 |
@@ -368,8 +368,8 @@ dep must be isolated, or (3) a genuinely stable public API earns independent
 versioning.
 
 ```
-crawm/
-├── Cargo.toml                 # the `crawm` package (src/) AND the workspace root (niri-style)
+crab/
+├── Cargo.toml                 # the `crab` package (src/) AND the workspace root (niri-style)
 ├── COMPOSITOR.md              # design (existing)
 ├── ROADMAP.md                 # this file
 ├── src/                     # the compositor: Smithay glue, backends, handlers, render, input
@@ -379,9 +379,9 @@ crawm/
 │   ├── layout/                # pure Layout trait + all layouts (unit/property-tested, no Smithay)
 │   └── animation/             # springs/easing/curves + animated scalars (pure, no Smithay)
 ├── tests/                     # headless integration tests + transcripts (root package's tests/)
-├── crawm-ipc/              # IPC types + client; shared by compositor and CLI (leaf)
-├── crawm-protocols/        # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
-├── crawm-cli/              # CLI client (`crawm-cli`)
+├── crab-ipc/              # IPC types + client; shared by compositor and CLI (leaf)
+├── crab-protocols/        # generated Wayland protocol bindings (wayland-scanner) — only if >1 crate needs them
+├── crab-cli/              # CLI client (`crab-cli`)
 ├── resources/                 # default-config.toml, session units/.desktop, shaders, portals
 └── docs/                      # mdBook; ADRs
 ```
@@ -398,25 +398,25 @@ Rules:
 - The pure modules depend **downward only**: `core` on nothing, and
   `config`/`layout`/`animation` on `core`. The same script fails on any upward or
   sideways `crate::` edge (e.g. `core` reaching for `config` or `backend`).
-- Backends are **cargo features** on the `crawm` package: `backend-winit`
+- Backends are **cargo features** on the `crab` package: `backend-winit`
   (default dev path), `backend-tty` (DRM/KMS, M4), `backend-x11`. A default build
   therefore skips the DRM/session/input stack; CI builds `--all-features` to keep
   proving it (TODO 0.4).
-- `src/core` and `src/config` were folded in from the former `crawm-core` /
-  `crawm-config` crates, and `src/layout` / `src/animation` from `crawm-layout` /
-  `crawm-anim`: each has a single consumer, so the `crawl-desktop` ADR-0005
+- `src/core` and `src/config` were folded in from the former `crab-core` /
+  `crab-config` crates, and `src/layout` / `src/animation` from `crab-layout` /
+  `crab-anim`: each has a single consumer, so the `crawl-desktop` ADR-0005
   "modules first" rule above applies. Promote a module back to a crate only when (1) fires — e.g.
   `crawl-desktop` needs it.
-- `crawm-ipc` is a **leaf** (no other `crawm-*` deps) and stays a crate: it has
+- `crab-ipc` is a **leaf** (no other `crab-*` deps) and stays a crate: it has
   two in-tree consumers plus third-party tools.
-- Only `crawm` (and `crawm-cli` for IPC) touch the IPC socket; only `crawm`
+- Only `crab` (and `crab-cli` for IPC) touch the IPC socket; only `crab`
   touches Smithay.
-- Keep generated protocol code in `crawm-protocols` **only if ≥2 crates need it**;
-  otherwise a `protocols` module inside `crawm`.
-- **At M0** the workspace realizes `crawm` (root package) / `crawm-ipc` /
-  `crawm-cli` plus `resources/`. `crawm-protocols` is deferred until a second
+- Keep generated protocol code in `crab-protocols` **only if ≥2 crates need it**;
+  otherwise a `protocols` module inside `crab`.
+- **At M0** the workspace realizes `crab` (root package) / `crab-ipc` /
+  `crab-cli` plus `resources/`. `crab-protocols` is deferred until a second
   crate needs the bindings, and integration tests live in the root package's
-  `tests/` (the root `Cargo.toml` is both the `crawm` package and the workspace
+  `tests/` (the root `Cargo.toml` is both the `crab` package and the workspace
   root, niri-style).
 
 Inside `src/`: `lib.rs` (pure library surface), `main.rs`, `compositor/`
@@ -437,8 +437,8 @@ supersede `COMPOSITOR.md` §22 where they differ.
 
 ### M0 — Foundations *(1–2 weeks)*
 - [x] Settle the **license** — **GPL-3.0-or-later** (ADR-0001, §10).
-- [x] Create the workspace + the §5 layout (root `crawm` package + `crawm-ipc` /
-      `crawm-cli`); `[workspace.dependencies]`.
+- [x] Create the workspace + the §5 layout (root `crab` package + `crab-ipc` /
+      `crab-cli`); `[workspace.dependencies]`.
 - [x] Pin Smithay to a git rev (niri does this) or `0.7.x`+patch (cosmic does).
       *(Took `0.7.0` from crates.io — reproducible and matches cosmic; the vendored
       git rev arrives with HDR. See TODO 0.4.)*
@@ -517,16 +517,16 @@ supersede `COMPOSITOR.md` §22 where they differ.
       (some formats fail to bind on some GPUs — ADR-0002, §3H).
 - [ ] Output hotplug; per-output space views; transform.
 - [ ] `.desktop` + session wrapper + env import.
-- [ ] **Exit:** boot from a TTY and use `crawm` on real hardware.
+- [ ] **Exit:** boot from a TTY and use `crab` on real hardware.
 
 ### M5 — Config, rules, IPC *(4–6 weeks)*
 - [ ] `src/config`: TOML parse + validate + `include`/`source` + variables;
-      atomic hot reload + on-screen error; `crawm-cli validate`.
+      atomic hot reload + on-screen error; `crab-cli validate`.
 - [ ] Binds: keyboard (+`Mod` remap), mouse, axis, gesture, switch; flags
       (`repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass);
       **key modes/submaps**.
 - [ ] Rules: window, space, layer, monitor, device (match + actions from §3E).
-- [ ] `crawm-ipc` + socket + `event-stream` + `version`; `crawm-cli`
+- [ ] `crab-ipc` + socket + `event-stream` + `version`; `crab-cli`
       `get`/`watch`/`dispatch`; bind and IPC share **one `Action` enum**.
 - [ ] Per-event animation curves/durations; reduce-motion switch.
 - [ ] **Exit:** a bar shows spaces/windows over IPC; config edits apply live; bad
@@ -581,12 +581,12 @@ supersede `COMPOSITOR.md` §22 where they differ.
       all work.
 
 ### M10 — crawl-desktop integration *(2–3 weeks, can overlap M6+)*
-- [ ] Add a **`crawm` backend** to `crawl-desktop`'s `crawl-compositor`
+- [ ] Add a **`crab` backend** to `crawl-desktop`'s `crawl-compositor`
       implementing the `Compositor` trait (§7).
 - [ ] Ensure `ext-workspace`, `ext-foreign-toplevel-list`, `wlr-output-management`,
       `ext-image-copy-capture`, and IPC `dispatch` cover every `Capability`.
-- [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) unmodified on `crawm`.
-- [ ] **Exit:** `crawl-desktop` boots on `crawm` with the same capability
+- [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) unmodified on `crab`.
+- [ ] **Exit:** `crawl-desktop` boots on `crab` with the same capability
       negotiation it uses on niri.
 
 ### M11 — Hardening & `v0.1.0` *(3–4 weeks)*
@@ -637,10 +637,10 @@ stable.
 `{ Workspaces, WindowList, FocusWindow, Screenshots, OutputManagement, Overview, Launch }`,
 with `Event::{WorkspacesChanged, ActiveWorkspaceChanged, WindowsChanged, ActiveWindowChanged, OutputsChanged}`.
 
-**Goal:** `crawm` is a first-class backend, discoverable by env var, with **no
+**Goal:** `crab` is a first-class backend, discoverable by env var, with **no
 crawl-specific API** — the shell uses standard protocols + a small IPC surface.
 
-| `crawl-compositor` need | `crawm` provides |
+| `crawl-compositor` need | `crab` provides |
 |---|---|
 | `Workspaces` / workspace events | `ext-workspace-v1` (bars) + IPC `get spaces`/`watch` for names/urgency |
 | `WindowList`, `FocusWindow`, active window | `ext-foreign-toplevel-list` + `wlr-foreign-toplevel-management`; IPC `dispatch focus-window` |
@@ -648,17 +648,17 @@ crawl-specific API** — the shell uses standard protocols + a small IPC surface
 | `Screenshots` | `ext-image-copy-capture` (+ legacy `wlr-screencopy`) |
 | `Overview` | IPC `dispatch overview` (toggle) |
 | `Launch` | IPC `dispatch spawn <cmd>` |
-| Detection | export `CRAWM_SOCKET`; `crawl-compositor::detect()` gains one arm (before niri) |
-| Sessions | `crawl-session` either spawns `crawm` in its own `.desktop`, or attaches as a client when `CRAWM_SOCKET` is set |
+| Detection | export `CRAB_SOCKET`; `crawl-compositor::detect()` gains one arm (before niri) |
+| Sessions | `crawl-session` either spawns `crab` in its own `.desktop`, or attaches as a client when `CRAB_SOCKET` is set |
 
 Rules:
 - **Never require a crawl-specific protocol.** If a shell feature can use a
   standard protocol, it must.
-- Keep the `crawm-ipc` `Action` enum and `crawl-desktop`'s action names aligned
+- Keep the `crab-ipc` `Action` enum and `crawl-desktop`'s action names aligned
   so one keybind table can target both where possible.
 - The `crawl-desktop` boundary lint (their ADR-0005,
   `docs/decisions/0005-crate-modularization.md`) still applies: the shell
-  links `crawl-ui` + `crawl-ipc`, never the daemon — and never `crawm`'s internals.
+  links `crawl-ui` + `crawl-ipc`, never the daemon — and never `crab`'s internals.
 
 ---
 
@@ -673,7 +673,7 @@ Rules:
 | State machine | Scripted scenarios: open N windows, switch spaces, unplug output, assert focus/placements |
 | Visual regression | Headless render → PNG, compare with tolerance (later) |
 | **Real-world matrix** | Firefox, Chromium (Ozone), GTK3/4, Qt5/6, Electron, foot/alacritty/kitty, mpv, a Steam game via XWayland, OBS, a screen-share tab, a lock/unlock cycle |
-| **Integration** | `crawl-desktop` shell on `crawm` (§7), plus the existing `docs/compositor-matrix.md` rows filled in |
+| **Integration** | `crawl-desktop` shell on `crab` (§7), plus the existing `docs/compositor-matrix.md` rows filled in |
 
 Dev workflow: `cargo run -- --backend winit`; debug HUD (frame time, damage,
 scanout, animation count); `RUST_LOG` per module; optional Tracy; `WAYLAND_DEBUG=1`;
@@ -709,19 +709,19 @@ Regressions block merges once benchmarks exist.
 | **Smithay** | MIT |
 
 **Implication.**
-- If you want to **copy code** from niri/cosmic/mango, `crawm` must be
+- If you want to **copy code** from niri/cosmic/mango, `crab` must be
   **GPL-3.0(-or-later)** and carry attribution.
 - If you want a **permissive** license (MIT/MPL/Apache), you may **only
   re-implement from docs/specs**, never copy their source.
 
-**Recommendation:** license `crawm` **GPL-3.0-or-later**. It is a *separate
+**Recommendation:** license `crab` **GPL-3.0-or-later**. It is a *separate
 process* talking to `crawl-desktop` (MIT) over Wayland/IPC, so copyleft does not
 propagate into the MIT crates — and it lets you lift proven code (niri's scroller,
 mango's layout math) with attribution instead of re-deriving it. If you prefer a
 permissive core, split it: GPL-3.0 for the binary/renderer, MIT for the pure
 `-core`/`-layout`/`-anim`/`-config` crates you write yourself.
 
-**Decision (2026-10-16):** `crawm` is **`GPL-3.0-or-later`**. This permits
+**Decision (2026-10-16):** `crab` is **`GPL-3.0-or-later`**. This permits
 copying and adapting code from niri, cosmic-comp, and mango (all GPL-3.0) with
 attribution — including the HDR/colour-management work — while keeping the
 `crawl-desktop`/`crawl` MIT crates unaffected (separate process, no linking). See

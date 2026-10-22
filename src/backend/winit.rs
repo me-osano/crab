@@ -1,7 +1,7 @@
 //! Nested `winit` backend: a real Wayland compositor inside a window.
 //!
 //! This owns the `calloop` event loop, the Wayland `Display`, and every global
-//! built by [`Crawm::new`], then wires three sources into the loop
+//! built by [`Crab::new`], then wires three sources into the loop
 //! (ROADMAP.md §6 M1):
 //!
 //! 1. **winit** — window events (resize, redraw, input, close);
@@ -9,30 +9,30 @@
 //! 3. **display fd** — client requests, which must be dispatched even when no
 //!    window event arrives (a client waiting on a `configure` never sends one).
 //!
-//! The tty backend (M4) reuses [`Crawm`] and the same three sources; only the
+//! The tty backend (M4) reuses [`Crab`] and the same three sources; only the
 //! renderer and the input backend differ.
 
 use std::os::unix::io::AsFd as _;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use crawm::config::Config;
+use crab::config::Config;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
 
-use crate::compositor::state::{ClientState, Crawm};
+use crate::compositor::state::{ClientState, Crab};
 use crate::compositor::{input, render};
 
-/// Base name for crawm's Wayland socket; `bind_auto` appends `-N`.
-const SOCKET_BASENAME: &str = "crawm";
+/// Base name for crab's Wayland socket; `bind_auto` appends `-N`.
+const SOCKET_BASENAME: &str = "crab";
 
 /// Everything the calloop sources read and write.
 struct LoopData {
-    display: Display<Crawm>,
-    state: Crawm,
+    display: Display<Crab>,
+    state: Crab,
     backend: WinitGraphicsBackend<GlesRenderer>,
     socket: ListeningSocket,
 }
@@ -55,10 +55,10 @@ fn request_redraw(data: &mut LoopData) {
 /// Fails if the Wayland display, the socket, the winit backend, or the GLES
 /// renderer cannot be created.
 pub fn run(config: &Config) -> anyhow::Result<()> {
-    let display: Display<Crawm> =
+    let display: Display<Crab> =
         Display::new().map_err(|err| anyhow::anyhow!("create the Wayland display: {err:?}"))?;
     let dh = display.handle();
-    let mut state = Crawm::new(&dh, config);
+    let mut state = Crab::new(&dh, config);
 
     let socket = ListeningSocket::bind_auto(SOCKET_BASENAME, 0..32)
         .map_err(|err| anyhow::anyhow!("bind a Wayland socket: {err:?}"))?;
@@ -103,7 +103,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                         // tty backend will pass the real one (TODO.md §3.2).
                         let frame_time = data.state.start_time.elapsed().as_secs_f64();
                         data.state.advance_frame(frame_time);
-                        render::render(&data.state, &mut data.backend);
+                        render::render(&mut data.state, &mut data.backend);
                         // Keep frames coming while anything is still moving.
                         // This folds into the frame just presented, so
                         // `finish_frame` reports the follow-up and winit
@@ -204,7 +204,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     tracing::info!(
         socket = %socket_name,
         gaps = config.gaps,
-        "crawm (winit) ready — connect clients with WAYLAND_DISPLAY={socket_name}"
+        "crab (winit) ready — connect clients with WAYLAND_DISPLAY={socket_name}"
     );
     data.state.run_autostart();
 

@@ -1,6 +1,6 @@
 //! Backends.
 //!
-//! Which backends are compiled in is controlled by cargo features on the `crawm`
+//! Which backends are compiled in is controlled by cargo features on the `crab`
 //! package: `backend-winit` (nested window, the default dev path) and
 //! `backend-tty` (bare-metal DRM/KMS, M4). `headless` is always available so the
 //! test suite can exercise the compositor without graphics.

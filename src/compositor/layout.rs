@@ -1,6 +1,6 @@
-//! The bridge between the pure layout engine (`crawm::layout`) and Smithay state.
+//! The bridge between the pure layout engine (`crab::layout`) and Smithay state.
 //!
-//! `crawm::layout` is a pure function over logical rectangles; [`Crawm`] holds
+//! `crab::layout` is a pure function over logical rectangles; [`Crab`] holds
 //! `ToplevelSurface`s that must be told about those rectangles through
 //! `configure`. This module is the one place that knows both: it reads the
 //! current space's layout, builds the [`LayoutInput`], and applies the resulting
@@ -11,13 +11,13 @@
 //! It is part of the binary (see [`crate::compositor`]), so it may depend on
 //! Smithay freely.
 
-use crawm::animation::Kind;
-use crawm::core::{
+use crab::animation::Kind;
+use crab::core::{
     Direction, LayoutFamily, LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, WindowId,
 };
-use crawm::layout::{self, LayoutInput, LayoutWindow, Placement};
+use crab::layout::{self, LayoutInput, LayoutWindow, Placement};
 
-use crate::compositor::state::{Crawm, ManagedWindow, point_i32, size_i32};
+use crate::compositor::state::{Crab, ManagedWindow, point_i32, size_i32};
 
 /// Gap between two cascaded floating windows, in logical pixels.
 const CASCADE_STEP: f64 = 32.0;
@@ -27,7 +27,7 @@ const CASCADE_STEP: f64 = 32.0;
 /// The order the passes run in is the stacking order: fullscreen/maximized
 /// windows fill the output, then the tiled windows are arranged, then floating
 /// windows sit on top with their remembered geometry.
-pub(crate) fn arrange(state: &mut Crawm) {
+pub(crate) fn arrange(state: &mut Crab) {
     let view = state.output_state.view.visible;
     let area = state.output_state.usable_area;
 
@@ -136,7 +136,7 @@ pub(crate) fn arrange(state: &mut Crawm) {
 
 /// The window to focus when moving `dir` from `current`, if any.
 pub(crate) fn directional_target(
-    state: &Crawm,
+    state: &Crab,
     current: WindowId,
     dir: Direction,
 ) -> Option<WindowId> {
@@ -171,7 +171,7 @@ pub(crate) fn directional_target(
 }
 
 /// The tiled windows on `view`, in layout order.
-fn tiled_windows(state: &Crawm, view: SpaceSet) -> Vec<LayoutWindow> {
+fn tiled_windows(state: &Crab, view: SpaceSet) -> Vec<LayoutWindow> {
     state
         .windows
         .iter()
@@ -194,7 +194,7 @@ fn tiled_windows(state: &Crawm, view: SpaceSet) -> Vec<LayoutWindow> {
 ///
 /// The scroll state is cloned rather than copied — it owns the scroller's
 /// columns — and written back after the arrange.
-fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
+fn current_layout(state: &Crab) -> (LayoutKind, LayoutParams, ScrollState) {
     state.output_state.current_space_state().map_or_else(
         || {
             (
@@ -215,7 +215,7 @@ fn current_layout(state: &Crawm) -> (LayoutKind, LayoutParams, ScrollState) {
 /// earns a refusal — and the drawn rectangle is animated toward it. The kind
 /// records what moved the window — a change of size or a change of place —
 /// which is the granularity animations are configured at (M5).
-fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visible: bool) {
+fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visible: bool) {
     let location = point_i32(rect.x, rect.y);
     let size = size_i32(rect.w, rect.h);
     let clocks = state.frame_clock;
@@ -250,15 +250,15 @@ fn place(state: &mut Crawm, id: WindowId, rect: Rect, configure_size: bool, visi
 /// Places a floating window at its remembered geometry (cascading a new one).
 ///
 /// Floating windows own their size, so none is configured here: the client's
-/// committed size is adopted in [`Crawm::on_commit`].
-fn place_floating(state: &mut Crawm, id: WindowId, index: usize, area: Rect) {
+/// committed size is adopted in [`Crab::on_commit`].
+fn place_floating(state: &mut Crab, id: WindowId, index: usize, area: Rect) {
     let Some(window) = state.window(id) else {
         return;
     };
     let rect = match window.window.float_geometry {
         Some(rect) => rect,
         None => {
-            let size = crawm::core::Size::new(
+            let size = crab::core::Size::new(
                 f64::from(window.size.w.max(1)),
                 f64::from(window.size.h.max(1)),
             );

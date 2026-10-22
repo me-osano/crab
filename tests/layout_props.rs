@@ -6,11 +6,11 @@
 //! `proptest` so the search finds the awkward counts and ratios, not just the
 //! ones a human thought of.
 
-use crawm::core::{
+use crab::core::{
     Column, ColumnDisplay, ColumnWidth, Direction, LayoutKind, LayoutParams, Rect, ScrollAxis,
     ScrollCenter, ScrollState, TilePosition, WindowId,
 };
-use crawm::layout::{LayoutInput, LayoutWindow, Placement, arrange};
+use crab::layout::{LayoutInput, LayoutWindow, Placement, arrange};
 use proptest::prelude::*;
 
 const AREA: Rect = Rect::new(0.0, 0.0, 1280.0, 720.0);
@@ -202,7 +202,7 @@ proptest! {
             scroll: &mut scroll,
         };
         // The default trait method arranges internally; use the dispatch.
-        if let Some(next) = crawm::layout::neighbor(LayoutKind::Tile, &input, from, direction) {
+        if let Some(next) = crab::layout::neighbor(LayoutKind::Tile, &input, from, direction) {
             prop_assert!(next < count);
             prop_assert_ne!(next, from);
         }

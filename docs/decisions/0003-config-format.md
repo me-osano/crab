@@ -25,7 +25,7 @@ Relevant prior art:
 
 ## Decision
 
-crawm's configuration is **TOML**, parsed with `serde` and the `toml` crate
+crab's configuration is **TOML**, parsed with `serde` and the `toml` crate
 (`src/config`).
 
 ## Consequences
@@ -53,7 +53,7 @@ crawm's configuration is **TOML**, parsed with `serde` and the `toml` crate
 
 - **KDL** — pleasant for repeated nodes and comments, and the niri precedent helps
   migration; rejected because it is far less familiar and less tooled than TOML for
-  the audience crawm targets, and because kdl-rs now defaults to the KDL **v2** dialect
+  the audience crab targets, and because kdl-rs now defaults to the KDL **v2** dialect
   (`#true`/`#false`) which further raises the unfamiliarity cost.
 - **RON (cosmic's choice)** — excellent Rust ergonomics, but tying the user-facing
   format to Rust syntax is a poor fit for a config that scripts and other languages

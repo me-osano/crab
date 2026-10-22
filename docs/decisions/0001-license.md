@@ -5,7 +5,7 @@
 
 ## Context
 
-`crawm` reuses ideas — and wants to reuse *code* — from three compositors:
+`crab` reuses ideas — and wants to reuse *code* — from three compositors:
 
 | Upstream | License |
 |---|---|
@@ -23,14 +23,14 @@ question of whether copyleft here would be a problem.
 
 ## Decision
 
-`crawm` is licensed **GPL-3.0-or-later**.
+`crab` is licensed **GPL-3.0-or-later**.
 
 ## Consequences
 
 - Code from niri, cosmic-comp, and mango may be **copied and adapted with
   attribution**, instead of reimplemented from documentation. This is the single
   biggest developer-speed win available.
-- Copyleft does **not** propagate into `crawl-desktop`/`crawl` (MIT): `crawm` is
+- Copyleft does **not** propagate into `crawl-desktop`/`crawl` (MIT): `crab` is
   a **separate process**, communicating with the shell over Wayland protocols and a
   local socket. There is no linking, so the MIT crates stay MIT.
 - Contributors must not paste GPL-incompatible code into the tree; reviewing
@@ -43,7 +43,7 @@ question of whether copyleft here would be a problem.
 - **MIT / Apache-2.0 / MPL-2.0** — rejected: would force clean-room reimplementation
   of exactly the hard parts (tiling math, animation, HDR), for no practical benefit
   given the process boundary above.
-- **Permissive core + GPL binary** — viable (GPL the `crawm`/renderer crates, MIT
+- **Permissive core + GPL binary** — viable (GPL the `crab`/renderer crates, MIT
   the pure `-core`/`-layout`/`-anim`/`-config` crates) if permissive reusable
   libraries become desirable later. Not chosen now, to keep the tree uniform; can be
   revisited without breaking anything.

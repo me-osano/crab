@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enforces the crate/module boundaries from ROADMAP.md §5:
-#   * crawm-ipc (workspace crate) must not depend on any other crawm-* crate;
-#   * the pure modules src/{core,config,layout,animation} of the crawm package
+#   * crab-ipc (workspace crate) must not depend on any other crab-* crate;
+#   * the pure modules src/{core,config,layout,animation} of the crab package
 #     must not mention Smithay/Wayland/system code — checked by scanning their
 #     sources, since cargo metadata cannot isolate modules of one package;
 #   * those pure modules may only depend *downward* (core → nothing;
@@ -27,9 +27,9 @@ metadata = json.loads(
 
 packages = {pkg["name"]: pkg for pkg in metadata["packages"]}
 
-LEAF = ["crawm-ipc"]
+LEAF = ["crab-ipc"]
 
-# Pure modules of the `crawm` package (enforced by source scan, see below), and
+# Pure modules of the `crab` package (enforced by source scan, see below), and
 # the *downward-only* `crate::` targets each is allowed to name. Anything not
 # listed (another pure module, backend, cli, logging, …) is an upward or sideways
 # edge and therefore a violation.
@@ -74,7 +74,7 @@ for name in LEAF:
         errors.append(f"expected workspace member `{name}` is missing")
         continue
     for dep in packages[name]["dependencies"]:
-        if dep["name"].startswith("crawm"):
+        if dep["name"].startswith("crab"):
             errors.append(f"{name} must be a leaf but depends on `{dep['name']}`")
 
 # The library target must expose the pure modules and nothing else, so the bin's
@@ -125,6 +125,6 @@ if errors:
 
 print(
     "boundaries OK: src/{core,config,layout,animation} are Smithay-free and "
-    "depend downward only, src/lib.rs exposes just them, crawm-ipc is a leaf"
+    "depend downward only, src/lib.rs exposes just them, crab-ipc is a leaf"
 )
 PY

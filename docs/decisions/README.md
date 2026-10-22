@@ -1,6 +1,6 @@
-# Architecture Decision Records — crawm
+# Architecture Decision Records — crab
 
-Short, immutable records of decisions that shape `crawm`. Format: **context →
+Short, immutable records of decisions that shape `crab`. Format: **context →
 decision → consequences**. Once accepted, an ADR is not edited; it is superseded by
 a new ADR.
 

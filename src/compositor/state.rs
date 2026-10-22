@@ -1,14 +1,14 @@
-//! The single-owner compositor state — `calloop`'s `State` for crawm.
+//! The single-owner compositor state — `calloop`'s `State` for crab.
 //!
-//! [`Crawm`] owns every piece of Smithay state the compositor touches and is
+//! [`Crab`] owns every piece of Smithay state the compositor touches and is
 //! owned by the main loop on one thread (ROADMAP.md §6 M1: *one
 //! `calloop::EventLoop<State>` on the main thread; `State` is single-owner*).
 //! Protocol handling is split per protocol under
 //! [`crate::compositor::handlers`]; input lives in [`crate::compositor::input`]
 //! and drawing in [`crate::compositor::render`].
 //!
-//! The pure model — windows, spaces, layouts, focus — lives in the `crawm`
-//! library ([`crawm::core`], [`crawm::layout`]); this file is the glue that
+//! The pure model — windows, spaces, layouts, focus — lives in the `crab`
+//! library ([`crab::core`], [`crab::layout`]); this file is the glue that
 //! keeps a Smithay `ToplevelSurface` next to its [`Window`] and applies the
 //! layout. That glue is binary-only, so it may depend on Smithay freely; the
 //! library's four modules stay pure (`scripts/check-boundaries.sh`).
@@ -16,16 +16,19 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use crawm::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
-use crawm::config::{AnimationStyle, Config, WindowRule};
-use crawm::core::{
-    ColumnWidth, Direction, FocusStack, FocusTarget, LayoutCommand, LayoutKind, LayoutParams,
-    Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState, TilePosition,
-    Window, WindowId,
+use crab::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
+use crab::config::{AnimationStyle, Config, WindowRule};
+use crab::core::{
+    ColumnWidth, Direction, FocusStack, FocusTarget, LayerId, LayoutCommand, LayoutKind,
+    LayoutParams, Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState,
+    TilePosition, Window, WindowId,
 };
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::utils::{Buffer, with_renderer_surface_state};
 use smithay::desktop::utils::under_from_surface_tree;
-use smithay::desktop::{PopupKind, PopupManager, WindowSurfaceType};
+use smithay::desktop::{
+    LayerSurface, PopupKind, PopupManager, WindowSurfaceType, layer_map_for_output,
+};
 use smithay::input::SeatState;
 use smithay::input::keyboard::{KeyboardHandle, ModifiersState};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
@@ -34,14 +37,22 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Serial, Size, Transform};
+use smithay::utils::{IsAlive, Logical, Physical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState, with_states};
+use smithay::wayland::fractional_scale::FractionalScaleManagerState;
+use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
+use smithay::wayland::shell::wlr_layer::{
+    KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, WlrLayerShellState,
+};
+use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellState,
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::ShmState;
+use smithay::wayland::viewporter::ViewporterState;
+use smithay::wayland::xdg_activation::XdgActivationState;
 
 use crate::compositor::binds::{AxisBindTable, BindIssue, BindTable, MouseBindTable};
 use crate::compositor::fit::WindowFit;
@@ -80,7 +91,7 @@ fn occupied_target(occupied: SpaceSet, current: u8, step: i8) -> Option<u8> {
     }
 }
 
-/// Logs one bind the config author wrote but crawm could not compile.
+/// Logs one bind the config author wrote but crab could not compile.
 fn log_bind_issue(kind: &str, issue: &BindIssue) {
     tracing::warn!(
         kind,
@@ -120,6 +131,97 @@ const OPEN_SLIDE: f64 = 24.0;
 
 /// How much smaller than its resting size a zooming window starts.
 const OPEN_ZOOM: f64 = 0.92;
+
+/// The stacking group a window belongs to, bottom to top.
+///
+/// The groups are the coarse part of the scene's z-order. Within the two
+/// floating groups, windows are ordered by focus (most recently focused on
+/// top); tiled and covering windows keep their layout order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum WindowLayer {
+    /// Tiled windows, in window-list order.
+    Tiled,
+    /// Ordinary floating windows, in focus order.
+    Floating,
+    /// Floating windows that asked to stay above ordinary floating ones.
+    FloatingOnTop,
+    /// Fullscreen and maximized windows, above everything else.
+    Covering,
+}
+
+/// One window's contribution to the scene's bottom-to-top stacking order.
+#[derive(Clone, Copy, Debug)]
+struct StackEntry {
+    id: WindowId,
+    layer: WindowLayer,
+    visible: bool,
+}
+
+/// Orders visible windows bottom-to-top.
+///
+/// Tiled and covering windows keep their window-list order. Floating windows
+/// are ordered by the focus stack instead, least recently focused first, so an
+/// unfocused floating window sits below every focused one and focusing a peer
+/// raises it above the rest. The two floating groups stay separate: an
+/// always-on-top window remains above ordinary floating windows even when it is
+/// not focused.
+fn stacked_order(entries: &[StackEntry], focus_stack: &FocusStack) -> Vec<WindowId> {
+    let in_focus_stack =
+        |id: WindowId| focus_stack.iter().any(|target| target.window() == Some(id));
+
+    let mut order = Vec::with_capacity(entries.len());
+    order.extend(
+        entries
+            .iter()
+            .filter(|entry| entry.visible && entry.layer == WindowLayer::Tiled)
+            .map(|entry| entry.id),
+    );
+    for layer in [WindowLayer::Floating, WindowLayer::FloatingOnTop] {
+        order.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.visible && entry.layer == layer && !in_focus_stack(entry.id))
+                .map(|entry| entry.id),
+        );
+        order.extend(
+            focus_stack
+                .iter()
+                .rev()
+                .filter_map(FocusTarget::window)
+                .filter_map(|id| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.id == id && entry.visible && entry.layer == layer)
+                })
+                .map(|entry| entry.id),
+        );
+    }
+    order.extend(
+        entries
+            .iter()
+            .filter(|entry| entry.visible && entry.layer == WindowLayer::Covering)
+            .map(|entry| entry.id),
+    );
+    order
+}
+
+/// Where a closing window's snapshot belonged within its former layer.
+///
+/// `order` is the live bottom-to-top order; `layer_of` resolves each id's
+/// current group. Falling back to the bottom of the group keeps a snapshot
+/// visible even if its neighbours have already gone.
+fn stack_index_in_layer(
+    order: &[WindowId],
+    id: WindowId,
+    layer: WindowLayer,
+    layer_of: impl Fn(WindowId) -> Option<WindowLayer>,
+) -> usize {
+    order
+        .iter()
+        .filter(|other| layer_of(**other) == Some(layer))
+        .position(|other| *other == id)
+        .unwrap_or(0)
+}
 
 /// One managed toplevel: the protocol object and its pure model.
 pub(crate) struct ManagedWindow {
@@ -211,8 +313,58 @@ pub(crate) struct ClosingWindow {
     /// The opacity the window had when it went away, so closing one that is
     /// still appearing does not make it flash to fully opaque.
     pub(crate) alpha: f32,
+    /// The stacking group the window was in, so it fades out between the same
+    /// kind of windows rather than always above the live scene.
+    pub(crate) layer: WindowLayer,
+    /// Its index within that group when it went away, clamped to the group's
+    /// current length at render time.
+    pub(crate) stack_index: usize,
     /// How far the close has progressed: 0 at the last frame, 1 when gone.
     pub(crate) progress: Animated<f64>,
+}
+
+/// A layer-shell surface mapped onto the output.
+///
+/// Smithay's [`LayerMap`](smithay::desktop::LayerMap) owns the placement and
+/// exclusive zone; this keeps the compositor-side identity and the optional
+/// open animation from the matching `[layer_rule]`.
+pub(crate) struct LayerEntry {
+    /// Handle used by focus and the protocol layer.
+    pub(crate) id: LayerId,
+    /// The surface and its namespace.
+    pub(crate) surface: LayerSurface,
+    /// The rule's `animation_type_open`, if one matched the namespace.
+    style: Option<AnimationStyle>,
+    /// How far the surface has appeared: 0 at its first mapped frame, 1 at rest.
+    open: Animated<f64>,
+    /// Set once the client commits a buffer; the open animation starts then.
+    mapped: bool,
+}
+
+impl LayerEntry {
+    /// The opacity the layer is drawn with.
+    fn alpha(&self, clocks: &Clocks) -> f32 {
+        self.open.value(clocks).clamp(0.0, 1.0) as f32
+    }
+
+    /// How far the open animation has run, from 0 to 1.
+    fn progress(&self, clocks: &Clocks) -> f64 {
+        self.open.value(clocks).clamp(0.0, 1.0)
+    }
+
+    /// Starts the configured open animation on the first mapped frame.
+    fn start_opening(&mut self, clocks: &Clocks) {
+        let Some(style) = self.style else {
+            return;
+        };
+        tracing::trace!(
+            namespace = self.surface.namespace(),
+            ?style,
+            "starting the layer-surface open animation"
+        );
+        self.open.snap_to(0.0);
+        self.open.animate(1.0, Kind::WindowOpen, clocks);
+    }
 }
 
 /// Where a window's open animation starts, for the configured style.
@@ -255,6 +407,21 @@ impl ManagedWindow {
     /// The window's model id.
     pub(crate) fn id(&self) -> WindowId {
         self.window.id
+    }
+
+    /// Which z-order group the window is drawn in.
+    pub(crate) fn stack_layer(&self) -> WindowLayer {
+        if self.window.fullscreen || self.window.maximized {
+            WindowLayer::Covering
+        } else if self.window.floating {
+            if self.window.always_on_top {
+                WindowLayer::FloatingOnTop
+            } else {
+                WindowLayer::Floating
+            }
+        } else {
+            WindowLayer::Tiled
+        }
     }
 
     /// Whether window rules let this window take keyboard focus.
@@ -660,15 +827,33 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
-pub(crate) struct Crawm {
+pub(crate) struct Crab {
     pub(crate) compositor_state: CompositorState,
     pub(crate) xdg_shell_state: XdgShellState,
+    pub(crate) layer_shell_state: WlrLayerShellState,
+    /// Kept alive for `zxdg_decoration_manager_v1` dispatch.
+    pub(crate) _decoration_state: XdgDecorationState,
+    /// Kept alive for `wp_fractional_scale_manager_v1` dispatch.
+    pub(crate) _fractional_scale_state: FractionalScaleManagerState,
+    /// Kept alive for `wp_viewporter` dispatch.
+    pub(crate) _viewporter_state: ViewporterState,
+    /// Kept alive for `xdg_activation_v1` dispatch.
+    pub(crate) xdg_activation_state: XdgActivationState,
+    /// Kept alive for `zxdg_output_manager_v1` dispatch; the global itself is
+    /// owned by the display.
+    pub(crate) _output_manager_state: OutputManagerState,
     pub(crate) shm_state: ShmState,
     pub(crate) data_device_state: DataDeviceState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) keyboard: KeyboardHandle<Self>,
     pub(crate) pointer: PointerHandle<Self>,
     pub(crate) output: Output,
+    /// The output's damage and presentation state, carried from frame to frame.
+    ///
+    /// It is the source of truth for which parts of the output need repainting
+    /// and which elements were actually shown, so frame callbacks are only sent
+    /// to surfaces that made it into a presented frame.
+    pub(crate) damage_tracker: OutputDamageTracker,
     /// The loaded configuration.
     pub(crate) config: Config,
     /// The compiled keyboard binds (built-ins plus `[binds.*]`).
@@ -679,15 +864,17 @@ pub(crate) struct Crawm {
     pub(crate) axis_binds: AxisBindTable,
     /// Current keyboard modifiers, used by pointer and axis chords.
     pub(crate) modifiers: ModifiersState,
-    /// crawm's own Wayland socket name, once the backend has bound it.
+    /// crab's own Wayland socket name, once the backend has bound it.
     ///
     /// `spawn:` and `[autostart]` pass this as `WAYLAND_DISPLAY` so launched
-    /// clients connect to crawm rather than to the host compositor.
+    /// clients connect to crab rather than to the host compositor.
     pub(crate) wayland_display: Option<String>,
     /// The pure output/space model for the single nested output.
     pub(crate) output_state: OutputModel,
     /// Managed toplevels, in layout order (first = first tile).
     pub(crate) windows: Vec<ManagedWindow>,
+    /// Layer-shell surfaces, in mapping order. Rendering groups them by layer.
+    pub(crate) layers: Vec<LayerEntry>,
     /// Toplevels that are gone but still fading out, drawn above the scene.
     pub(crate) closings: Vec<ClosingWindow>,
     /// The xdg popup trees, one per toplevel, plus their grabs.
@@ -734,17 +921,20 @@ pub(crate) struct Crawm {
     pub(crate) size: Size<i32, Logical>,
     /// Next window id to hand out (never reused, even after closes).
     next_window_id: u64,
+    /// Next layer-surface id to hand out.
+    next_layer_id: u64,
 }
 
-impl Crawm {
+impl Crab {
     /// Builds every Wayland global on `display` and returns the initial state.
     ///
-    /// The globals registered here (compositor, xdg-shell, shm, data-device,
-    /// wl_seat, wl_output) are M1's core set; M3 adds the layer shell and the
-    /// protocol breadth from `crawm-protocols`.
+    /// The globals registered here (compositor, xdg-shell, layer-shell,
+    /// xdg-output, shm, data-device, wl_seat, wl_output) are the protocols the
+    /// compositor can serve today; the rest of `crab-protocols` is still to
+    /// come.
     pub(crate) fn new(display: &DisplayHandle, config: &Config) -> Self {
         let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(display, "crawm");
+        let mut seat = seat_state.new_wl_seat(display, "crab");
         // Focus is pointless without a keyboard, and adding it can only fail if
         // keymap creation fails, which is not recoverable at startup.
         let keyboard = seat
@@ -758,16 +948,25 @@ impl Crawm {
 
         // Physical size comes from the backend once it exists; M2 starts at
         // zero and lets `set_size` correct it on the first resize.
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(display);
+        let decoration_state = XdgDecorationState::new::<Self>(display);
+        let fractional_scale_state = FractionalScaleManagerState::new::<Self>(display);
+        let viewporter_state = ViewporterState::new::<Self>(display);
+        let xdg_activation_state = XdgActivationState::new::<Self>(display);
         let output = Output::new(
-            "crawm-0".to_owned(),
+            "crab-0".to_owned(),
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
-                make: "crawm".to_owned(),
+                make: "crab".to_owned(),
                 model: "nested".to_owned(),
             },
         );
         output.create_global::<Self>(display);
+        // `set_size` replaces this with the real size before the first frame.
+        // The render transform is not the output transform: winit's default
+        // framebuffer is bottom-up, so the GLES renderer must flip it.
+        let damage_tracker = OutputDamageTracker::new((1, 1), 1.0, Transform::Flipped180);
 
         // Every space starts with the configured layout and tunables; a space then
         // remembers its own as the user cycles it (per-space layout memory).
@@ -787,7 +986,7 @@ impl Crawm {
         );
         let output_state = OutputModel::new(
             OutputId::new(0),
-            "crawm-0",
+            "crab-0",
             Rect::default(),
             1.0,
             space_state,
@@ -815,12 +1014,19 @@ impl Crawm {
         Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
+            layer_shell_state: WlrLayerShellState::new::<Self>(display),
+            _decoration_state: decoration_state,
+            _fractional_scale_state: fractional_scale_state,
+            _viewporter_state: viewporter_state,
+            xdg_activation_state,
+            _output_manager_state: output_manager_state,
             shm_state: ShmState::new::<Self>(display, vec![]),
             data_device_state: DataDeviceState::new::<Self>(display),
             seat_state,
             keyboard,
             pointer,
             output,
+            damage_tracker,
             config: config.clone(),
             binds,
             mouse_binds,
@@ -829,6 +1035,7 @@ impl Crawm {
             wayland_display: None,
             output_state,
             windows: Vec::new(),
+            layers: Vec::new(),
             closings: Vec::new(),
             popup_manager: PopupManager::default(),
             focus: FocusTarget::None,
@@ -844,10 +1051,11 @@ impl Crawm {
             cursor_image: CursorImageStatus::default_named(),
             size: (0, 0).into(),
             next_window_id: 1,
+            next_layer_id: 1,
         }
     }
 
-    /// Sets crawm's own Wayland socket name; spawned and autostarted clients
+    /// Sets crab's own Wayland socket name; spawned and autostarted clients
     /// receive it as `WAYLAND_DISPLAY`.
     pub(crate) fn set_wayland_display(&mut self, name: String) {
         self.wayland_display = Some(name);
@@ -856,7 +1064,7 @@ impl Crawm {
     /// Runs the `[autostart] exec_once` commands.
     ///
     /// This is called once the socket exists, so `WAYLAND_DISPLAY` can point at
-    /// crawm. A command that fails to parse or spawn is logged and skipped: a
+    /// crab. A command that fails to parse or spawn is logged and skipped: a
     /// bad autostart entry must not stop the session.
     pub(crate) fn run_autostart(&mut self) {
         for line in &self.config.autostart.exec_once {
@@ -890,13 +1098,284 @@ impl Crawm {
             None,
         );
         self.output.set_preferred(mode);
+        // The renderer needs the winit framebuffer's bottom-up origin, not the
+        // output's Normal transform, and the tracker's static mode must follow
+        // the new size. Rebuilding it deliberately loses the previous damage
+        // state, so the first frame after a resize repaints everything.
+        self.damage_tracker = OutputDamageTracker::new(physical, 1.0, Transform::Flipped180);
         self.output_state.set_geometry(Rect::new(
             0.0,
             0.0,
             f64::from(physical.w),
             f64::from(physical.h),
         ));
+        self.sync_layer_zone();
         self.relayout();
+    }
+
+    /// Re-arranges the layer map after a size or exclusive-zone change and
+    /// updates the area left for ordinary windows.
+    fn sync_layer_zone(&mut self) {
+        let zone = {
+            let mut map = layer_map_for_output(&self.output);
+            map.arrange();
+            map.non_exclusive_zone()
+        };
+        let area = Rect::new(
+            f64::from(zone.loc.x),
+            f64::from(zone.loc.y),
+            f64::from(zone.size.w),
+            f64::from(zone.size.h),
+        );
+        let changed = area != self.output_state.usable_area;
+        tracing::trace!(?area, changed, "synced the area left by layer surfaces");
+        if changed {
+            self.output_state.usable_area = area;
+        }
+    }
+
+    /// Registers a new layer-shell surface and maps it onto the output.
+    pub(crate) fn add_layer_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
+        let id = LayerId::new(self.next_layer_id);
+        self.next_layer_id += 1;
+
+        // A layer rule selects the animation by namespace. No rule (or no
+        // animation named by it) means the surface appears immediately.
+        let style = self
+            .config
+            .layer_rules
+            .iter()
+            .find(|rule| {
+                rule.layer_name.is_empty() || rule.layer_name.iter().any(|name| name == &namespace)
+            })
+            .and_then(|rule| rule.animation_type_open.as_deref())
+            .and_then(AnimationStyle::from_name);
+
+        let layer = LayerSurface::new(surface, namespace.clone());
+        let mapped = {
+            let mut map = layer_map_for_output(&self.output);
+            map.map_layer(&layer)
+        };
+        if let Err(err) = mapped {
+            tracing::warn!(?err, %namespace, "failed to map a layer surface");
+            return;
+        }
+
+        tracing::debug!(%namespace, "mapped a layer surface");
+        self.layers.push(LayerEntry {
+            id,
+            surface: layer,
+            style,
+            open: Animated::new(1.0, OPEN_CURVE, Kind::WindowOpen),
+            mapped: false,
+        });
+        self.sync_layer_zone();
+        self.relayout();
+    }
+
+    /// Handles a commit on a layer-shell surface: arranges the map, sends the
+    /// initial configure when needed, and starts the layer's open animation on
+    /// its first buffer.
+    pub(crate) fn on_layer_commit(&mut self, surface: &WlSurface) {
+        let Some(index) = self
+            .layers
+            .iter()
+            .position(|entry| entry.surface.wl_surface() == surface)
+        else {
+            return;
+        };
+
+        let committed = committed_frame(surface).is_some();
+        let (layer, needs_configure, zone) = {
+            let mut map = layer_map_for_output(&self.output);
+            // The initial configure must follow the first commit; arranging
+            // first respects the size and anchors the client has just sent.
+            map.arrange();
+            let Some(layer) = map
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .cloned()
+            else {
+                return;
+            };
+            let needs_configure = layer.layer_surface().has_pending_changes();
+            (layer, needs_configure, map.non_exclusive_zone())
+        };
+        if needs_configure {
+            layer.layer_surface().send_pending_configure();
+        }
+
+        let area = Rect::new(
+            f64::from(zone.loc.x),
+            f64::from(zone.loc.y),
+            f64::from(zone.size.w),
+            f64::from(zone.size.h),
+        );
+        let mut relayout = false;
+        if area != self.output_state.usable_area {
+            self.output_state.usable_area = area;
+            relayout = true;
+        }
+
+        let animate = self.config.animations.enabled;
+        let clocks = self.frame_clock;
+        let entry = &mut self.layers[index];
+        if !entry.mapped && committed {
+            entry.mapped = true;
+            if animate {
+                entry.start_opening(&clocks);
+            }
+        }
+
+        // An exclusive surface on the top or overlay layer owns the keyboard,
+        // as the protocol requires. A bar normally asks for no keyboard and
+        // leaves focus alone.
+        let exclusive = self.exclusive_layer();
+        if let Some(id) = exclusive {
+            if self.focus != FocusTarget::LayerSurface(id) {
+                self.focus_layer(id);
+            }
+        } else if let FocusTarget::LayerSurface(id) = self.focus {
+            let still_focusable = self
+                .layer(id)
+                .is_some_and(|entry| entry.surface.can_receive_keyboard_focus());
+            if !still_focusable {
+                self.focus = FocusTarget::None;
+                self.focus_stack.remove(FocusTarget::LayerSurface(id));
+                self.refocus_after_view_change();
+            }
+        }
+
+        if relayout {
+            self.relayout();
+        }
+    }
+
+    /// Removes a layer-shell surface from the map and focus bookkeeping.
+    pub(crate) fn remove_layer_surface(&mut self, surface: &WlrLayerSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        {
+            let mut map = layer_map_for_output(&self.output);
+            let found = map
+                .layers()
+                .find(|layer| layer.layer_surface() == surface)
+                .cloned();
+            if let Some(layer) = found {
+                map.unmap_layer(&layer);
+            }
+        }
+
+        let Some(index) = self
+            .layers
+            .iter()
+            .position(|entry| entry.surface.wl_surface() == &wl_surface)
+        else {
+            return;
+        };
+        let id = self.layers.remove(index).id;
+        tracing::debug!(?id, "removed a layer surface");
+        self.focus_stack.remove(FocusTarget::LayerSurface(id));
+        let was_focused = self.focus == FocusTarget::LayerSurface(id);
+        if was_focused {
+            self.focus = FocusTarget::None;
+        }
+        self.sync_layer_zone();
+        if was_focused {
+            self.refocus_after_view_change();
+        }
+        self.relayout();
+    }
+
+    /// The layer surface with this id.
+    pub(crate) fn layer(&self, id: LayerId) -> Option<&LayerEntry> {
+        self.layers.iter().find(|entry| entry.id == id)
+    }
+
+    /// The id of the layer surface whose toplevel is `surface`.
+    pub(crate) fn layer_id_for(&self, surface: &WlSurface) -> Option<LayerId> {
+        self.layers
+            .iter()
+            .find(|entry| entry.surface.wl_surface() == surface)
+            .map(|entry| entry.id)
+    }
+
+    /// The top-most `Top`/`Overlay` surface that asked for exclusive keyboard
+    /// focus, if any.
+    fn exclusive_layer(&self) -> Option<LayerId> {
+        self.layers
+            .iter()
+            .rev()
+            .find(|entry| {
+                matches!(entry.surface.layer(), Layer::Top | Layer::Overlay)
+                    && entry.surface.cached_state().keyboard_interactivity
+                        == KeyboardInteractivity::Exclusive
+            })
+            .map(|entry| entry.id)
+    }
+
+    /// The top-most layer surface under `position`, if any.
+    ///
+    /// Background surfaces are wallpaper and never take pointer input; bottom,
+    /// top, and overlay surfaces do.
+    pub(crate) fn layer_at(&self, position: Point<f64, Logical>) -> Option<LayerId> {
+        let map = layer_map_for_output(&self.output);
+        for kind in [Layer::Overlay, Layer::Top, Layer::Bottom] {
+            if let Some(layer) = map.layer_under(kind, position) {
+                return self.layer_id_for(layer.wl_surface());
+            }
+        }
+        None
+    }
+
+    /// The surface under `position` within the given layer kinds, with its
+    /// logical origin.
+    fn layer_surface_under(
+        &self,
+        position: Point<f64, Logical>,
+        layers: &[Layer],
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let map = layer_map_for_output(&self.output);
+        for &kind in layers {
+            let Some(layer) = map.layer_under(kind, position) else {
+                continue;
+            };
+            let Some(geometry) = map.layer_geometry(layer) else {
+                continue;
+            };
+            let origin = geometry.loc + self.layer_offset(layer.wl_surface());
+            let Some((surface, location)) =
+                layer.surface_under(position - origin.to_f64(), WindowSurfaceType::ALL)
+            else {
+                continue;
+            };
+            return Some((surface, (origin + location).to_f64()));
+        }
+        None
+    }
+
+    /// How opaque a layer surface is while its open animation runs.
+    pub(crate) fn layer_alpha(&self, surface: &WlSurface) -> f32 {
+        self.layers
+            .iter()
+            .find(|entry| entry.surface.wl_surface() == surface)
+            .map_or(1.0, |entry| entry.alpha(&self.frame_clock))
+    }
+
+    /// Where a layer surface is drawn, including the slide component of its
+    /// open animation.
+    pub(crate) fn layer_offset(&self, surface: &WlSurface) -> Point<i32, Logical> {
+        let Some(entry) = self
+            .layers
+            .iter()
+            .find(|entry| entry.surface.wl_surface() == surface)
+        else {
+            return (0, 0).into();
+        };
+        if entry.style != Some(AnimationStyle::Slide) {
+            return (0, 0).into();
+        }
+        let progress = entry.progress(&self.frame_clock);
+        let dy = ((1.0 - progress) * OPEN_SLIDE).round() as i32;
+        (0, dy).into()
     }
 
     /// Recomputes every window's rectangle for the current view and layout.
@@ -907,7 +1386,7 @@ impl Crawm {
     /// Re-times the animation clock for the frame about to be drawn.
     ///
     /// `frame_time` is the presentation time of that frame, in seconds since
-    /// [`Crawm::start_time`]. The winit backend has no vertical-blank timestamp
+    /// [`Crab::start_time`]. The winit backend has no vertical-blank timestamp
     /// and reads its own loop clock at the frame boundary; the tty backend will
     /// pass the real one (TODO.md §3.2).
     pub(crate) fn advance_frame(&mut self, frame_time: f64) {
@@ -928,9 +1407,13 @@ impl Crawm {
             window.visual.is_animating(&self.frame_clock)
                 || window.open.is_animating(&self.frame_clock)
         }) || self
-            .closings
+            .layers
             .iter()
-            .any(|closing| closing.progress.is_animating(&self.frame_clock))
+            .any(|layer| layer.open.is_animating(&self.frame_clock))
+            || self
+                .closings
+                .iter()
+                .any(|closing| closing.progress.is_animating(&self.frame_clock))
     }
 
     /// Registers a newly created toplevel with the space/layout model.
@@ -1111,7 +1594,10 @@ impl Crawm {
                 window.window.max_size = max_size;
                 relayout = true;
             }
-            if !window.mapped {
+            // A commit without a buffer is only metadata (initial state, size
+            // hints, decoration); the window becomes visible on the first
+            // buffer, which is also when the open animation should start.
+            if !window.mapped && committed.is_some() && geometry.size.w > 0 && geometry.size.h > 0 {
                 window.mapped = true;
                 newly_mapped.push(window.id());
                 relayout = true;
@@ -1147,6 +1633,12 @@ impl Crawm {
         // commit to move an unmapped popup into its tree).
         self.popup_manager.commit(surface);
 
+        // Layer-shell surfaces own their placement through Smithay's layer
+        // map; the commit is also when the initial configure may be sent.
+        if self.layer_id_for(surface).is_some() {
+            self.on_layer_commit(surface);
+        }
+
         if relayout {
             self.relayout();
         }
@@ -1177,7 +1669,39 @@ impl Crawm {
             self.windows.retain(|window| window.surface.alive());
             self.forget_windows(&dead);
         }
+        self.prune_dead_layers();
         self.popup_manager.cleanup();
+    }
+
+    /// Drops layer entries whose client object is gone and re-arranges the map.
+    fn prune_dead_layers(&mut self) {
+        let dead: Vec<LayerId> = self
+            .layers
+            .iter()
+            .filter(|entry| !entry.surface.alive())
+            .map(|entry| entry.id)
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        self.layers.retain(|entry| entry.surface.alive());
+        let mut lost_focus = false;
+        for id in dead {
+            self.focus_stack.remove(FocusTarget::LayerSurface(id));
+            if self.focus == FocusTarget::LayerSurface(id) {
+                self.focus = FocusTarget::None;
+                lost_focus = true;
+            }
+        }
+        {
+            let mut map = layer_map_for_output(&self.output);
+            map.cleanup();
+        }
+        self.sync_layer_zone();
+        if lost_focus {
+            self.refocus_after_view_change();
+        }
+        self.relayout();
     }
 
     /// Removes the window owning `surface` (from `toplevel_destroyed`).
@@ -1193,6 +1717,14 @@ impl Crawm {
             return;
         };
         let id = self.windows[index].window.id;
+        // Remember where in the scene it was, before removing it shifts the
+        // surviving windows down. The snapshot fades out in that group and near
+        // that index instead of always covering the live scene.
+        let layer = self.windows[index].stack_layer();
+        let order = self.stacked_windows();
+        let stack_index = stack_index_in_layer(&order, id, layer, |other| {
+            self.window(other).map(ManagedWindow::stack_layer)
+        });
         let closing = if self.config.animations.enabled
             && self.windows[index].mapped
             && self.windows[index].visible
@@ -1222,6 +1754,8 @@ impl Crawm {
                     visual,
                     style,
                     alpha,
+                    layer,
+                    stack_index,
                     progress,
                 }
             })
@@ -1396,7 +1930,7 @@ impl Crawm {
     /// Removes spaces that just became empty and renumbers the rest.
     ///
     /// Window membership is renumbered to match, and each space's layout state
-    /// moves with it (see [`crawm::core::Output::compact`]).
+    /// moves with it (see [`crab::core::Output::compact`]).
     fn compact_spaces(&mut self) {
         let remap = self.output_state.compact(self.occupied_spaces());
         for window in &mut self.windows {
@@ -1428,7 +1962,29 @@ impl Crawm {
                 }
             }
         }
+        // A popup may belong to a layer-shell surface (a launcher's menu).
+        for entry in &self.layers {
+            let Some(origin) = self.layer_origin(&entry.surface) else {
+                continue;
+            };
+            if entry.surface.wl_surface() == surface {
+                return Some(origin);
+            }
+            for (popup, location) in PopupManager::popups_for_surface(entry.surface.wl_surface()) {
+                if popup.wl_surface() == surface {
+                    let offset = location - popup.geometry().loc;
+                    return Some(origin + offset + popup.geometry().loc);
+                }
+            }
+        }
         None
+    }
+
+    /// The drawn origin of a layer surface, in output coordinates.
+    fn layer_origin(&self, layer: &LayerSurface) -> Option<Point<i32, Logical>> {
+        let map = layer_map_for_output(&self.output);
+        map.layer_geometry(layer)
+            .map(|geometry| geometry.loc + self.layer_offset(layer.wl_surface()))
     }
 
     /// The managed window with this id.
@@ -1448,11 +2004,37 @@ impl Crawm {
         self.focus.window().filter(|id| self.window(*id).is_some())
     }
 
+    /// Every visible window in bottom-to-top painting order.
+    ///
+    /// Tiled and covering windows keep their window-list order. Floating windows
+    /// are ordered by the focus stack instead, least recently focused first: an
+    /// unfocused floating window sits below every focused one, and focusing a
+    /// peer raises it above the rest. Rendering and hit-testing share this order
+    /// so a click lands on the window the user can see.
+    pub(crate) fn stacked_windows(&self) -> Vec<WindowId> {
+        let entries: Vec<StackEntry> = self
+            .windows
+            .iter()
+            .map(|window| StackEntry {
+                id: window.id(),
+                layer: window.stack_layer(),
+                visible: window.mapped && window.visible,
+            })
+            .collect();
+        stacked_order(&entries, &self.focus_stack)
+    }
+
     /// Focuses `id` (or nothing), updating activation and keyboard focus.
     ///
     /// Every focus change goes through here (`COMPOSITOR.md` §6) so the
     /// protocol state, the focus stack, and the space history stay in step.
     pub(crate) fn focus_window(&mut self, id: Option<WindowId>) {
+        // A keyboard-exclusive layer (a launcher, most often) keeps the
+        // keyboard until it goes away, whatever tried to focus a window.
+        if let Some(layer) = self.exclusive_layer() {
+            self.focus_layer(layer);
+            return;
+        }
         if id
             .and_then(|id| self.window(id))
             .is_some_and(|window| !window.is_focusable())
@@ -1480,6 +2062,34 @@ impl Crawm {
         self.keyboard.clone().set_focus(self, surface, 0.into());
     }
 
+    /// Focuses a keyboard-interactive layer surface.
+    ///
+    /// Layer surfaces have no `xdg_toplevel` activation state, so this only
+    /// updates the focus stack and the seat's keyboard focus.
+    pub(crate) fn focus_layer(&mut self, id: LayerId) -> bool {
+        let Some(surface) = self.layer(id).and_then(|entry| {
+            entry
+                .surface
+                .can_receive_keyboard_focus()
+                .then(|| entry.surface.wl_surface().clone())
+        }) else {
+            return false;
+        };
+
+        if self.focus == FocusTarget::LayerSurface(id) {
+            return true;
+        }
+        if let Some(old) = self.focus.window() {
+            self.set_activated(old, false);
+        }
+        self.focus = FocusTarget::LayerSurface(id);
+        self.focus_stack.focus(self.focus);
+        self.keyboard
+            .clone()
+            .set_focus(self, Some(surface), 0.into());
+        true
+    }
+
     /// Sets the xdg `activated` state for a window.
     fn set_activated(&mut self, id: WindowId, activated: bool) {
         let Some(window) = self.window_mut(id) else {
@@ -1497,51 +2107,15 @@ impl Crawm {
 
     /// The top-most visible window covering `position`.
     pub(crate) fn window_at(&self, position: Point<f64, Logical>) -> Option<WindowId> {
-        let point = crawm::core::Point::new(position.x, position.y);
-        let hits = |window: &ManagedWindow| {
-            window.mapped && window.visible && window.visual_rect(&self.frame_clock).contains(point)
-        };
-        let covering = |window: &ManagedWindow| {
-            window.mapped
-                && window.visible
-                && (window.window.fullscreen || window.window.maximized)
-                && hits(window)
-        };
-        // Fullscreen and maximized windows are drawn last, over every floating
-        // window, so they are tested first.
-        if let Some(window) = self.windows.iter().rev().find(|window| covering(window)) {
-            return Some(window.id());
-        }
-        // Floating windows stack by focus, most recent on top. An always-on-top
-        // window wins over every ordinary floating window, matching `render`.
-        for on_top in [true, false] {
-            for target in self.focus_stack.iter() {
-                let Some(id) = target.window() else {
-                    continue;
-                };
-                if let Some(window) = self.window(id) {
-                    if window.window.floating
-                        && window.window.always_on_top == on_top
-                        && hits(window)
-                    {
-                        return Some(id);
-                    }
-                }
-            }
-        }
-        // Floating windows that were never focused are not in the focus stack.
-        for on_top in [true, false] {
-            if let Some(window) = self.windows.iter().rev().find(|window| {
-                window.window.floating && window.window.always_on_top == on_top && hits(window)
-            }) {
-                return Some(window.id());
-            }
-        }
-        self.windows
-            .iter()
-            .rev()
-            .find(|window| hits(window))
-            .map(ManagedWindow::id)
+        let point = crab::core::Point::new(position.x, position.y);
+        // Test in the exact reverse of the painting order. Sharing
+        // [`Self::stacked_windows`] with the renderer is what guarantees a click
+        // lands on the window the user can see, including the floating focus
+        // stack and the always-on-top group.
+        self.stacked_windows().into_iter().rev().find(|id| {
+            self.window(*id)
+                .is_some_and(|window| window.visual_rect(&self.frame_clock).contains(point))
+        })
     }
 
     /// Returns the top-most mapped surface covering `position`, with the
@@ -1558,10 +2132,18 @@ impl Crawm {
         &self,
         position: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // Top and overlay layers sit above ordinary windows and their popups.
+        if let Some(hit) = self.layer_surface_under(position, &[Layer::Overlay, Layer::Top]) {
+            return Some(hit);
+        }
         // A popup floats above every toplevel, so its tree gets first refusal:
         // this is what keeps the pointer on an open menu (and lets its grab see
-        // that the pointer is still on the right client).
-        for window in self.windows.iter().rev().filter(|w| w.mapped && w.visible) {
+        // that the pointer is still on the right client). Test them in reverse
+        // painting order, like the toplevels below.
+        for id in self.stacked_windows().into_iter().rev() {
+            let Some(window) = self.window(id) else {
+                continue;
+            };
             let origin = window.visual_origin(&self.frame_clock);
             for (popup, offset) in popup_offsets(window) {
                 let origin = origin + offset;
@@ -1575,16 +2157,29 @@ impl Crawm {
                 }
             }
         }
-        let id = self.window_at(position)?;
-        let window = self.window(id)?;
-        Some((
-            window.wl_surface().clone(),
-            window.fit(&self.frame_clock).input_origin(position),
-        ))
+        if let Some(id) = self.window_at(position) {
+            let window = self.window(id)?;
+            return Some((
+                window.wl_surface().clone(),
+                window.fit(&self.frame_clock).input_origin(position),
+            ));
+        }
+        // Bottom layers (panels that do take input) sit below windows.
+        self.layer_surface_under(position, &[Layer::Bottom])
     }
 
     /// Focuses the window under `position` (click-to-focus).
     pub(crate) fn focus_at(&mut self, position: Point<f64, Logical>) {
+        if let Some(id) = self.exclusive_layer() {
+            self.focus_layer(id);
+            return;
+        }
+        if let Some(id) = self.layer_at(position) {
+            // A bar or wallpaper that asked for no keyboard still owns the
+            // click: focus must not fall through to a window behind it.
+            self.focus_layer(id);
+            return;
+        }
         if let Some(id) = self.window_at(position) {
             self.focus_window(Some(id));
         } else if self.surface_under(position).is_none() {
@@ -1740,9 +2335,18 @@ impl Crawm {
 
     /// Re-focuses something sensible after the visible set changed.
     ///
-    /// Prefers the space's own focus history, then any mapped window on the view;
-    /// clears focus if the new view is empty.
+    /// Prefers the current keyboard-interactive layer, the space's own focus
+    /// history, then any mapped window on the view; clears focus if the new
+    /// view is empty.
     fn refocus_after_view_change(&mut self) {
+        if let FocusTarget::LayerSurface(id) = self.focus {
+            if self
+                .layer(id)
+                .is_some_and(|entry| entry.surface.can_receive_keyboard_focus())
+            {
+                return;
+            }
+        }
         let view = self.output_state.view.visible;
         let on_screen = |window: &ManagedWindow| {
             window.mapped && window.window.is_on(view) && window.is_focusable()
@@ -1794,10 +2398,10 @@ impl Crawm {
     ///
     /// The command goes through the layout rather than straight to the
     /// parameters, so a family that owns its state — the scroller and its
-    /// columns — gets to handle it (`crawm::layout::apply_command`).
+    /// columns — gets to handle it (`crab::layout::apply_command`).
     pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
         if let Some(space) = self.output_state.current_space_state_mut() {
-            crawm::layout::apply_command(
+            crab::layout::apply_command(
                 space.layout,
                 command,
                 &mut space.params,
@@ -1940,12 +2544,20 @@ impl Crawm {
         self.relayout();
     }
 
-    /// Asks the focused window to close.
+    /// Asks the focused window or layer surface to close.
     pub(crate) fn close_focused(&mut self) {
-        if let Some(id) = self.focused_id() {
-            if let Some(window) = self.window(id) {
-                window.surface.send_close();
+        match self.focus {
+            FocusTarget::Window(id) => {
+                if let Some(window) = self.window(id) {
+                    window.surface.send_close();
+                }
             }
+            FocusTarget::LayerSurface(id) => {
+                if let Some(layer) = self.layer(id) {
+                    layer.surface.layer_surface().send_close();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2286,6 +2898,88 @@ mod tests {
     /// A size in logical pixels, the way the protocol spells it.
     fn size(w: i32, h: i32) -> Size<i32, Logical> {
         (w, h).into()
+    }
+
+    fn id(raw: u64) -> WindowId {
+        WindowId::new(raw)
+    }
+
+    fn entry(raw: u64, layer: WindowLayer, visible: bool) -> StackEntry {
+        StackEntry {
+            id: id(raw),
+            layer,
+            visible,
+        }
+    }
+
+    #[test]
+    fn floating_windows_stack_by_focus_and_always_on_top_stays_above() {
+        let entries = [
+            entry(1, WindowLayer::Tiled, true),
+            entry(2, WindowLayer::Floating, true),
+            entry(3, WindowLayer::Floating, true),
+            entry(4, WindowLayer::FloatingOnTop, true),
+            entry(5, WindowLayer::Covering, true),
+        ];
+        let mut focus = FocusStack::new();
+        focus.focus(FocusTarget::Window(id(2)));
+
+        assert_eq!(
+            stacked_order(&entries, &focus),
+            vec![id(1), id(3), id(2), id(4), id(5)],
+            "tiled below floating, the focused peer above the unfocused one, \
+             and always-on-top above both"
+        );
+
+        // Focusing the other ordinary floating window raises it in turn; the
+        // always-on-top window stays above it because its layer is higher.
+        focus.focus(FocusTarget::Window(id(3)));
+        assert_eq!(
+            stacked_order(&entries, &focus),
+            vec![id(1), id(2), id(3), id(4), id(5)]
+        );
+    }
+
+    #[test]
+    fn hidden_and_closed_windows_never_enter_the_stack() {
+        let entries = [
+            entry(1, WindowLayer::Floating, false),
+            entry(2, WindowLayer::Floating, true),
+            entry(3, WindowLayer::Tiled, true),
+        ];
+        let mut focus = FocusStack::new();
+        // The closing window 1 was focused, and 9 is a stale stack entry.
+        focus.focus(FocusTarget::Window(id(1)));
+        focus.focus(FocusTarget::Window(id(9)));
+        focus.focus(FocusTarget::Window(id(2)));
+
+        assert_eq!(
+            stacked_order(&entries, &focus),
+            vec![id(3), id(2)],
+            "a hidden window's focus entry must not draw or reserve a slot"
+        );
+    }
+
+    #[test]
+    fn a_closing_window_keeps_its_index_within_its_layer() {
+        let order = [id(1), id(2), id(3), id(4), id(5)];
+        let layer_of = |window: WindowId| match window.raw() {
+            1 | 3 => Some(WindowLayer::Tiled),
+            2 | 4 | 5 => Some(WindowLayer::Floating),
+            _ => None,
+        };
+
+        // The floating group is [2, 4, 5], so window 4's index is 1 there,
+        // not 3 in the full scene.
+        assert_eq!(
+            stack_index_in_layer(&order, id(4), WindowLayer::Floating, layer_of),
+            1
+        );
+        // A window that is already gone falls back to the bottom of its group.
+        assert_eq!(
+            stack_index_in_layer(&order, id(9), WindowLayer::Floating, layer_of),
+            0
+        );
     }
 
     #[test]

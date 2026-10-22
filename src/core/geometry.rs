@@ -1,6 +1,6 @@
 //! Logical-coordinate geometry.
 //!
-//! crawm lays out in **logical** coordinates (`f64`) and converts to physical
+//! crab lays out in **logical** coordinates (`f64`) and converts to physical
 //! pixels at a single rounding site in the renderer (ROADMAP §3E). Keeping this
 //! crate free of any integer/scale types makes that rule hard to violate.
 

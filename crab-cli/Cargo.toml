@@ -1,20 +1,20 @@
 [package]
-name = "crawm-cli"
+name = "crab-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Command-line client for the crawm IPC socket."
+description = "Command-line client for the crab IPC socket."
 
 [[bin]]
-name = "crawm-cli"
+name = "crab-cli"
 path = "src/main.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-crawm-ipc = { workspace = true }
+crab-ipc = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

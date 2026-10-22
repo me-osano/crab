@@ -1,4 +1,4 @@
-# crawm — package root AND workspace root (niri-style): the compositor itself
+# crab — package root AND workspace root (niri-style): the compositor itself
 # lives in `src/` here; the remaining library crates sit alongside it at the
 # repository root. Layout and boundary rules live in ROADMAP.md §5.
 #
@@ -8,19 +8,19 @@
 # downward-only dependency layering between the pure modules.
 
 [package]
-name = "crawm"
+name = "crab"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The crawm Wayland compositor."
+description = "The crab Wayland compositor."
 
 [workspace]
 resolver = "3" # edition 2024's resolver (MSRV-aware); see docs/decisions/
 members = [
   ".",
-  "crawm-ipc",
-  "crawm-cli",
+  "crab-ipc",
+  "crab-cli",
 ]
 
 [workspace.package]
@@ -29,11 +29,11 @@ edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
 description = "A Wayland compositor merging mango tags, niri scrolling, and cosmic protocol breadth."
-authors = ["crawm contributors"]
+authors = ["crab contributors"]
 
 [workspace.dependencies]
 # Internal crates (path + version so they can be published later).
-crawm-ipc = { path = "crawm-ipc", version = "0.0.0" }
+crab-ipc = { path = "crab-ipc", version = "0.0.0" }
 
 # External.
 anyhow = "1"
@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Property testing for the pure layout/space invariants (TODO §2.8). `fork` and
 # `regex` are off: they pull `rusty-fork`/`tempfile` and `regex-syntax`, which
-# crawm does not need, keeping the dev-dependency tree small.
+# crab does not need, keeping the dev-dependency tree small.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Smithay is pinned to 0.7 (ADR-0002: GLES only, never Vulkan; xwayland in M9).
@@ -61,12 +61,10 @@ smithay = { version = "0.7", default-features = false, features = [
   "wayland_frontend",
 ] }
 
-# The `crawm` package: the library (`src/lib.rs`, pure) plus the binary
+# The `crab` package: the library (`src/lib.rs`, pure) plus the binary
 # (`src/main.rs`, Smithay glue). The pure modules pull in only pure deps:
 # serde/toml/thiserror for config parsing.
 [dependencies]
-crawm-ipc = { workspace = true }
-
 anyhow = { workspace = true }
 bitflags = { workspace = true }
 clap = { workspace = true }

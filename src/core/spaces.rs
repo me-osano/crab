@@ -5,7 +5,7 @@ use bitflags::bitflags;
 bitflags! {
     /// A set of spaces attached to a window or currently shown on an output.
     ///
-    /// crawm exposes 32 spaces per output, numbered `1..=32`. The first nine have
+    /// crab exposes 32 spaces per output, numbered `1..=32`. The first nine have
     /// named constants for convenience; all 32 are reachable through
     /// [`SpaceSet::from_index`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

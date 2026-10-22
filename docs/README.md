@@ -1,4 +1,4 @@
-# crawm documentation
+# crab documentation
 
 Index of the project's written material. Start with the roadmap.
 
@@ -11,13 +11,13 @@ Index of the project's written material. Start with the roadmap.
 
 ## Architecture at a glance
 
-crawm is a single-process Wayland compositor built on [Smithay]. Logic that can
+crab is a single-process Wayland compositor built on [Smithay]. Logic that can
 be pure **is** pure: the data model, config, layout, and animation engines all
 live as Smithay-free modules inside the compositor's **library target**, and only
 the IPC types stay a crate (shared with the CLI and with third-party tools):
 
 ```
-        ┌──────────────────────── crawm (package) ──────────────────────────┐
+        ┌──────────────────────── crab (package) ──────────────────────────┐
         │  bin: src/main.rs — Smithay glue, backends, handlers, render, input│
         │       (the only place allowed to touch Smithay/calloop/…)         │
         │                                                                   │
@@ -30,7 +30,7 @@ the IPC types stay a crate (shared with the CLI and with third-party tools):
                                        │ depends on
                                        ▼
                                 ┌──────────────┐
-                                │  crawm-ipc   │ ◄──── crawm-cli (CLI)
+                                │  crab-ipc   │ ◄──── crab-cli (CLI)
                                 │    (leaf)    │
                                 └──────────────┘
 ```
@@ -43,8 +43,8 @@ the IPC types stay a crate (shared with the CLI and with third-party tools):
 - Those pure modules depend **downward only** (`core` on nothing;
   `config`/`layout`/`animation` on `core`), and `src/lib.rs` exposes them and
   nothing else, so the reusable surface can never pull in graphics code.
-- `crawm-ipc` is a **leaf**: no other `crawm-*` dependency, so third-party tools can
+- `crab-ipc` is a **leaf**: no other `crab-*` dependency, so third-party tools can
   depend on it alone.
-- Only the `crawm` binary (`src/main.rs`) touches Smithay.
+- Only the `crab` binary (`src/main.rs`) touches Smithay.
 
 [Smithay]: https://github.com/Smithay/smithay

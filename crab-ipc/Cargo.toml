@@ -1,10 +1,10 @@
 [package]
-name = "crawm-ipc"
+name = "crab-ipc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "crawm IPC protocol types and client (leaf crate; no other crawm-* deps)."
+description = "crab IPC protocol types and client (leaf crate; no other crab-* deps)."
 
 [lints]
 workspace = true

@@ -400,13 +400,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "crawm"
+name = "crab"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
  "clap",
- "crawm-ipc",
  "proptest",
  "serde",
  "smithay",
@@ -417,17 +416,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "crawm-cli"
+name = "crab-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "crawm-ipc",
+ "crab-ipc",
  "serde_json",
 ]
 
 [[package]]
-name = "crawm-ipc"
+name = "crab-ipc"
 version = "0.0.0"
 dependencies = [
  "serde",

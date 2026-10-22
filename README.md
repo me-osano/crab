@@ -1,11 +1,11 @@
-# crawm
+# crab
 
 > A Wayland compositor + window manager in Rust on [Smithay][smithay], merging the
 > best of **mango** (tags, many layouts, effects), **niri** (scrollable tiling,
 > rigorous animation, typed IPC), and **cosmic** (mixed tiling/floating, groups,
 > protocol breadth).
 
-**Status: pre-alpha scaffold.** The workspace builds and `crawm` can open a nested
+**Status: pre-alpha scaffold.** The workspace builds and `crab` can open a nested
 winit window; it does not yet run a real session.
 
 ## Documentation
@@ -27,13 +27,13 @@ src/              the compositor: Smithay glue, backends, handlers, render, inpu
   layout/         pure layout engine: Layout trait + implementations (no Smithay)
   animation/      pure springs/easing curves + animated scalars (no Smithay)
 tests/            headless integration tests (drive the library directly)
-crawm-ipc/        IPC types + client (leaf; no other crawm-* deps)
-crawm-cli/        CLI client (`crawm-cli`)
+crab-ipc/        IPC types + client (leaf; no other crab-* deps)
+crab-cli/        CLI client (`crab-cli`)
 resources/        default config, session units, shaders, portals
 docs/             ADRs and (later) the manual
 ```
 
-The root `Cargo.toml` is both the `crawm` package and the workspace root
+The root `Cargo.toml` is both the `crab` package and the workspace root
 (niri-style), so plain `cargo run` starts the compositor. The package is
 lib + bin: `src/lib.rs` exposes only the pure modules, and `src/main.rs` is the
 thin Smithay entry point — so `tests/` can unit-drive layout/config/animation
@@ -45,11 +45,17 @@ without a GPU.
 cargo build --workspace
 cargo run -- --backend winit     # nested window on an existing session
 cargo run -- --validate          # parse + validate the config, then exit
+./install.sh                     # release build; install under /usr/local
+PREFIX="$HOME/.local" ./install.sh
 ```
+
+`install.sh` also accepts `DESTDIR` for package staging and `--no-session` to
+skip the desktop entry and systemd user units. Build the bare-metal backend
+with `CARGO_FEATURES=backend-tty ./install.sh` once M4 lands.
 
 Configuration is TOML; the shipped example is
 [`resources/default-config.toml`](resources/default-config.toml). Copy it to
-`~/.config/crawm/config.toml` (or pass `--config <path>`). `[layout]` and
+`~/.config/crab/config.toml` (or pass `--config <path>`). `[layout]` and
 `[animations] enabled` apply today; the remaining mango-style sections parse and are
 wired as their milestones land (`COMPOSITOR.md` §13).
 

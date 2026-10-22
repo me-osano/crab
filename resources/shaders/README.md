@@ -1,6 +1,6 @@
 # Shaders
 
-Custom GLSL for crawm's effect passes (rounded corners, dual-Kawase blur, custom
+Custom GLSL for crab's effect passes (rounded corners, dual-Kawase blur, custom
 open/close/resize animations). Populated in milestone M8; see `ROADMAP.md` §3H and
 `COMPOSITOR.md` §10.
 

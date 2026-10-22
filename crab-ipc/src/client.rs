@@ -22,18 +22,18 @@ pub enum IpcError {
 
 /// Resolves the compositor socket path.
 ///
-/// Prefers `$CRAWM_SOCKET`; otherwise derives `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`.
+/// Prefers `$CRAB_SOCKET`; otherwise derives `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CRAWM_SOCKET") {
+    if let Some(explicit) = std::env::var_os("CRAB_SOCKET") {
         return Some(PathBuf::from(explicit));
     }
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_owned());
-    Some(PathBuf::from(runtime).join(format!("crawm-{display}.sock")))
+    Some(PathBuf::from(runtime).join(format!("crab-{display}.sock")))
 }
 
-/// A blocking connection to a running crawm instance.
+/// A blocking connection to a running crab instance.
 #[derive(Debug)]
 pub struct Client {
     writer: UnixStream,
@@ -59,7 +59,7 @@ impl Client {
         let path = socket_path().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "no CRAWM_SOCKET and no XDG_RUNTIME_DIR",
+                "no CRAB_SOCKET and no XDG_RUNTIME_DIR",
             )
         })?;
         Self::connect(&path)
@@ -142,7 +142,7 @@ mod tests {
         // Not asserting on the global env (tests run in parallel); just ensure the
         // function is callable and returns a plausible path shape.
         if let Some(path) = socket_path() {
-            assert!(path.to_string_lossy().contains("crawm") || path.is_absolute());
+            assert!(path.to_string_lossy().contains("crab") || path.is_absolute());
         }
     }
 }

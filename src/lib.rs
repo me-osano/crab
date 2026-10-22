@@ -1,4 +1,4 @@
-//! crawm's pure, Smithay-free library surface.
+//! crab's pure, Smithay-free library surface.
 //!
 //! The compositor binary (`src/main.rs`) is a thin entry point that owns
 //! everything touching Smithay — backends, handlers, render, input. The logic

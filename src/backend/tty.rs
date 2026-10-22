@@ -5,7 +5,7 @@
 //! a silent no-op.
 
 use anyhow::bail;
-use crawm::config::Config;
+use crab::config::Config;
 
 /// Attempts to start the TTY backend.
 ///

@@ -6,7 +6,7 @@
 //! keyboard reports (its *base* symbol, so shift does not change which key
 //! matches; the modifiers themselves are part of the chord).
 //!
-//! Built-in binds keep crawm usable with no config. Config binds are layered on
+//! Built-in binds keep crab usable with no config. Config binds are layered on
 //! top and replace a built-in with the same chord, so the shipped example can
 //! say `"SUPER+space" = "spawn:rofi -show drun"` and take that chord over.
 //!
@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use crawm::core::{Direction, SpaceSet};
+use crab::core::{Direction, SpaceSet};
 use smithay::input::keyboard::{Keysym, ModifiersState, keysyms, xkb};
 
 use crate::compositor::spawn::parse_command;
@@ -156,7 +156,7 @@ pub(crate) struct BindTable {
 impl BindTable {
     /// Compiles the built-in binds plus `[binds.default]` and `[binds.locked]`.
     ///
-    /// Locked binds are active now: crawm has no lock screen yet, and the
+    /// Locked binds are active now: crab has no lock screen yet, and the
     /// volume/brightness chords users put there should still work. Gating them
     /// arrives with the lock protocol (M6).
     #[must_use]
@@ -547,7 +547,7 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         "preset_width" | "switch_preset_width" => Ok(Action::PresetWidth),
         "center_column" => Ok(Action::CenterColumn),
         "" => Err("empty action".to_owned()),
-        // Mango actions for features crawm does not implement yet. They are
+        // Mango actions for features crab does not implement yet. They are
         // accepted by the parser and skipped here with a startup warning.
         "toggle_overview" | "enteroverview" | "leaveoverview" => {
             Err("overview is not implemented yet".to_owned())
@@ -587,7 +587,7 @@ fn parse_index(value: &str) -> Result<u8, String> {
     }
 }
 
-/// The mouse binds crawm has without a config: Super+drag moves, Super+right
+/// The mouse binds crab has without a config: Super+drag moves, Super+right
 /// drag resizes. A config entry with the same chord replaces one.
 fn mouse_builtins() -> Vec<(String, String)> {
     vec![
@@ -599,7 +599,7 @@ fn mouse_builtins() -> Vec<(String, String)> {
     ]
 }
 
-/// The binds crawm has without a config, using the same chord/action syntax the
+/// The binds crab has without a config, using the same chord/action syntax the
 /// config uses. A config entry with the same chord replaces one of these.
 fn builtins() -> Vec<(String, String)> {
     let mut binds = Vec::new();

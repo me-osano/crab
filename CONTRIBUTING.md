@@ -1,10 +1,10 @@
-# Contributing to crawm
+# Contributing to crab
 
 ## Ground rules
 
 1. **Respect the crate/module boundaries.** The `src/{core,config,layout,animation}`
-   modules must stay Smithay/Wayland-free, and `crawm-ipc` must not depend on any
-   other `crawm-*` crate. Run `scripts/check-boundaries.sh` (also enforced in CI)
+   modules must stay Smithay/Wayland-free, and `crab-ipc` must not depend on any
+   other `crab-*` crate. Run `scripts/check-boundaries.sh` (also enforced in CI)
    before opening a PR.
 2. **Layout, animation, and config logic is pure and tested.** No globals, no
    `Instant::now()` inside animation stepping, no I/O in layout code.
@@ -13,7 +13,7 @@
 
 ## Attribution (important)
 
-crawm is GPL-3.0-or-later (ADR-0001) and deliberately adapts code from other
+crab is GPL-3.0-or-later (ADR-0001) and deliberately adapts code from other
 GPL-3.0 projects. When you copy or substantially adapt code:
 
 - add a header comment to the file naming the upstream project, the file/commit, and

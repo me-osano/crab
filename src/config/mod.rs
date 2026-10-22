@@ -5,7 +5,7 @@
 //! `[output.<name>]`, `[layout]`, `[animations]`, `[autostart]`,
 //! `[window_rule]`, `[layer_rule]`, `[binds.default]`, `[binds.locked]`,
 //! `[mousebinds]`, `[gesturebinds]` and `[axisbinds]`. The shipped example is
-//! `resources/default-config.toml`; without `--config`, crawm reads
+//! `resources/default-config.toml`; without `--config`, crab reads
 //! [`default_path`] when that file exists.
 //!
 //! Unknown keys are ignored, so a config keeps working across versions; a key
@@ -19,7 +19,7 @@
 //! only *downward* (`config → core`).
 //!
 //! ```
-//! let config = crawm::config::parse("[layout]\ngaps = 4\n").unwrap();
+//! let config = crab::config::parse("[layout]\ngaps = 4\n").unwrap();
 //! assert_eq!(config.gaps, 4);
 //! ```
 
@@ -71,12 +71,13 @@ pub struct Config {
     /// output backend (M4).
     pub outputs: BTreeMap<String, Output>,
     /// Commands to run once at startup (`[autostart]`). Run by the backend once
-    /// crawm's Wayland socket exists.
+    /// crab's Wayland socket exists.
     pub autostart: Autostart,
     /// Rules applied when a window maps (`[window_rule]` or `[[window_rule]]`).
     pub window_rules: Vec<WindowRule>,
     /// Rules applied to layer-shell surfaces (`[layer_rule]` or
-    /// `[[layer_rule]]`). Parsed, not applied yet (M5.4/M6.7).
+    /// `[[layer_rule]]`). The matching rule's open animation is used by the
+    /// compositor when the surface first maps.
     pub layer_rules: Vec<LayerRule>,
     /// Keyboard chords (`[binds.default]` and `[binds.locked]`), compiled into
     /// the session's bind table at startup. `locked` bindings are active all
@@ -135,9 +136,6 @@ impl Config {
         }
         if !self.outputs.is_empty() {
             pending.push("output");
-        }
-        if !self.layer_rules.is_empty() {
-            pending.push("layer_rule");
         }
         if !self.gesture_binds.is_empty() {
             pending.push("gesturebinds");
@@ -203,10 +201,14 @@ impl AnimationStyle {
         }
     }
 
+    /// Parses a configured animation style name.
+    #[must_use]
+    pub fn from_name(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|style| style.name() == value)
+    }
+
     fn parse(value: &str, key: &str) -> Result<Self, ConfigError> {
-        Self::ALL
-            .into_iter()
-            .find(|style| style.name() == value)
+        Self::from_name(value)
             .ok_or_else(|| ConfigError::Invalid(one_of(key, Self::ALL.map(Self::name))))
     }
 }
@@ -433,7 +435,7 @@ pub enum ConfigError {
 /// The on-disk shape, before validation.
 ///
 /// Every field is optional so a partial file inherits the defaults. Unknown keys
-/// are ignored (`serde`'s default), which keeps older configs working as crawm
+/// are ignored (`serde`'s default), which keeps older configs working as crab
 /// grows; present-but-wrongly-typed keys still fail.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -899,11 +901,14 @@ impl RawWindowRule {
 }
 
 impl RawLayerRule {
-    fn into_rule(self) -> LayerRule {
-        LayerRule {
+    fn into_rule(self) -> Result<LayerRule, ConfigError> {
+        if let Some(value) = &self.animation_type_open {
+            AnimationStyle::parse(value, "layer_rule.animation_type_open")?;
+        }
+        Ok(LayerRule {
             animation_type_open: self.animation_type_open,
             layer_name: self.layer_name,
-        }
+        })
     }
 }
 
@@ -935,7 +940,7 @@ impl RawConfig {
                 .into_vec()
                 .into_iter()
                 .map(RawLayerRule::into_rule)
-                .collect();
+                .collect::<Result<_, _>>()?;
         }
 
         config.binds = Binds {
@@ -950,7 +955,7 @@ impl RawConfig {
     }
 }
 
-/// Top-level keys that moved under `[layout]` when crawm adopted the
+/// Top-level keys that moved under `[layout]` when crab adopted the
 /// mango-style sections.
 ///
 /// Unknown keys are ignored, so without this check an old config would lose
@@ -1004,10 +1009,10 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-/// The config file crawm reads when `--config` is not given.
+/// The config file crab reads when `--config` is not given.
 ///
-/// This is `$XDG_CONFIG_HOME/crawm/config.toml`, or
-/// `$HOME/.config/crawm/config.toml` when `XDG_CONFIG_HOME` is unset or not
+/// This is `$XDG_CONFIG_HOME/crab/config.toml`, or
+/// `$HOME/.config/crab/config.toml` when `XDG_CONFIG_HOME` is unset or not
 /// absolute. Returns `None` when neither variable is set.
 #[must_use]
 pub fn default_path() -> Option<PathBuf> {
@@ -1015,7 +1020,7 @@ pub fn default_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("crawm").join("config.toml"))
+    Some(base.join("crab").join("config.toml"))
 }
 
 /// Checks semantic constraints that parsing cannot (e.g. non-negative sizes).
@@ -1379,6 +1384,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_unknown_layer_open_animation() {
+        let err = parse("[layer_rule]\nanimation_type_open = \"bounce\"\n").unwrap_err();
+        assert!(err.to_string().contains("layer_rule.animation_type_open"));
+    }
+
+    #[test]
     fn parses_binds() {
         let cfg = parse(
             r#"
@@ -1491,9 +1502,10 @@ mod tests {
 
         let cfg = parse(include_str!("../../resources/default-config.toml")).unwrap();
         let pending = cfg.pending_sections();
-        for section in ["output", "layer_rule", "gesturebinds"] {
+        for section in ["output", "gesturebinds"] {
             assert!(pending.contains(&section), "missing {section}: {pending:?}");
         }
+        assert!(!pending.contains(&"layer_rule"));
         assert!(!pending.contains(&"mousebinds"));
         assert!(!pending.contains(&"axisbinds"));
         // The example's `[input]` matches the built-in defaults, so nothing is

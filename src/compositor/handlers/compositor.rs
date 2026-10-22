@@ -8,9 +8,9 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 
-use crate::compositor::state::{ClientState, Crawm};
+use crate::compositor::state::{ClientState, Crab};
 
-impl CompositorHandler for Crawm {
+impl CompositorHandler for Crab {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -18,7 +18,7 @@ impl CompositorHandler for Crawm {
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         &client
             .get_data::<ClientState>()
-            .expect("client connected without crawm's ClientState")
+            .expect("client connected without crab's ClientState")
             .compositor_state
     }
 
@@ -31,8 +31,8 @@ impl CompositorHandler for Crawm {
     }
 }
 
-impl BufferHandler for Crawm {
+impl BufferHandler for Crab {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
 }
 
-delegate_compositor!(Crawm);
+delegate_compositor!(Crab);

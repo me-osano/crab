@@ -3,11 +3,11 @@
 //! A command line is split shell-style (quotes and backslashes, no variable
 //! expansion) and executed directly, never through a shell, so a config line
 //! cannot accidentally become shell syntax. Children inherit the compositor's
-//! environment, with `WAYLAND_DISPLAY` pointed at crawm's own socket so a
+//! environment, with `WAYLAND_DISPLAY` pointed at crab's own socket so a
 //! spawned client connects to us rather than to the host compositor.
 //!
 //! Each child is waited for on a short-lived thread; without that, exited
-//! children would stay zombies until crawm itself exits.
+//! children would stay zombies until crab itself exits.
 
 use std::process::{Command, Stdio};
 
@@ -80,7 +80,7 @@ pub(crate) fn parse_command(line: &str) -> Result<Vec<String>, String> {
 
 /// Runs `argv` detached, waiting for it in the background.
 ///
-/// `wayland_display` is crawm's socket name; it overrides the inherited
+/// `wayland_display` is crab's socket name; it overrides the inherited
 /// `WAYLAND_DISPLAY` so the child talks to this compositor.
 pub(crate) fn spawn(argv: &[String], wayland_display: Option<&str>) {
     let Some((program, args)) = argv.split_first() else {

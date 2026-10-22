@@ -61,7 +61,7 @@ impl FocusStack {
     }
 
     /// Iterates the stack from most to least recent.
-    pub fn iter(&self) -> impl Iterator<Item = FocusTarget> + '_ {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = FocusTarget> + '_ {
         self.order.iter().copied()
     }
 

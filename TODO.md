@@ -1,4 +1,4 @@
-# crawm — TODO
+# crab — TODO
 
 > Work top-to-bottom, chronologically. Each phase ends with something **runnable and
 > demoable**, and each subsection has concrete exit criteria — do not move on until
@@ -16,8 +16,8 @@ Phase 0 below.
 **Timeline:** part-time solo, **~37–55 weeks** cumulative to `v0.1.0` (M0–M11). Order
 matters more than dates. HDR/colour is a separate post-0.1 track.
 
-**Name:** `crawm`; binary `crawm`, CLI `crawm-cli`; env `CRAWM_SOCKET`;
-directory `crawm/`.
+**Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
+directory `crab/`.
 
 ---
 
@@ -47,18 +47,18 @@ locally as the canonical reference.
 **Exit criteria:** `docs/decisions/README.md` index current; every framework-level choice has an ADR or a written rationale.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
-- [x] `src/core/` — pure data: ids, logical geometry, colors, spaces (no Smithay; folded in from the former `crawm-core` crate).
-- [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crawm-layout` crate).
-- [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crawm-anim` crate).
-- [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crawm-config` crate).
-- [x] `crawm-ipc/` — IPC types + blocking client (leaf; no other `crawm-*` deps).
-- [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crawm` package and the workspace root (niri-style). Smithay-facing code lives under `src/compositor/` (state, handlers, input, render, the layout bridge), backends under `src/backend/`.
+- [x] `src/core/` — pure data: ids, logical geometry, colors, spaces (no Smithay; folded in from the former `crab-core` crate).
+- [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crab-layout` crate).
+- [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crab-anim` crate).
+- [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crab-config` crate).
+- [x] `crab-ipc/` — IPC types + blocking client (leaf; no other `crab-*` deps).
+- [x] `src/` — the compositor binary (backend selection, logging, panic hook, winit backend); root `Cargo.toml` is both the `crab` package and the workspace root (niri-style). Smithay-facing code lives under `src/compositor/` (state, handlers, input, render, the layout bridge), backends under `src/backend/`.
 - [x] `src/lib.rs` — the package is lib + bin: the pure modules are the reusable library surface (so doctests run and `tests/` can drive them directly); the boundary script rejects any non-pure `mod` here.
 - [x] Backend cargo features — `backend-winit` (default), `backend-tty`, `backend-x11` gate Smithay's backend stacks, so a default build skips DRM/session/input; CI builds `--all-features` to keep proving the stack.
-- [x] `crawm-cli/` — CLI client (renamed from `crawm-msg`).
-- [x] `resources/` — `default-config.toml`, `session/` (`.desktop`, systemd `.target`/`.service`), `shaders/`, `crawm-portals.conf`.
+- [x] `crab-cli/` — CLI client (renamed from `crab-msg`).
+- [x] `resources/` — `default-config.toml`, `session/` (`.desktop`, systemd `.target`/`.service`), `shaders/`, `crab-portals.conf`.
 - [x] Headless/integration tests live in `tests/` (the root package's integration tests).
-- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code or an upward/sideways `crate::` dependency, if `src/lib.rs` exposes a non-pure module, or if `-ipc` gains `crawm-*` deps; wired into CI and `just check`.
+- [x] **Boundary lint**: `scripts/check-boundaries.sh` fails if the `src/{core,config,layout,animation}` modules gain Smithay/Wayland code or an upward/sideways `crate::` dependency, if `src/lib.rs` exposes a non-pure module, or if `-ipc` gains `crab-*` deps; wired into CI and `just check`.
 
 ### 0.4 Smithay baseline
 - [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released space is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
@@ -67,7 +67,7 @@ locally as the canonical reference.
 
 ### 0.5 CI, logging, errors
 - [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `scripts/check-boundaries.sh`, `cargo deny check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now.)*
-- [x] `tracing` + `tracing-subscriber` (env-filter), panic hook writing a backtrace to `$XDG_STATE_HOME/crawm/crash.log`.
+- [x] `tracing` + `tracing-subscriber` (env-filter), panic hook writing a backtrace to `$XDG_STATE_HOME/crab/crash.log`.
 - [x] `main.rs`: arg parsing (`--backend {winit,tty,headless}`, `--config`, `--validate`, `--log-filter`), config load, backend select, logging init.
 
 **Exit criteria (phase):** `cargo run -- --backend winit` opens a window with a solid background; empty-but-valid crate graph builds; boundary lint passes. *(All met: the winit backend launches and renders; `tty` fails explicitly until M4; `headless` validates and returns.)*
@@ -99,7 +99,7 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
   surface, the built-in arrow for named icons, and nothing for a hidden cursor; the backends
   hide the host pointer so this is the only one drawn. *(The arrow is a fixed classic-pointer
   outline — black rim, white core, tip at the hotspot — until
-  the icon set lands with `cursor_shape`; it also freezes at the last position when the host
+  icon-theme loading lands; it also freezes at the last position when the host
   pointer leaves the nested window, since winit does not forward `CursorLeft`.)*
 
 ### 1.4 Render + frame pacing
@@ -108,7 +108,10 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
   (`COMPOSITOR.md` §8.2) — the transitions live on the pure `Output` (unit-tested) and
   the winit backend drives them from `Redraw` events; a request that lands while a frame
   is presented queues the next one.
-- [x] Frame callbacks sent for surfaces actually shown (currently just before the swap; M2's frame clock moves them after present).
+- [x] Frame callbacks sent only for surfaces the damage tracker actually presented,
+  after `submit` succeeds (M2's frame clock will move them to the presentation time).
+- [x] Smithay `OutputDamageTracker` drives repaints: elements are collected once,
+  opaque content is accounted for, and a frame with no damage is not submitted.
 - [x] Redraw only when something requested it — dispatch, input, resize, and the frame
   event itself; repeated requests coalesce into one frame per loop iteration.
 
@@ -145,8 +148,9 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
 *(`foot` and GTK apps (`pavucontrol`, `nautilus`) run nested and connect against the M1 globals; pointer motion, client cursor surfaces, and `Named(Default)` fallback were exercised. Keyboard/pointer injection still has no test harness. Idle CPU is ~0% because redraws are on demand.)*
 
 **Known M1 gaps** (from `foot`'s startup warnings — all later-milestone breadth, not bugs):
-`wp_primary_selection` (M6), `xdg_activation` (M6), fractional scaling (M4), `cursor_shape`
-(every named icon draws as the built-in arrow until the icon set lands), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
+`wp_primary_selection` (M6), `xdg_activation` (M6; basic activation landed, `activation_bypass` open),
+fractional scaling (M4), `cursor_shape` (not advertised yet; every named icon draws as the built-in
+arrow until icon-theme loading lands), `xdg_toplevel_icon` (M6), `text-input`/IME (M6),
 `xdg_decoration` (client-side decorations work). Popup grabs and `xdg_popup.reposition`
 landed in `handlers/xdg_shell.rs` (M3 scope, done early) and render from the
 `PopupManager` tree in `src/compositor/render.rs`.
@@ -203,7 +207,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] `Super+drag` move, `Super+right-drag` resize for floating windows.
 - [x] Tiled window drag → auto-float (default); reorder-in-layout is the config option (§7.3).
 - [x] **Client-initiated** move/resize (`xdg_toplevel.move`/`resize`, e.g. a CSD titlebar):
-  the request's serial must be the last press crawm sent and the window must still be under
+  the request's serial must be the last press crab sent and the window must still be under
   the pointer; tiled windows float first, fullscreen and maximized ones refuse. The press was
   forwarded, so its release is too — a client that never sees it keeps its titlebar stuck.
   A resize follows the requested edge(s), holding the opposite edge and stopping at one
@@ -218,7 +222,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] `proptest` invariants: no overlaps (non-floating), all rects inside area, deterministic.
 - [x] Snapshot-style golden rect tests per layout.
 
-**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crawm layout` green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
+**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crab layout` green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
 
 ---
 
@@ -237,13 +241,13 @@ are smooth, interruptible, and free of pops.
 
 ### 3.2 Drive animations off the frame clock
 - [x] Advance animations using **frame time**, not wall-clock reads inside a redraw — the
-  winit backend re-times `Crawm::frame_clock` from its loop clock at the frame boundary
+  winit backend re-times `Crab::frame_clock` from its loop clock at the frame boundary
   (winit reports no presentation time); the tty backend passes the real vblank /
   `wp_presentation` time in M4.
 - [x] Redraw machine keeps requesting frames while `is_animating()`; stops when settled
   (`WinitEvent::Redraw` re-queues while anything moves, so idle CPU stays at zero).
 - [x] The frame-clock driver bridges the primitives ↔ placements/elements:
-  `Crawm::advance_frame` / `Crawm::is_animating`, per-window `Animated<Rect>` written by
+  `Crab::advance_frame` / `Crab::is_animating`, per-window `Animated<Rect>` written by
   `compositor::layout::place`, sampled by `render`. The bridge is glue, so it lives in the binary
   — `src/animation` stays pure.
 
@@ -317,7 +321,7 @@ are smooth, interruptible, and free of pops.
 
 ## Phase 4 — Bare-metal backend (M4) *(~3–4 weeks)*
 
-Goal: boot `crawm` from a TTY and use it as the real session on one machine.
+Goal: boot `crab` from a TTY and use it as the real session on one machine.
 (Design: `COMPOSITOR.md` §4, §8, §16.)
 
 ### 4.1 Session & device discovery
@@ -327,7 +331,8 @@ Goal: boot `crawm` from a TTY and use it as the real session on one machine.
 
 ### 4.2 DRM/KMS + GBM + EGL
 - [ ] `DrmDevice` + atomic modesetting; `GbmBufferedSurface` + EGL for rendering.
-- [ ] `DrmCompositor` / `OutputDamageTracker` for damage + planes.
+- [ ] `DrmCompositor` for planes, reusing the `OutputDamageTracker` that already
+  drives the winit backend.
 - [ ] vblank-driven redraw wired to the Phase-1 state machine (one per output).
 - [ ] Handle connector hotplug (add/remove), mode selection, and window migration off removed outputs.
 
@@ -366,9 +371,9 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       `[gesturebinds]`, `[axisbinds]`) is `resources/default-config.toml`, and a
       test parses/validates it. `[layout]` and `[animations] enabled` are applied;
       the other sections are typed, validated and kept for their milestones.
-- [x] Default config path (`$XDG_CONFIG_HOME/crawm/config.toml`, then
-      `$HOME/.config/crawm/config.toml`) when `--config` is absent.
-- [x] `crawm --validate` for CI/pre-flight (syntax/type errors already carry the
+- [x] Default config path (`$XDG_CONFIG_HOME/crab/config.toml`, then
+      `$HOME/.config/crab/config.toml`) when `--config` is absent.
+- [x] `crab --validate` for CI/pre-flight (syntax/type errors already carry the
       `toml` crate's line/column).
 - [ ] Validation with **good error spans** for semantic errors (range/choice
       failures name the key but carry no span yet).
@@ -385,7 +390,7 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       built-ins; config chords override a built-in with the same chord. Keys are
       matched by base keysym, so Shift still selects the chord's modifiers.
 - [x] `spawn:<command>` actions (shell-style quoting, no shell) and
-      `[autostart] exec_once`, with `WAYLAND_DISPLAY` pointed at crawm's socket.
+      `[autostart] exec_once`, with `WAYLAND_DISPLAY` pointed at crab's socket.
 - [x] Mouse binds (`[mousebinds]`, compiled over the built-in Super+drag
       chords; bare left/right `moveresize` is refused) and axis binds
       (`[axisbinds]`, with `viewtoleft/right_have_client` skipping empty spaces).
@@ -405,11 +410,12 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [x] Actions: initial dynamic space, `no-focus`, `pinned` and `always-on-top`.
 - [ ] Window rules: match `output` and X11-vs-Wayland.
 - [ ] Actions: opacity, blur/shadow/corner overrides, `block-out-from`, default column width.
-- [ ] Space rules, layer rules, monitor rules (name/make/model/serial regex), device rules.
+- [x] Apply `[layer_rule]` open animations by layer namespace.
+- [ ] Space rules, monitor rules (name/make/model/serial regex), device rules.
 - [ ] Re-evaluate rules on title/app-id change for rules marked `dynamic`.
 
-### 5.5 `crawm-ipc` + socket (`COMPOSITOR.md` §14)
-- [ ] Unix socket at `$XDG_RUNTIME_DIR/crawm-$WAYLAND_DISPLAY.sock`; export `CRAWM_SOCKET`.
+### 5.5 `crab-ipc` + socket (`COMPOSITOR.md` §14)
+- [ ] Unix socket at `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`; export `CRAB_SOCKET`.
 - [ ] Newline-delimited JSON; request/response + `version` handshake; **versioned schema, additive-only**.
 - [ ] Requests: `version`, `outputs`, `spaces`, `windows`, `focused-window`, `layouts`, `action <A>`, `set-layout`, `config reload|validate`, `event-stream`.
 - [ ] `set-layout` takes a **mode** name; a **family** name is accepted as an alias for the family's default mode (ADR-0004). `layouts` reports both families and modes.
@@ -418,7 +424,7 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] Event stream: `WindowOpened/Closed/Changed/Focused`, `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
 - [ ] Robust parsing: unknown event names/fields are skipped, never fatal.
 
-### 5.6 `crawm-cli`
+### 5.6 `crab-cli`
 - [ ] `get <query>`, `watch <event-stream>`, `dispatch <action>`, `validate`; `--json` machine output.
 
 ### 5.7 Animation config surface
@@ -438,8 +444,9 @@ Goal: replace your current compositor for a **full week** with no fallback. Veri
 protocol with real clients. (Matrix: `ROADMAP.md` §4, `COMPOSITOR.md` §12.)
 
 ### 6.1 Shell & decoration
-- [ ] `wlr-layer-shell` with **exclusive zones → `usable_area`**; anchor, margin, layer, namespace, keyboard-interactivity.
-- [ ] `xdg-decoration` (+ KDE variant); `cursor-shape`; `fractional-scale`/`viewporter` hardening.
+- [x] `wlr-layer-shell` with **exclusive zones → `usable_area`**; anchor, margin, layer, namespace, keyboard-interactivity.
+- [x] `xdg-decoration` (+ KDE variant) — prefers client-side until crab draws a titlebar; `fractional-scale` sends a preferred scale; `viewporter` hardening.
+- [ ] `cursor-shape` — needs icon-theme loading; not advertised until every shape renders (clients keep using `wl_pointer.set_cursor`).
 
 ### 6.2 Activation & selection
 - [ ] `xdg-activation` (+ `activation_bypass`); `primary-selection`; `data-control` (`ext` + `wlr`).
@@ -448,7 +455,8 @@ protocol with real clients. (Matrix: `ROADMAP.md` §4, `COMPOSITOR.md` §12.)
 - [ ] `idle-notify`, `idle-inhibit`; `ext-session-lock`; `keyboard-shortcuts-inhibit`.
 
 ### 6.4 Outputs
-- [ ] `wlr-output-management`, `wlr-output-power-management` (DPMS), `xdg-output`.
+- [x] `xdg-output` (names and logical geometry for bars).
+- [ ] `wlr-output-management`, `wlr-output-power-management` (DPMS).
 - [ ] **Mirroring / clone** (explicitly chosen over upstream niri).
 
 ### 6.5 Window/space visibility to bars
@@ -544,7 +552,7 @@ Goal: screen sharing, screenshots, and a Steam game under XWayland all work.
 
 ### 9.3 Screencast
 - [ ] PipeWire stream (monitor first, then window) fed by dma-buf (shm fallback); own thread + channels.
-- [ ] `xdg-desktop-portal` backend: `resources/crawm-portals.conf`; permission flow.
+- [ ] `xdg-desktop-portal` backend: `resources/crab-portals.conf`; permission flow.
 - [ ] `block-out-from "screencast"` privacy rules.
 
 ### 9.4 XWayland
@@ -557,19 +565,19 @@ Goal: screen sharing, screenshots, and a Steam game under XWayland all work.
 
 ## Phase 10 — crawl-desktop integration (M10) *(~2–3 weeks; can overlap M6+)*
 
-Goal: `crawl-desktop` runs on `crawm` through the **same standard protocols** and the
+Goal: `crawl-desktop` runs on `crab` through the **same standard protocols** and the
 same `Compositor` trait — no crawl-specific API. (Crosswalk: `ROADMAP.md` §7.)
 
-- [ ] Add a **`crawm` backend** to `crawl-desktop`'s `crates/crawl-compositor`:
-  - [ ] `detect()` gains an arm on `CRAWM_SOCKET` (before niri).
+- [ ] Add a **`crab` backend** to `crawl-desktop`'s `crates/crawl-compositor`:
+  - [ ] `detect()` gains an arm on `CRAB_SOCKET` (before niri).
   - [ ] `Capability` coverage: `Workspaces` (`ext-workspace` + IPC), `WindowList`/`FocusWindow` (`ext-foreign-toplevel-list` + IPC `dispatch focus-window`), `OutputManagement` (`wlr-output-management` + `xdg-output`), `Screenshots` (`ext-image-copy-capture`/`wlr-screencopy`), `Overview` (`dispatch overview`), `Launch` (`dispatch spawn`).
   - [ ] `Event` mapping → `WorkspacesChanged`/`ActiveWorkspaceChanged`/`WindowsChanged`/`ActiveWindowChanged`/`OutputsChanged`.
-- [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) **unmodified** on `crawm`.
-- [ ] Align `crawm-ipc` `Action` names with `crawl-desktop`’s action vocabulary (one keybind table where possible).
-- [ ] Session story: `crawl-session` spawns `crawm` in its own `.desktop`, or attaches when `CRAWM_SOCKET` is set.
-- [ ] Fill `crawl-desktop/docs/compositor-matrix.md` rows for `crawm`.
+- [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) **unmodified** on `crab`.
+- [ ] Align `crab-ipc` `Action` names with `crawl-desktop`’s action vocabulary (one keybind table where possible).
+- [ ] Session story: `crawl-session` spawns `crab` in its own `.desktop`, or attaches when `CRAB_SOCKET` is set.
+- [ ] Fill `crawl-desktop/docs/compositor-matrix.md` rows for `crab`.
 
-**Exit criteria (phase):** `crawl-desktop` boots on `crawm` with the same capability negotiation it uses on niri.
+**Exit criteria (phase):** `crawl-desktop` boots on `crab` with the same capability negotiation it uses on niri.
 
 ---
 
@@ -634,7 +642,7 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 
 ## Appendix A — Where to lift code from (GPL-3.0 unlocked by ADR-0001)
 
-Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, you may
+Read these before the matching phase. Because `crab` is **GPL-3.0-or-later**, you may
 **copy and adapt** GPL-3.0 sources with attribution — not just reimplement ideas.
 
 | Concern | Source | What to take / watch |
@@ -669,7 +677,7 @@ Read these before the matching phase. Because `crawm` is **GPL-3.0-or-later**, y
 ## Appendix B — Crate & dependency map
 
 ```
-crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
+crab          → crab-ipc, [crab-protocols]     + Smithay/calloop/…
                  · lib target (src/lib.rs) exposes the pure modules only:
                    src/core       → (ids, geometry, colors, spaces)
                    src/config     → core, serde, toml, thiserror
@@ -677,10 +685,10 @@ crawm          → crawm-ipc, [crawm-protocols]     + Smithay/calloop/…
                    src/animation  → core            (curves; geometry via core)
                  · bin target (src/main.rs) + Smithay glue (src/compositor/, src/backend/)
                  · pure modules are Smithay-free and depend downward only (source-scanned in CI)
-crawm-ipc      → (leaf; serde only)
-crawm-cli      → ipc                        (CLI)
+crab-ipc      → (leaf; serde only)
+crab-cli      → ipc                        (CLI)
 ```
-- `crawm-protocols` exists **only if ≥2 crates need** generated bindings; otherwise a `protocols` module inside the binary.
+- `crab-protocols` exists **only if ≥2 crates need** generated bindings; otherwise a `protocols` module inside the binary.
 - Backend features: `backend-winit` (default), `backend-tty`, `backend-x11`.
 - Feature flags: `xwayland`, `screencast`, `effects`, `dbus`, `profile-with-tracy`, and (later) `hdr`.
 

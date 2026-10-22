@@ -18,9 +18,9 @@ use smithay::wayland::shell::xdg::{
     Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 
-use crate::compositor::state::{Crawm, GrabMode};
+use crate::compositor::state::{Crab, GrabMode};
 
-impl XdgShellHandler for Crawm {
+impl XdgShellHandler for Crab {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
@@ -190,22 +190,22 @@ impl XdgShellHandler for Crawm {
     }
 }
 
-delegate_xdg_shell!(Crawm);
+delegate_xdg_shell!(Crab);
 
 /// Starts a move/resize the client asked for with `xdg_toplevel`.
 ///
 /// The request names the seat and the serial of the press that triggered it.
 /// Only a press we actually sent can start a drag, and only while the window
 /// is still under the pointer, so a stale or invented serial does nothing;
-/// [`Crawm::begin_client_interaction`] checks both.
+/// [`Crab::begin_client_interaction`] checks both.
 fn client_interaction(
-    state: &mut Crawm,
+    state: &mut Crab,
     surface: &ToplevelSurface,
     seat: &wl_seat::WlSeat,
     serial: Serial,
     mode: GrabMode,
 ) {
-    if Seat::<Crawm>::from_resource(seat).is_none() {
+    if Seat::<Crab>::from_resource(seat).is_none() {
         tracing::debug!("ignored an interactive request on a seat we do not own");
         return;
     }

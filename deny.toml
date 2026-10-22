@@ -1,6 +1,6 @@
 # cargo-deny configuration. Run with `cargo deny check`.
 #
-# crawm is GPL-3.0-or-later (ADR-0001), so copyleft dependencies are acceptable,
+# crab is GPL-3.0-or-later (ADR-0001), so copyleft dependencies are acceptable,
 # but every dependency must have an explicit license we have reviewed.
 
 [graph]

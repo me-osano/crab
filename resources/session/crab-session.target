@@ -1,6 +1,6 @@
 [Unit]
-Description=crawm Wayland session
-Documentation=file:///usr/share/doc/crawm/ROADMAP.md
+Description=crab Wayland session
+Documentation=file:///usr/share/doc/crab/ROADMAP.md
 # Start after the session manager is up; the compositor owns the session.
 Wants=graphical-session-pre.target
 After=graphical-session-pre.target

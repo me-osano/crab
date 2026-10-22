@@ -1,8 +1,8 @@
-# crawm configuration.
+# crab configuration.
 #
-# This is the shipped default; copy it to $XDG_CONFIG_HOME/crawm/config.toml
-# (usually ~/.config/crawm/config.toml) and edit. Check it with
-# `crawm --validate --config <path>`.
+# This is the shipped default; copy it to $XDG_CONFIG_HOME/crab/config.toml
+# (usually ~/.config/crab/config.toml) and edit. Check it with
+# `crab --validate --config <path>`.
 #####################################################################
 [input.keyboard]
 repeat_rate = 25

@@ -1,4 +1,4 @@
-//! Wire types for the crawm IPC protocol.
+//! Wire types for the crab IPC protocol.
 //!
 //! The schema is versioned and **additive-only** within a major version: new
 //! requests, responses, and event fields may be added, but existing meanings are

@@ -4,10 +4,11 @@ use smithay::delegate_seat;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::wayland::tablet_manager::TabletSeatHandler;
 
-use crate::compositor::state::Crawm;
+use crate::compositor::state::Crab;
 
-impl SeatHandler for Crawm {
+impl SeatHandler for Crab {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
@@ -29,4 +30,6 @@ impl SeatHandler for Crawm {
     }
 }
 
-delegate_seat!(Crawm);
+impl TabletSeatHandler for Crab {}
+
+delegate_seat!(Crab);

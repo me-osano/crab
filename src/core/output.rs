@@ -1,6 +1,6 @@
 //! The output and space model (`COMPOSITOR.md` §6).
 //!
-//! crawm uses **spaces per output** (ADR-0004): each monitor has its own space
+//! crab uses **spaces per output** (ADR-0004): each monitor has its own space
 //! view, and a space remembers its own layout and parameters (`Pertag`). When
 //! several spaces are visible at once, the layout of the **lowest-numbered
 //! visible space** arranges the combined window set — the dwm rule documented on
@@ -79,7 +79,7 @@ pub enum RedrawState {
 pub struct Output {
     /// Stable handle allocated by the compositor.
     pub id: OutputId,
-    /// Connector name (`DP-1`, or `crawm-0` for the nested output).
+    /// Connector name (`DP-1`, or `crab-0` for the nested output).
     pub name: String,
     /// Full output rectangle in logical, post-scale coordinates.
     pub geometry: Rect,
@@ -282,7 +282,7 @@ mod tests {
     fn output() -> Output {
         Output::new(
             OutputId::new(0),
-            "crawm-0",
+            "crab-0",
             Rect::new(0.0, 0.0, 1920.0, 1080.0),
             1.0,
             SpaceState::default(),

@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=crawm
+Name=crab
 Comment=A Wayland compositor merging mango-style spaces, niri scrolling, and cosmic protocol breadth
-Exec=crawm
+Exec=crab
 Type=Application
-DesktopNames=crawm
+DesktopNames=crab

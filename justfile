@@ -1,4 +1,4 @@
-# crawm developer tasks. Run `just` for the default (check).
+# crab developer tasks. Run `just` for the default (check).
 
 default: check
 

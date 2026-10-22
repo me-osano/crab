@@ -1,10 +1,10 @@
-//! crawm — a Wayland compositor merging mango-style spaces, niri scrolling, and cosmic
+//! crab — a Wayland compositor merging mango-style spaces, niri scrolling, and cosmic
 //! protocol breadth.
 //!
 //! This binary is the thin Smithay entry point: backend selection, logging, and
 //! the top-level event loop. Everything that touches Smithay lives in
 //! `src/compositor/` (state, handlers, input, render) and `src/backend/`, while
-//! the Smithay-free logic lives in the `crawm` library (see `src/lib.rs` and
+//! the Smithay-free logic lives in the `crab` library (see `src/lib.rs` and
 //! `ROADMAP.md` §5), which is also what `tests/` drives.
 //!
 //! Which backends are compiled in is a cargo feature: `backend-winit` (the
@@ -27,7 +27,7 @@ mod logging;
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use crawm::config::Config;
+use crab::config::Config;
 
 use crate::cli::{Args, Backend};
 
@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
 
     if args.validate {
         // Validate even a default config, then report and exit.
-        crawm::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
+        crab::config::validate(&config).map_err(|err| anyhow::anyhow!(err))?;
         println!(
             "ok: config valid (gaps={}, border-width={}, layout={}, animations={})",
             config.gaps, config.border_width, config.layout, config.animations.enabled
@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tracing::info!(backend = ?args.backend, "starting crawm");
+    tracing::info!(backend = ?args.backend, "starting crab");
     match args.backend {
         Backend::Winit => run_winit(&config),
         Backend::Tty => run_tty(&config),
@@ -70,7 +70,7 @@ fn run_winit(config: &Config) -> anyhow::Result<()> {
 
 #[cfg(not(feature = "backend-winit"))]
 fn run_winit(_config: &Config) -> anyhow::Result<()> {
-    anyhow::bail!("this crawm build has no `winit` backend; enable the `backend-winit` feature")
+    anyhow::bail!("this crab build has no `winit` backend; enable the `backend-winit` feature")
 }
 
 #[cfg(feature = "backend-tty")]
@@ -80,19 +80,19 @@ fn run_tty(config: &Config) -> anyhow::Result<()> {
 
 #[cfg(not(feature = "backend-tty"))]
 fn run_tty(_config: &Config) -> anyhow::Result<()> {
-    anyhow::bail!("this crawm build has no `tty` backend; enable the `backend-tty` feature")
+    anyhow::bail!("this crab build has no `tty` backend; enable the `backend-tty` feature")
 }
 
 /// Loads the config from `--config`, else the default path if it exists, else
 /// built-in defaults.
 fn resolve_config(args: &Args) -> anyhow::Result<Config> {
     if let Some(path) = &args.config {
-        return crawm::config::load(path)
+        return crab::config::load(path)
             .with_context(|| format!("loading config from {}", path.display()));
     }
-    if let Some(path) = crawm::config::default_path().filter(|path| path.exists()) {
+    if let Some(path) = crab::config::default_path().filter(|path| path.exists()) {
         tracing::debug!(path = %path.display(), "loading default config");
-        return crawm::config::load(&path)
+        return crab::config::load(&path)
             .with_context(|| format!("loading config from {}", path.display()));
     }
     Ok(Config::default())
