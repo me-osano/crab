@@ -13,7 +13,8 @@
 
 use crab::animation::Kind;
 use crab::core::{
-    Direction, LayoutFamily, LayoutKind, LayoutParams, Rect, ScrollState, SpaceSet, WindowId,
+    Direction, LayoutFamily, LayoutKind, LayoutParams, OutputId, Rect, ScrollState, SpaceSet,
+    WindowId,
 };
 use crab::layout::{self, LayoutInput, LayoutWindow, Placement};
 
@@ -27,13 +28,19 @@ const CASCADE_STEP: f64 = 32.0;
 /// The order the passes run in is the stacking order: fullscreen/maximized
 /// windows fill the output, then the tiled windows are arranged, then floating
 /// windows sit on top with their remembered geometry.
-pub(crate) fn arrange(state: &mut Crab) {
-    let view = state.output().model.view.visible;
-    let area = state.output().model.usable_area;
+pub(crate) fn arrange(state: &mut Crab, output: OutputId) {
+    let Some(runtime) = state.outputs.get(&output) else {
+        return;
+    };
+    let view = runtime.model.view.visible;
+    let area = runtime.model.usable_area;
 
-    // Everything not re-placed below ends up hidden.
+    // Everything on this output that is not re-placed below ends up hidden.
+    // Windows on other outputs keep the visibility their own arrange set.
     for window in &mut state.windows {
-        window.visible = false;
+        if window.window.output == output {
+            window.visible = false;
+        }
     }
 
     // 1. Fullscreen and maximized windows cover the usable area.
@@ -41,7 +48,8 @@ pub(crate) fn arrange(state: &mut Crab) {
         .windows
         .iter()
         .filter(|window| {
-            window.mapped
+            window.window.output == output
+                && window.mapped
                 && (window.window.fullscreen || window.window.maximized)
                 && window.window.is_on(view)
         })
@@ -58,12 +66,12 @@ pub(crate) fn arrange(state: &mut Crab) {
     // on it is handled by the floating pass below. This is what makes
     // `layout = "floating"` behave like floating even for windows that are not
     // individually floated (`COMPOSITOR.md` §7.3).
-    let (kind, params, mut scroll) = current_layout(state);
+    let (kind, params, mut scroll) = current_layout(state, output);
     let free = kind.is_free();
     let tiled = if free {
         Vec::new()
     } else {
-        tiled_windows(state, view)
+        tiled_windows(state, output, view)
     };
     let tiled_count = tiled.len();
     let focused = state
@@ -102,7 +110,11 @@ pub(crate) fn arrange(state: &mut Crab) {
     }
 
     // A scrolling layout may have updated its offset.
-    if let Some(space) = state.output_mut().model.current_space_state_mut() {
+    if let Some(space) = state
+        .outputs
+        .get_mut(&output)
+        .and_then(|runtime| runtime.model.current_space_state_mut())
+    {
         space.scroll = scroll;
     }
 
@@ -112,7 +124,8 @@ pub(crate) fn arrange(state: &mut Crab) {
         .windows
         .iter()
         .filter(|window| {
-            window.mapped
+            window.window.output == output
+                && window.mapped
                 && (free || window.window.floating)
                 && !window.window.fullscreen
                 && !window.window.maximized
@@ -140,16 +153,20 @@ pub(crate) fn directional_target(
     current: WindowId,
     dir: Direction,
 ) -> Option<WindowId> {
-    let view = state.output().model.view.visible;
-    let (kind, params, mut scroll) = current_layout(state);
+    let output = state
+        .window(current)
+        .map_or(state.primary_output, |window| window.window.output);
+    let runtime = state.outputs.get(&output)?;
+    let view = runtime.model.view.visible;
+    let (kind, params, mut scroll) = current_layout(state, output);
     let tiled = if kind.is_free() {
         Vec::new()
     } else {
-        tiled_windows(state, view)
+        tiled_windows(state, output, view)
     };
     if let Some(from) = tiled.iter().position(|window| window.id == current) {
         let input = LayoutInput {
-            area: state.output().model.usable_area,
+            area: state.outputs.get(&output)?.model.usable_area,
             windows: &tiled,
             focused: Some(from),
             params: &params,
@@ -163,7 +180,7 @@ pub(crate) fn directional_target(
     let placements: Vec<Placement> = state
         .windows
         .iter()
-        .filter(|window| window.visible)
+        .filter(|window| window.visible && window.window.output == output)
         .map(|window| Placement::visible(window.id(), window.rect()))
         .collect();
     let from = placements.iter().position(|p| p.window == current)?;
@@ -171,12 +188,13 @@ pub(crate) fn directional_target(
 }
 
 /// The tiled windows on `view`, in layout order.
-fn tiled_windows(state: &Crab, view: SpaceSet) -> Vec<LayoutWindow> {
+fn tiled_windows(state: &Crab, output: OutputId, view: SpaceSet) -> Vec<LayoutWindow> {
     state
         .windows
         .iter()
         .filter(|window| {
-            window.mapped
+            window.window.output == output
+                && window.mapped
                 && window.window.is_tiled()
                 && !window.window.maximized
                 && window.window.is_on(view)
@@ -194,17 +212,21 @@ fn tiled_windows(state: &Crab, view: SpaceSet) -> Vec<LayoutWindow> {
 ///
 /// The scroll state is cloned rather than copied — it owns the scroller's
 /// columns — and written back after the arrange.
-fn current_layout(state: &Crab) -> (LayoutKind, LayoutParams, ScrollState) {
-    state.output().model.current_space_state().map_or_else(
-        || {
-            (
-                LayoutKind::default(),
-                LayoutParams::default(),
-                ScrollState::default(),
-            )
-        },
-        |space| (space.layout, space.params, space.scroll.clone()),
-    )
+fn current_layout(state: &Crab, output: OutputId) -> (LayoutKind, LayoutParams, ScrollState) {
+    state
+        .outputs
+        .get(&output)
+        .and_then(|runtime| runtime.model.current_space_state())
+        .map_or_else(
+            || {
+                (
+                    LayoutKind::default(),
+                    LayoutParams::default(),
+                    ScrollState::default(),
+                )
+            },
+            |space| (space.layout, space.params, space.scroll.clone()),
+        )
 }
 
 /// Places a tiled/fullscreen window, configuring the client when the size

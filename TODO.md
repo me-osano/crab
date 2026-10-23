@@ -164,7 +164,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 
 ### 2.1 `src/core` data model (`COMPOSITOR.md` §6)
 - [x] Newtypes `WindowId`, `OutputId`, `SpaceSet(u32)`, `LayerId`; logical `f64` `Rect`/`Point`/`Size`.
-- [x] `Window` (id, app_id, title, `spaces: SpaceSet`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
+- [x] `Window` (id, app_id, title, `output: OutputId`, `spaces: SpaceSet`, floating, fullscreen, maximized, urgent, float_geometry, min/max, applied_rules).
 - [x] `Output` (name, geometry, scale, `usable_area`, `view: SpaceView`, `space_states: [SpaceState; 32]`, `default_space`).
 - [x] `SpaceView { visible, previous }`; `SpaceState { layout, params, scroll, focus_history }`.
 - [x] `SpaceRemap` — dense renumbering used by dynamic spaces (niri-style): see §2.5.
@@ -194,6 +194,8 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] `view-space`, `toggle-space-view`, `view-spaces 1+3` (multi-view), `move-to-space`, `toggle-space` (on window).
 - [x] Multiple spaces **per window**; `toggle-back` via `SpaceView.previous`.
 - [x] Per-output space views; moving windows/output focus between spaces.
+- [x] Windows are arranged on their owning output; layout, focus cycling, activation, and dynamic-space compaction are scoped to it.
+- [x] Output registry keyed by `OutputId`; adding an output makes the first one primary, and removing one migrates its windows and layer entries to a fallback output.
 - [x] **Dynamic numbering** (niri-style): a space exists while it holds a window or is the empty space past the last occupied one; spaces that are now empty and followed by occupied ones are removed and the survivors compacted from 1, with their layout state following and window membership renumbered through `SpaceRemap` — so there is never an empty space before the focused one, and removing the focused space hands the view to the space that moves up.
 - [x] `move-to-space` shows the target space, so focus follows the moved window.
 - [x] **No per-space configuration**: every space starts from `[layout]` defaults; cycling the layout changes only the current space at runtime.

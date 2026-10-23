@@ -5,7 +5,7 @@
 //! matching window rules. The compositor keeps one of these alongside the
 //! Smithay `ToplevelSurface` that owns the actual protocol object.
 
-use crate::core::{Rect, Size, SpaceSet, WindowId};
+use crate::core::{OutputId, Rect, Size, SpaceSet, WindowId};
 
 /// The outcome of matching window rules, remembered on the window so dynamic
 /// re-evaluation (M5) can tell what a rule already decided.
@@ -44,6 +44,8 @@ pub struct Window {
     pub app_id: Option<String>,
     /// `xdg_toplevel` title, once the client sets it.
     pub title: Option<String>,
+    /// The output this window is arranged on.
+    pub output: OutputId,
     /// Spaces the window belongs to (may be several).
     pub spaces: SpaceSet,
     /// Per-window floating override.
@@ -69,13 +71,14 @@ pub struct Window {
 }
 
 impl Window {
-    /// Creates a tiled window on `spaces`.
+    /// Creates a tiled window on `output` and `spaces`.
     #[must_use]
-    pub fn new(id: WindowId, spaces: SpaceSet) -> Self {
+    pub fn new(id: WindowId, output: OutputId, spaces: SpaceSet) -> Self {
         Self {
             id,
             app_id: None,
             title: None,
+            output,
             spaces,
             floating: false,
             fullscreen: false,
@@ -171,7 +174,13 @@ mod tests {
     use super::*;
 
     fn window() -> Window {
-        Window::new(WindowId::new(1), SpaceSet::SPACE_1)
+        Window::new(WindowId::new(1), OutputId::new(0), SpaceSet::SPACE_1)
+    }
+
+    #[test]
+    fn a_window_is_arranged_on_its_own_output() {
+        let w = Window::new(WindowId::new(7), OutputId::new(2), SpaceSet::SPACE_1);
+        assert_eq!(w.output, OutputId::new(2));
     }
 
     #[test]

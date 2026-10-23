@@ -82,10 +82,10 @@ pub fn apply(window: &mut Window, rules: &[WindowRule]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Rect, WindowId};
+    use crate::core::{OutputId, Rect, WindowId};
 
     fn window() -> Window {
-        Window::new(WindowId::new(1), SpaceSet::SPACE_1)
+        Window::new(WindowId::new(1), OutputId::new(0), SpaceSet::SPACE_1)
     }
 
     #[test]

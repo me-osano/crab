@@ -50,11 +50,12 @@ impl XdgActivationHandler for Crab {
             tracing::debug!("ignored an activation for an unknown surface");
             return;
         };
-        let visible = self.output().model.view.visible;
-        if !self
-            .window(id)
-            .is_some_and(|window| window.window.is_on(visible))
-        {
+        let on_view = self.window(id).is_some_and(|window| {
+            self.outputs
+                .get(&window.window.output)
+                .is_some_and(|output| window.window.is_on(output.model.view.visible))
+        });
+        if !on_view {
             tracing::debug!(?id, "ignored an activation on a hidden space");
             return;
         }

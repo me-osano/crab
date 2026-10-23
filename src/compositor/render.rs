@@ -105,6 +105,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
 
     // Positions are logical; with M2's `Scale::Integer(1)` output they map
     // one-to-one onto the renderer's physical pixels.
+    let output = state.primary_output;
     let border_width = state
         .output()
         .model
@@ -143,6 +144,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
         collect_window_layer(
             state,
             &mut *renderer,
+            output,
             border_width,
             focused,
             layer,
@@ -158,6 +160,9 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
         let Some(window) = state.window(*id) else {
             continue;
         };
+        if window.window.output != output {
+            continue;
+        }
         let origin = window.visual_origin(&state.frame_clock);
         let alpha = window.open_alpha(&state.frame_clock);
         for (popup, offset) in crate::compositor::state::popup_offsets(window) {
@@ -191,7 +196,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
         let Some(window) = state.window(*id) else {
             continue;
         };
-        if !window.mapped || !window.visible {
+        if !window.mapped || !window.visible || window.window.output != output {
             continue;
         }
         frame_surfaces.push(window.wl_surface().clone());
@@ -366,6 +371,7 @@ fn collect_layer_pass(
 fn collect_window_layer(
     state: &Crab,
     renderer: &mut GlesRenderer,
+    output: crab::core::OutputId,
     border_width: i32,
     focused: Option<WindowId>,
     layer: WindowLayer,
@@ -375,13 +381,18 @@ fn collect_window_layer(
     let live: Vec<&ManagedWindow> = order
         .iter()
         .filter_map(|id| state.window(*id))
-        .filter(|window| window.mapped && window.visible && window.stack_layer() == layer)
+        .filter(|window| {
+            window.window.output == output
+                && window.mapped
+                && window.visible
+                && window.stack_layer() == layer
+        })
         .collect();
 
     let closings: Vec<&ClosingWindow> = state
         .closings
         .iter()
-        .filter(|closing| closing.layer == layer)
+        .filter(|closing| closing.output == output && closing.layer == layer)
         .collect();
     let mut slots = closing_slots(
         closings.iter().map(|closing| closing.stack_index),

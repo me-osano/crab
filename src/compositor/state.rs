@@ -298,6 +298,8 @@ struct FrameSnapshot {
 /// it through the window's last [`WindowFit`]. That is the "snapshot" the
 /// close animation needs without copying the framebuffer (`COMPOSITOR.md` §9).
 pub(crate) struct ClosingWindow {
+    /// The output the window was drawn on.
+    pub(crate) output: OutputId,
     /// The last committed buffer, held so the client cannot free its pixels.
     pub(crate) buffer: Buffer,
     /// The scale and transform the buffer was committed with.
@@ -333,6 +335,8 @@ pub(crate) struct LayerEntry {
     pub(crate) id: LayerId,
     /// The surface and its namespace.
     pub(crate) surface: LayerSurface,
+    /// The output whose layer map owns the surface.
+    pub(crate) output: OutputId,
     /// The rule's `animation_type_open`, if one matched the namespace.
     style: Option<AnimationStyle>,
     /// How far the surface has appeared: 0 at its first mapped frame, 1 at rest.
@@ -1018,9 +1022,6 @@ impl Crab {
         );
         let output_id = OutputId::new(0);
         let output_state = OutputModel::new(output_id, "crab-0", Rect::default(), 1.0, space_state);
-        let output_runtime = OutputRuntime::new(output, output_state, render_transform);
-        let mut outputs = HashMap::new();
-        outputs.insert(output_id, output_runtime);
 
         let (binds, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
         for issue in key_issues {
@@ -1041,7 +1042,7 @@ impl Crab {
             "compiled bindings"
         );
 
-        Self {
+        let mut state = Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
@@ -1055,7 +1056,7 @@ impl Crab {
             seat_state,
             keyboard,
             pointer,
-            outputs,
+            outputs: HashMap::new(),
             primary_output: output_id,
             config: config.clone(),
             binds,
@@ -1080,7 +1081,9 @@ impl Crab {
             cursor_image: CursorImageStatus::default_named(),
             next_window_id: 1,
             next_layer_id: 1,
-        }
+        };
+        state.add_output(output, output_state, render_transform);
+        state
     }
 
     /// The output that currently owns focus and input.
@@ -1095,6 +1098,76 @@ impl Crab {
         self.outputs
             .get_mut(&self.primary_output)
             .expect("the primary output is always registered")
+    }
+
+    /// Registers an output and makes it primary when it is the first one.
+    pub(crate) fn add_output(
+        &mut self,
+        output: Output,
+        model: OutputModel,
+        render_transform: Transform,
+    ) -> OutputId {
+        let id = model.id;
+        if self.outputs.contains_key(&id) {
+            tracing::warn!(output = %id, "ignoring a duplicate output id");
+            return id;
+        }
+        let first = self.outputs.is_empty();
+        self.outputs
+            .insert(id, OutputRuntime::new(output, model, render_transform));
+        if first {
+            self.primary_output = id;
+        }
+        self.relayout();
+        id
+    }
+
+    /// Removes an output and migrates its windows to a remaining one.
+    ///
+    /// The last output cannot be removed: there would be nowhere to put its
+    /// windows. The DRM hotplug path (M4) calls this when a connector goes
+    /// away; the fallback is the first remaining output for now.
+    #[allow(dead_code)]
+    pub(crate) fn remove_output(&mut self, id: OutputId) -> bool {
+        if self.outputs.len() <= 1 || !self.outputs.contains_key(&id) {
+            return false;
+        }
+        self.outputs.remove(&id);
+        let fallback = self
+            .outputs
+            .keys()
+            .copied()
+            .min()
+            .expect("a remaining output exists");
+        for window in &mut self.windows {
+            if window.window.output == id {
+                window.window.output = fallback;
+            }
+        }
+        let removed_layers: Vec<LayerId> = self
+            .layers
+            .iter()
+            .filter(|layer| layer.output == id)
+            .map(|layer| layer.id)
+            .collect();
+        self.layers.retain(|layer| layer.output != id);
+        self.closings.retain(|closing| closing.output != id);
+        let mut lost_layer_focus = false;
+        for layer in removed_layers {
+            self.focus_stack.remove(FocusTarget::LayerSurface(layer));
+            if self.focus == FocusTarget::LayerSurface(layer) {
+                self.focus = FocusTarget::None;
+                lost_layer_focus = true;
+            }
+        }
+        if self.primary_output == id {
+            self.primary_output = fallback;
+        }
+        if lost_layer_focus {
+            self.refocus_after_view_change();
+        }
+        self.relayout();
+        true
     }
 
     /// Sets crab's own Wayland socket name; spawned and autostarted clients
@@ -1209,6 +1282,7 @@ impl Crab {
         self.layers.push(LayerEntry {
             id,
             surface: layer,
+            output: self.primary_output,
             style,
             open: Animated::new(1.0, OPEN_CURVE, Kind::WindowOpen),
             mapped: false,
@@ -1349,7 +1423,8 @@ impl Crab {
             .iter()
             .rev()
             .find(|entry| {
-                matches!(entry.surface.layer(), Layer::Top | Layer::Overlay)
+                entry.output == self.primary_output
+                    && matches!(entry.surface.layer(), Layer::Top | Layer::Overlay)
                     && entry.surface.cached_state().keyboard_interactivity
                         == KeyboardInteractivity::Exclusive
             })
@@ -1424,7 +1499,10 @@ impl Crab {
 
     /// Recomputes every window's rectangle for the current view and layout.
     pub(crate) fn relayout(&mut self) {
-        layout::arrange(self);
+        let outputs: Vec<OutputId> = self.outputs.keys().copied().collect();
+        for output in outputs {
+            layout::arrange(self, output);
+        }
     }
 
     /// Re-times the animation clock for the frame about to be drawn.
@@ -1468,8 +1546,9 @@ impl Crab {
         let id = WindowId::new(self.next_window_id);
         self.next_window_id += 1;
 
+        let output = self.primary_output;
         let spaces = self.output().model.view.visible;
-        let mut window = Window::new(id, spaces);
+        let mut window = Window::new(id, output, spaces);
         let (title, app_id) = read_toplevel_info(&surface);
         window.title = title;
         window.app_id = app_id;
@@ -1791,6 +1870,7 @@ impl Crab {
                 let mut progress = Animated::new(0.0, CLOSE_CURVE, Kind::WindowClose);
                 progress.animate(1.0, Kind::WindowClose, &self.frame_clock);
                 ClosingWindow {
+                    output: window.window.output,
                     buffer: frame.buffer.clone(),
                     buffer_scale: frame.buffer_scale,
                     buffer_transform: frame.buffer_transform,
@@ -1957,6 +2037,7 @@ impl Crab {
     fn occupied_spaces(&self) -> SpaceSet {
         self.windows
             .iter()
+            .filter(|window| window.window.output == self.primary_output)
             .fold(SpaceSet::empty(), |spaces, window| {
                 spaces | window.window.spaces
             })
@@ -1979,7 +2060,9 @@ impl Crab {
         let occupied = self.occupied_spaces();
         let remap = self.output_mut().model.compact(occupied);
         for window in &mut self.windows {
-            window.window.spaces = remap.map_mask(window.window.spaces);
+            if window.window.output == self.primary_output {
+                window.window.spaces = remap.map_mask(window.window.spaces);
+            }
         }
     }
 
@@ -2060,6 +2143,7 @@ impl Crab {
         let entries: Vec<StackEntry> = self
             .windows
             .iter()
+            .filter(|window| window.window.output == self.primary_output)
             .map(|window| StackEntry {
                 id: window.id(),
                 layer: window.stack_layer(),
@@ -2074,16 +2158,23 @@ impl Crab {
     /// Every focus change goes through here (`COMPOSITOR.md` §6) so the
     /// protocol state, the focus stack, and the space history stay in step.
     pub(crate) fn focus_window(&mut self, id: Option<WindowId>) {
-        // A keyboard-exclusive layer (a launcher, most often) keeps the
-        // keyboard until it goes away, whatever tried to focus a window.
-        if let Some(layer) = self.exclusive_layer() {
-            self.focus_layer(layer);
-            return;
-        }
         if id
             .and_then(|id| self.window(id))
             .is_some_and(|window| !window.is_focusable())
         {
+            return;
+        }
+        // Keyboard focus follows the window's output, so space actions and
+        // rendering target the monitor the user just interacted with. Do this
+        // before looking for an exclusive layer: that layer belongs to the
+        // target output, not the one focus is leaving.
+        if let Some(window) = id.and_then(|id| self.window(id)) {
+            self.primary_output = window.window.output;
+        }
+        // A keyboard-exclusive layer (a launcher, most often) keeps the
+        // keyboard until it goes away, whatever tried to focus a window.
+        if let Some(layer) = self.exclusive_layer() {
+            self.focus_layer(layer);
             return;
         }
         let previous = self.focus;
@@ -2112,18 +2203,20 @@ impl Crab {
     /// Layer surfaces have no `xdg_toplevel` activation state, so this only
     /// updates the focus stack and the seat's keyboard focus.
     pub(crate) fn focus_layer(&mut self, id: LayerId) -> bool {
-        let Some(surface) = self.layer(id).and_then(|entry| {
+        let Some((surface, output)) = self.layer(id).and_then(|entry| {
             entry
                 .surface
                 .can_receive_keyboard_focus()
-                .then(|| entry.surface.wl_surface().clone())
+                .then(|| (entry.surface.wl_surface().clone(), entry.output))
         }) else {
             return false;
         };
 
         if self.focus == FocusTarget::LayerSurface(id) {
+            self.primary_output = output;
             return true;
         }
+        self.primary_output = output;
         if let Some(old) = self.focus.window() {
             self.set_activated(old, false);
         }
@@ -2239,7 +2332,12 @@ impl Crab {
         let ids: Vec<WindowId> = self
             .windows
             .iter()
-            .filter(|window| window.mapped && window.window.is_on(view) && window.is_focusable())
+            .filter(|window| {
+                window.window.output == self.primary_output
+                    && window.mapped
+                    && window.window.is_on(view)
+                    && window.is_focusable()
+            })
             .map(ManagedWindow::id)
             .collect();
         if ids.is_empty() {
@@ -2394,7 +2492,10 @@ impl Crab {
         }
         let view = self.output().model.view.visible;
         let on_screen = |window: &ManagedWindow| {
-            window.mapped && window.window.is_on(view) && window.is_focusable()
+            window.window.output == self.primary_output
+                && window.mapped
+                && window.window.is_on(view)
+                && window.is_focusable()
         };
         if self
             .focused_id()

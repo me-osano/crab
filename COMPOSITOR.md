@@ -955,7 +955,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 
 ## 16. Outputs, scaling, and color
 
-- Hotplug via udev; output add/remove updates space views and migrates windows from removed outputs to a fallback output.
+- Hotplug via udev; output add/remove updates space views and migrates windows from removed outputs to a fallback output. The compositor already keeps one `OutputRuntime` per `OutputId`, arranges each output's windows separately, routes focus to the owning output, and implements the fallback migration; the DRM backend still has to feed it connector events.
 - Modes: parse `WxH@Hz`, support custom modes later, VRR (adaptive sync) toggle.
 - **Fractional scaling:** use `wp_fractional_scale` + `wp_viewporter`; layout in logical coordinates; round buffer positions to physical pixels consistently to avoid blurry borders.
 - Transform (rotation/flip) support early, since it affects the coordinate pipeline everywhere.
