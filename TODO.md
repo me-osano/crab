@@ -336,6 +336,7 @@ Goal: boot `crab` from a TTY and use it as the real session on one machine.
 - [ ] logind integration (`zbus`): VT switch, session pause/resume, lid, suspend inhibit.
 
 ### 4.2 DRM/KMS + GBM + EGL
+- [x] Parse and validate `[output.<name>]` modes (`WxH[@Hz]`) and transforms; apply configured positions when an output is registered.
 - [ ] `DrmDevice` + atomic modesetting; `GbmBufferedSurface` + EGL for rendering.
 - [ ] `DrmCompositor` for planes, reusing the `OutputDamageTracker` that already
   drives the winit backend.

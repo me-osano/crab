@@ -91,6 +91,28 @@ fn occupied_target(occupied: SpaceSet, current: u8, step: i8) -> Option<u8> {
     }
 }
 
+/// Applies a connector's configured position to its output model.
+///
+/// Mode, scale, and transform need the DRM backend, but position is known as
+/// soon as the connector is named and must be in place before the first mode is
+/// set, because [`Crab::set_output_size`] preserves the model's origin.
+fn apply_configured_position(config: &Config, model: &mut OutputModel) {
+    let Some((x, y)) = config
+        .outputs
+        .get(&model.name)
+        .and_then(|output| output.position)
+    else {
+        return;
+    };
+    let geometry = model.geometry;
+    model.set_geometry(Rect::new(
+        f64::from(x),
+        f64::from(y),
+        geometry.w,
+        geometry.h,
+    ));
+}
+
 /// The rectangle an output occupies in the compositor's global logical space.
 fn output_rects(outputs: &HashMap<OutputId, OutputRuntime>) -> Vec<(OutputId, Rect)> {
     outputs
@@ -1238,7 +1260,7 @@ impl Crab {
     pub(crate) fn add_output(
         &mut self,
         output: Output,
-        model: OutputModel,
+        mut model: OutputModel,
         render_transform: Transform,
     ) -> OutputId {
         let id = model.id;
@@ -1246,6 +1268,11 @@ impl Crab {
             tracing::warn!(output = %id, "ignoring a duplicate output id");
             return id;
         }
+        // A connector's configured position is known before its mode, so the
+        // backend can apply it here and let `set_output_size` preserve the
+        // origin. Mode, scale, and transform wait for the DRM backend.
+        apply_configured_position(&self.config, &mut model);
+        tracing::debug!(%id, connector = %model.name, "registered an output");
         let first = self.outputs.is_empty();
         let location = Point::<i32, Logical>::from((
             model.geometry.x.round() as i32,
@@ -3279,6 +3306,28 @@ mod tests {
 
     fn output(id: u64, x: f64, y: f64, w: f64, h: f64) -> (OutputId, Rect) {
         (OutputId::new(id), rect(x, y, w, h))
+    }
+
+    #[test]
+    fn a_configured_position_moves_an_output_and_keeps_its_size() {
+        let mut config = Config::default();
+        config.outputs.insert(
+            "DP-2".to_owned(),
+            crab::config::Output {
+                position: Some((1920, 120)),
+                ..crab::config::Output::default()
+            },
+        );
+        let mut model = OutputModel::new(
+            OutputId::new(1),
+            "DP-2",
+            Rect::new(0.0, 0.0, 2560.0, 1440.0),
+            1.0,
+            SpaceState::default(),
+        );
+        apply_configured_position(&config, &mut model);
+        assert_eq!(model.geometry, Rect::new(1920.0, 120.0, 2560.0, 1440.0));
+        assert_eq!(model.usable_area, model.geometry);
     }
 
     #[test]

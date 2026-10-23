@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::core::{Color, LayoutKind, LayoutParams, ScrollCenter};
+use crate::core::{Color, LayoutKind, LayoutParams, OutputMode, OutputTransform, ScrollCenter};
 use serde::Deserialize;
 
 /// The compositor configuration.
@@ -67,8 +67,9 @@ pub struct Config {
     /// Keyboard, pointer and touchpad defaults (`[input]`). Parsed and
     /// validated; applied when the libinput backend lands (M4).
     pub input: Input,
-    /// Per-connector settings (`[output.<name>]`). Parsed; applied with the
-    /// output backend (M4).
+    /// Per-connector settings (`[output.<name>]`). `position` is applied when
+    /// an output is registered; mode, scale, and transform are applied by the
+    /// DRM backend (M4).
     pub outputs: BTreeMap<String, Output>,
     /// Commands to run once at startup (`[autostart]`). Run by the backend once
     /// crab's Wayland socket exists.
@@ -134,7 +135,9 @@ impl Config {
         if self.input != defaults.input {
             pending.push("input");
         }
-        if !self.outputs.is_empty() {
+        if self.outputs.values().any(|output| {
+            output.mode.is_some() || output.scale.is_some() || output.transform.is_some()
+        }) {
             pending.push("output");
         }
         if !self.gesture_binds.is_empty() {
@@ -1085,6 +1088,14 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
                 )));
             }
         }
+        if let Some(mode) = &output.mode {
+            OutputMode::parse(mode)
+                .map_err(|err| ConfigError::Invalid(format!("`output.{name}.mode`: {err}")))?;
+        }
+        if let Some(transform) = &output.transform {
+            OutputTransform::parse(transform)
+                .map_err(|err| ConfigError::Invalid(format!("`output.{name}.transform`: {err}")))?;
+        }
     }
     for (section, binds) in [
         ("binds.default", &config.binds.default),
@@ -1285,6 +1296,22 @@ mod tests {
     fn rejects_non_positive_output_scale() {
         let cfg = parse("[output.DP-1]\nscale = 0\n").unwrap();
         assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn rejects_malformed_output_modes_and_transforms() {
+        for config in [
+            "[output.DP-1]\nmode = \"1920\"\n",
+            "[output.DP-1]\nmode = \"1920x0\"\n",
+            "[output.DP-1]\nmode = \"1920x1080@0\"\n",
+            "[output.DP-1]\ntransform = \"sideways\"\n",
+        ] {
+            let cfg = parse(config).unwrap();
+            assert!(
+                matches!(validate(&cfg), Err(ConfigError::Invalid(_))),
+                "accepted {config:?}"
+            );
+        }
     }
 
     #[test]
@@ -1520,6 +1547,11 @@ mod tests {
         let pending = cfg.pending_sections();
         assert!(pending.contains(&"input"));
         assert!(pending.contains(&"layout.client_side_decorations"));
+
+        // A position-only output table is applied when the output is
+        // registered, so nothing is pending for it.
+        let cfg = parse("[output.DP-1]\nposition = { x = 1920, y = 0 }\n").unwrap();
+        assert!(!cfg.pending_sections().contains(&"output"));
     }
 
     #[test]

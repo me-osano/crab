@@ -6,10 +6,171 @@
 //! visible space** arranges the combined window set — the dwm rule documented on
 //! [`Output::current_space_index`].
 
+use std::fmt;
+
 use crate::core::OutputId;
 use crate::core::{
     LayoutKind, LayoutParams, Rect, ScrollState, SpaceRemap, SpaceSet, SpaceView, WindowId,
 };
+
+/// Why an `[output.<name>]` mode or transform could not be parsed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputSpecError {
+    spec: String,
+    reason: &'static str,
+}
+
+impl OutputSpecError {
+    fn new(spec: &str, reason: &'static str) -> Self {
+        Self {
+            spec: spec.to_owned(),
+            reason,
+        }
+    }
+}
+
+impl fmt::Display for OutputSpecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid output spec `{}`: {}", self.spec, self.reason)
+    }
+}
+
+impl std::error::Error for OutputSpecError {}
+
+/// A configured output mode: `WIDTHxHEIGHT` with an optional refresh rate.
+///
+/// The DRM backend selects a matching mode from the connector; the pure model
+/// keeps the parsed form so validation can reject typos before the session
+/// starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputMode {
+    /// Horizontal pixels.
+    pub width: i32,
+    /// Vertical pixels.
+    pub height: i32,
+    /// Vertical refresh in millihertz, if the spec included `@RATE`.
+    pub refresh_mhz: Option<u32>,
+}
+
+impl OutputMode {
+    /// Parses `WIDTHxHEIGHT` or `WIDTHxHEIGHT@RATE`, e.g. `2560x1440@144`.
+    ///
+    /// # Errors
+    /// Fails for missing dimensions, non-positive sizes, or a refresh rate that
+    /// is not a positive finite number.
+    pub fn parse(spec: &str) -> Result<Self, OutputSpecError> {
+        let spec = spec.trim();
+        let (size, refresh) = match spec.split_once('@') {
+            Some((size, refresh)) => (size, Some(refresh)),
+            None => (spec, None),
+        };
+        let (width, height) = size
+            .split_once('x')
+            .ok_or_else(|| OutputSpecError::new(spec, "expected `WIDTHxHEIGHT[@RATE]`"))?;
+        let width = width
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| OutputSpecError::new(spec, "width must be a positive integer"))?;
+        let height = height
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| OutputSpecError::new(spec, "height must be a positive integer"))?;
+        if width <= 0 || height <= 0 {
+            return Err(OutputSpecError::new(
+                spec,
+                "width and height must be positive",
+            ));
+        }
+        let refresh_mhz = match refresh {
+            Some(refresh) => {
+                let hz = refresh
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| OutputSpecError::new(spec, "refresh rate must be a number"))?;
+                if !(hz.is_finite() && hz > 0.0) {
+                    return Err(OutputSpecError::new(spec, "refresh rate must be positive"));
+                }
+                let mhz = (hz * 1000.0).round();
+                if mhz > f64::from(u32::MAX) {
+                    return Err(OutputSpecError::new(spec, "refresh rate is too large"));
+                }
+                Some(mhz as u32)
+            }
+            None => None,
+        };
+        Ok(Self {
+            width,
+            height,
+            refresh_mhz,
+        })
+    }
+
+    /// The mode's pixel size.
+    #[must_use]
+    pub const fn size(self) -> (i32, i32) {
+        (self.width, self.height)
+    }
+}
+
+/// A configured output transform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputTransform {
+    /// No rotation or flip.
+    #[default]
+    Normal,
+    /// Rotated 90° clockwise.
+    Rotate90,
+    /// Rotated 180°.
+    Rotate180,
+    /// Rotated 270° clockwise.
+    Rotate270,
+    /// Flipped horizontally.
+    Flipped,
+    /// Flipped and rotated 90°.
+    Flipped90,
+    /// Flipped and rotated 180°.
+    Flipped180,
+    /// Flipped and rotated 270°.
+    Flipped270,
+}
+
+impl OutputTransform {
+    /// Parses the transform names accepted in `[output.<name>] transform`.
+    ///
+    /// # Errors
+    /// Fails for any name outside the documented set.
+    pub fn parse(spec: &str) -> Result<Self, OutputSpecError> {
+        match spec.trim().to_ascii_lowercase().as_str() {
+            "normal" => Ok(Self::Normal),
+            "90" | "rotate-90" => Ok(Self::Rotate90),
+            "180" | "rotate-180" => Ok(Self::Rotate180),
+            "270" | "rotate-270" => Ok(Self::Rotate270),
+            "flipped" | "flip" => Ok(Self::Flipped),
+            "flipped-90" | "flip-90" => Ok(Self::Flipped90),
+            "flipped-180" | "flip-180" => Ok(Self::Flipped180),
+            "flipped-270" | "flip-270" => Ok(Self::Flipped270),
+            _ => Err(OutputSpecError::new(
+                spec,
+                "expected normal, 90, 180, 270, flipped, flipped-90, flipped-180, or flipped-270",
+            )),
+        }
+    }
+
+    /// The canonical name for this transform.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Rotate90 => "90",
+            Self::Rotate180 => "180",
+            Self::Rotate270 => "270",
+            Self::Flipped => "flipped",
+            Self::Flipped90 => "flipped-90",
+            Self::Flipped180 => "flipped-180",
+            Self::Flipped270 => "flipped-270",
+        }
+    }
+}
 
 /// Per-space layout state, remembered for the lifetime of the output.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -287,6 +448,57 @@ mod tests {
             1.0,
             SpaceState::default(),
         )
+    }
+
+    #[test]
+    fn output_modes_parse_size_and_refresh() {
+        let mode = OutputMode::parse("2560x1440@144").unwrap();
+        assert_eq!(mode.size(), (2560, 1440));
+        assert_eq!(mode.refresh_mhz, Some(144_000));
+
+        let mode = OutputMode::parse("1920x1080@120.030").unwrap();
+        assert_eq!(mode.refresh_mhz, Some(120_030));
+
+        let mode = OutputMode::parse(" 800x600 ").unwrap();
+        assert_eq!(mode.size(), (800, 600));
+        assert_eq!(mode.refresh_mhz, None);
+    }
+
+    #[test]
+    fn output_modes_reject_malformed_specs() {
+        for spec in ["", "1920", "1920x", "x1080", "0x1080", "1920x0", "a x b"] {
+            assert!(OutputMode::parse(spec).is_err(), "accepted {spec:?}");
+        }
+        for spec in [
+            "1920x1080@",
+            "1920x1080@0",
+            "1920x1080@-60",
+            "1920x1080@nope",
+        ] {
+            assert!(OutputMode::parse(spec).is_err(), "accepted {spec:?}");
+        }
+    }
+
+    #[test]
+    fn output_transforms_parse_and_round_trip() {
+        for name in [
+            "normal",
+            "90",
+            "180",
+            "270",
+            "flipped",
+            "flipped-90",
+            "flipped-180",
+            "flipped-270",
+        ] {
+            let transform = OutputTransform::parse(name).unwrap();
+            assert_eq!(transform.name(), name);
+        }
+        assert_eq!(
+            OutputTransform::parse("ROTATE-90").unwrap(),
+            OutputTransform::Rotate90
+        );
+        assert!(OutputTransform::parse("sideways").is_err());
     }
 
     #[test]
