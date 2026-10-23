@@ -2200,10 +2200,15 @@ impl Crab {
     /// peer raises it above the rest. Rendering and hit-testing share this order
     /// so a click lands on the window the user can see.
     pub(crate) fn stacked_windows(&self) -> Vec<WindowId> {
+        self.stacked_windows_on(self.primary_output)
+    }
+
+    /// Every visible window on `output` in bottom-to-top painting order.
+    pub(crate) fn stacked_windows_on(&self, output: OutputId) -> Vec<WindowId> {
         let entries: Vec<StackEntry> = self
             .windows
             .iter()
-            .filter(|window| window.window.output == self.primary_output)
+            .filter(|window| window.window.output == output)
             .map(|window| StackEntry {
                 id: window.id(),
                 layer: window.stack_layer(),

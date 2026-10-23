@@ -33,7 +33,8 @@
 use crab::animation::Clocks;
 use crab::config::AnimationStyle;
 use crab::core::Color;
-use crab::core::WindowId;
+use crab::core::{OutputId, WindowId};
+use smithay::backend::SwapBuffersError;
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
@@ -45,7 +46,7 @@ use smithay::backend::renderer::element::surface::{
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, RenderElement, UnderlyingStorage};
-use smithay::backend::renderer::gles::{GlesFrame, GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesFrame, GlesRenderer, GlesTarget, GlesTexture};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
 use smithay::backend::renderer::{ImportAll, Renderer, Texture};
 use smithay::backend::winit::WinitGraphicsBackend;
@@ -85,9 +86,57 @@ render_elements! {
     Closing=ClosingSurface,
 }
 
-/// Renders the whole scene into the winit window and presents it.
+/// A backend that can present one output's frame.
+///
+/// The winit backend implements this for its single nested output. The DRM
+/// backend will implement it per connector, so the scene and damage code below
+/// is shared by both.
+pub(crate) trait OutputBackend {
+    /// The error a failed bind or presentation reports.
+    type Error: std::fmt::Debug;
+
+    /// The output's current physical size.
+    fn output_size(&self) -> Size<i32, Physical>;
+
+    /// How many frames old the buffer being drawn into is, if known.
+    fn buffer_age(&self) -> Option<usize>;
+
+    /// Binds the renderer to the framebuffer for this frame.
+    fn bind(&mut self) -> Result<(&mut GlesRenderer, GlesTarget<'_>), Self::Error>;
+
+    /// Presents the bound frame with the given damage.
+    fn submit(&mut self, damage: Option<&[Rectangle<i32, Physical>]>) -> Result<(), Self::Error>;
+}
+
+impl OutputBackend for WinitGraphicsBackend<GlesRenderer> {
+    type Error = SwapBuffersError;
+
+    fn output_size(&self) -> Size<i32, Physical> {
+        self.window_size()
+    }
+
+    fn buffer_age(&self) -> Option<usize> {
+        WinitGraphicsBackend::buffer_age(self)
+    }
+
+    fn bind(&mut self) -> Result<(&mut GlesRenderer, GlesTarget<'_>), Self::Error> {
+        WinitGraphicsBackend::bind(self)
+    }
+
+    fn submit(&mut self, damage: Option<&[Rectangle<i32, Physical>]>) -> Result<(), Self::Error> {
+        WinitGraphicsBackend::submit(self, damage)
+    }
+}
+
+/// Renders the primary output into the winit window and presents it.
 pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
-    let size = backend.window_size();
+    let output = state.primary_output;
+    render_output(state, output, backend);
+}
+
+/// Renders one output's whole scene through `backend` and presents it.
+pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId, backend: &mut B) {
+    let size = backend.output_size();
     tracing::trace!(width = size.w, height = size.h, "rendering a frame");
     // The buffer we are about to draw into may still hold an older frame. The
     // damage tracker must repaint everything that changed since that frame, not
@@ -105,11 +154,19 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
 
     // Positions are logical; with M2's `Scale::Integer(1)` output they map
     // one-to-one onto the renderer's physical pixels.
-    let output = state.primary_output;
+    let output_origin = state.outputs.get(&output).map_or_else(
+        || Point::<i32, Logical>::from((0, 0)),
+        |runtime| {
+            Point::from((
+                runtime.model.geometry.x.round() as i32,
+                runtime.model.geometry.y.round() as i32,
+            ))
+        },
+    );
     let border_width = state
-        .output()
-        .model
-        .current_space_state()
+        .outputs
+        .get(&output)
+        .and_then(|runtime| runtime.model.current_space_state())
         .map_or(0.0, |space| space.params.border_width)
         .max(0.0) as i32;
     let focused = state.focused_id();
@@ -122,7 +179,12 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // Layer-shell surfaces are arranged by Smithay's layer map. Background and
     // bottom layers go under ordinary windows; top and overlay layers go over
     // them and over window popups, matching the protocol's order.
-    let layer_map = layer_map_for_output(&state.output().wayland);
+    let layer_map = {
+        let Some(runtime) = state.outputs.get(&output) else {
+            return;
+        };
+        layer_map_for_output(&runtime.wayland)
+    };
     collect_layer_pass(
         state,
         &mut *renderer,
@@ -134,7 +196,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // Tiled, floating, always-on-top floating, then fullscreen/maximized. The
     // floating groups are ordered by the focus stack, least recently focused
     // first, so focusing a floating window raises it above its peers.
-    let windows = state.stacked_windows();
+    let windows = state.stacked_windows_on(output);
     for layer in [
         WindowLayer::Tiled,
         WindowLayer::Floating,
@@ -145,6 +207,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
             state,
             &mut *renderer,
             output,
+            output_origin,
             border_width,
             focused,
             layer,
@@ -163,7 +226,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
         if window.window.output != output {
             continue;
         }
-        let origin = window.visual_origin(&state.frame_clock);
+        let origin = window.visual_origin(&state.frame_clock) - output_origin;
         let alpha = window.open_alpha(&state.frame_clock);
         for (popup, offset) in crate::compositor::state::popup_offsets(window) {
             elements.extend(
@@ -215,7 +278,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // And the cursor on top of all of it. A client's own cursor surface and the
     // built-in arrow are mutually exclusive; the arrow is made of solid runs so
     // no icon set or texture is needed.
-    if state.pointer_seen {
+    if output == state.primary_output && state.pointer_seen {
         let mut drew_cursor = false;
         match &state.cursor_image {
             CursorImageStatus::Hidden => {}
@@ -269,7 +332,10 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // so it can subtract opaque regions before deciding what is damaged.
     elements.reverse();
 
-    let (damage, states) = match state.output_mut().damage_tracker.render_output(
+    let Some(runtime) = state.outputs.get_mut(&output) else {
+        return;
+    };
+    let (damage, states) = match runtime.damage_tracker.render_output(
         &mut *renderer,
         &mut framebuffer,
         age,
@@ -372,6 +438,7 @@ fn collect_window_layer(
     state: &Crab,
     renderer: &mut GlesRenderer,
     output: crab::core::OutputId,
+    output_origin: Point<i32, Logical>,
     border_width: i32,
     focused: Option<WindowId>,
     layer: WindowLayer,
@@ -407,14 +474,25 @@ fn collect_window_layer(
                 break;
             }
             slots.next();
-            if let Some(surface) =
-                ClosingSurface::new(renderer, closings[closing], &state.frame_clock)
-            {
+            if let Some(surface) = ClosingSurface::new(
+                renderer,
+                closings[closing],
+                &state.frame_clock,
+                output_origin,
+            ) {
                 out.push(SceneElement::Closing(surface));
             }
         }
         if let Some(window) = live.get(index) {
-            collect_window(state, renderer, border_width, focused, window, out);
+            collect_window(
+                state,
+                renderer,
+                output_origin,
+                border_width,
+                focused,
+                window,
+                out,
+            );
         }
     }
 }
@@ -440,14 +518,16 @@ fn closing_slots(indices: impl IntoIterator<Item = usize>, live_len: usize) -> V
 fn collect_window(
     state: &Crab,
     renderer: &mut GlesRenderer,
+    output_origin: Point<i32, Logical>,
     border_width: i32,
     focused: Option<WindowId>,
     window: &ManagedWindow,
     out: &mut Vec<SceneElement>,
 ) {
-    let location = window.visual_origin(&state.frame_clock);
+    let location = window.visual_origin(&state.frame_clock) - output_origin;
     let size = window.visual_size(&state.frame_clock);
     let alpha = window.open_alpha(&state.frame_clock);
+    let fit = window.fit(&state.frame_clock).relative_to(output_origin);
     // A fullscreen or maximized window covers the screen, so a border would
     // only clip it.
     if border_width > 0 && !window.window.fullscreen && !window.window.maximized {
@@ -470,14 +550,9 @@ fn collect_window(
     // thing while it is the size it was asked to be; pointer input reads the
     // same fit backwards.
     out.extend(
-        fitted_surface_tree(
-            renderer,
-            window.wl_surface(),
-            window.fit(&state.frame_clock),
-            alpha,
-        )
-        .into_iter()
-        .map(SceneElement::Fitted),
+        fitted_surface_tree(renderer, window.wl_surface(), fit, alpha)
+            .into_iter()
+            .map(SceneElement::Fitted),
     );
 }
 
@@ -539,7 +614,13 @@ struct ClosingSurface {
 impl ClosingSurface {
     /// Imports `closing`'s buffer and maps it to where the window was drawn,
     /// moved by the close animation's progress.
-    fn new(renderer: &mut GlesRenderer, closing: &ClosingWindow, clocks: &Clocks) -> Option<Self> {
+    fn new(
+        renderer: &mut GlesRenderer,
+        closing: &ClosingWindow,
+        clocks: &Clocks,
+        output_origin: Point<i32, Logical>,
+    ) -> Option<Self> {
+        let fit = closing.fit.relative_to(output_origin);
         let texture = match renderer.import_buffer(&closing.buffer, None, &[]) {
             Some(Ok(texture)) => texture,
             Some(Err(err)) => {
@@ -555,13 +636,14 @@ impl ClosingSurface {
             closing.buffer_transform,
         );
         let natural = Rectangle::<i32, Physical>::new(
-            closing.fit.surface_origin().to_physical(1),
+            fit.surface_origin().to_physical(1),
             natural_size.to_physical(1),
         );
-        let (src, dst) = closing
-            .fit
-            .map_element(natural, Rectangle::from_size(texture_size.to_f64()))?;
-        let dst = close_dst(dst, closing.style, closing.visual, progress);
+        let (src, dst) = fit.map_element(natural, Rectangle::from_size(texture_size.to_f64()))?;
+        let visual = closing
+            .visual
+            .translated(-f64::from(output_origin.x), -f64::from(output_origin.y));
+        let dst = close_dst(dst, closing.style, visual, progress);
         let alpha = (f64::from(closing.alpha) * (1.0 - progress)) as f32;
         tracing::trace!(?dst, alpha, "drawing a closing window");
         let inner = TextureRenderElement::from_static_texture(

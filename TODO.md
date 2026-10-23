@@ -112,6 +112,9 @@ input, and resizes them. (Design: `COMPOSITOR.md` §3, §8.)
   after `submit` succeeds (M2's frame clock will move them to the presentation time).
 - [x] Smithay `OutputDamageTracker` drives repaints: elements are collected once,
   opaque content is accounted for, and a frame with no damage is not submitted.
+- [x] The render path is output-parameterized: `render_output` takes an `OutputId`
+  and an `OutputBackend`, filters the scene to that output, and translates global
+  layout coordinates into the output's framebuffer origin.
 - [x] Redraw only when something requested it — dispatch, input, resize, and the frame
   event itself; repeated requests coalesce into one frame per loop iteration.
 

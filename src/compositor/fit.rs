@@ -60,6 +60,19 @@ impl WindowFit {
         self.surface_origin
     }
 
+    /// The same fit expressed relative to an output's origin.
+    ///
+    /// Layout rectangles are in the compositor's global coordinate space, but
+    /// each output renders into its own framebuffer starting at `(0, 0)`.
+    pub(crate) fn relative_to(self, origin: Point<i32, Logical>) -> Self {
+        Self {
+            drawn: Rectangle::new(self.drawn.loc - origin, self.drawn.size),
+            surface_origin: self.surface_origin - origin,
+            committed: self.committed,
+            may_stretch: self.may_stretch,
+        }
+    }
+
     /// The origin to report to the seat for this window, so that
     /// `position - origin` gives the surface-local point *drawn* at `position`.
     ///
