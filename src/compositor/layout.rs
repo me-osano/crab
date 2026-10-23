@@ -28,8 +28,8 @@ const CASCADE_STEP: f64 = 32.0;
 /// windows fill the output, then the tiled windows are arranged, then floating
 /// windows sit on top with their remembered geometry.
 pub(crate) fn arrange(state: &mut Crab) {
-    let view = state.output.model.view.visible;
-    let area = state.output.model.usable_area;
+    let view = state.output().model.view.visible;
+    let area = state.output().model.usable_area;
 
     // Everything not re-placed below ends up hidden.
     for window in &mut state.windows {
@@ -102,7 +102,7 @@ pub(crate) fn arrange(state: &mut Crab) {
     }
 
     // A scrolling layout may have updated its offset.
-    if let Some(space) = state.output.model.current_space_state_mut() {
+    if let Some(space) = state.output_mut().model.current_space_state_mut() {
         space.scroll = scroll;
     }
 
@@ -140,7 +140,7 @@ pub(crate) fn directional_target(
     current: WindowId,
     dir: Direction,
 ) -> Option<WindowId> {
-    let view = state.output.model.view.visible;
+    let view = state.output().model.view.visible;
     let (kind, params, mut scroll) = current_layout(state);
     let tiled = if kind.is_free() {
         Vec::new()
@@ -149,7 +149,7 @@ pub(crate) fn directional_target(
     };
     if let Some(from) = tiled.iter().position(|window| window.id == current) {
         let input = LayoutInput {
-            area: state.output.model.usable_area,
+            area: state.output().model.usable_area,
             windows: &tiled,
             focused: Some(from),
             params: &params,
@@ -195,7 +195,7 @@ fn tiled_windows(state: &Crab, view: SpaceSet) -> Vec<LayoutWindow> {
 /// The scroll state is cloned rather than copied — it owns the scroller's
 /// columns — and written back after the arrange.
 fn current_layout(state: &Crab) -> (LayoutKind, LayoutParams, ScrollState) {
-    state.output.model.current_space_state().map_or_else(
+    state.output().model.current_space_state().map_or_else(
         || {
             (
                 LayoutKind::default(),

@@ -13,7 +13,7 @@
 //! layout. That glue is binary-only, so it may depend on Smithay freely; the
 //! library's four modules stay pure (`scripts/check-boundaries.sh`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crab::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
@@ -885,8 +885,11 @@ pub(crate) struct Crab {
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) keyboard: KeyboardHandle<Self>,
     pub(crate) pointer: PointerHandle<Self>,
-    /// The nested output and everything scoped to it.
-    pub(crate) output: OutputRuntime,
+    /// Every output, keyed by the stable id in its model.
+    pub(crate) outputs: HashMap<OutputId, OutputRuntime>,
+    /// The output that owns the current focus and receives input.
+    /// Multi-output will move this with the pointer and focus.
+    pub(crate) primary_output: OutputId,
     /// The loaded configuration.
     pub(crate) config: Config,
     /// The compiled keyboard binds (built-ins plus `[binds.*]`).
@@ -1013,13 +1016,11 @@ impl Crab {
             LayoutKind::from_name(&config.layout).unwrap_or_default(),
             params,
         );
-        let output_state = OutputModel::new(
-            OutputId::new(0),
-            "crab-0",
-            Rect::default(),
-            1.0,
-            space_state,
-        );
+        let output_id = OutputId::new(0);
+        let output_state = OutputModel::new(output_id, "crab-0", Rect::default(), 1.0, space_state);
+        let output_runtime = OutputRuntime::new(output, output_state, render_transform);
+        let mut outputs = HashMap::new();
+        outputs.insert(output_id, output_runtime);
 
         let (binds, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
         for issue in key_issues {
@@ -1054,7 +1055,8 @@ impl Crab {
             seat_state,
             keyboard,
             pointer,
-            output: OutputRuntime::new(output, output_state, render_transform),
+            outputs,
+            primary_output: output_id,
             config: config.clone(),
             binds,
             mouse_binds,
@@ -1079,6 +1081,20 @@ impl Crab {
             next_window_id: 1,
             next_layer_id: 1,
         }
+    }
+
+    /// The output that currently owns focus and input.
+    pub(crate) fn output(&self) -> &OutputRuntime {
+        self.outputs
+            .get(&self.primary_output)
+            .expect("the primary output is always registered")
+    }
+
+    /// The output that currently owns focus and input, mutably.
+    pub(crate) fn output_mut(&mut self) -> &mut OutputRuntime {
+        self.outputs
+            .get_mut(&self.primary_output)
+            .expect("the primary output is always registered")
     }
 
     /// Sets crab's own Wayland socket name; spawned and autostarted clients
@@ -1112,25 +1128,26 @@ impl Crab {
     /// `Scale::Integer(1)`); fractional scale arrives with HDR and the render
     /// rework (post-0.1).
     pub(crate) fn set_size(&mut self, physical: Size<i32, Physical>) {
-        self.output.size = (physical.w, physical.h).into();
+        self.output_mut().size = (physical.w, physical.h).into();
         let mode = Mode {
             size: physical,
             refresh: 60_000,
         };
-        self.output.wayland.change_current_state(
+        self.output().wayland.change_current_state(
             Some(mode),
             Some(Transform::Normal),
             Some(Scale::Integer(1)),
             None,
         );
-        self.output.wayland.set_preferred(mode);
+        self.output().wayland.set_preferred(mode);
         // The tracker's static mode must follow the new size. Rebuilding it
         // deliberately loses the previous damage state, so the first frame
         // after a resize repaints everything. The transform is the backend's
         // framebuffer correction, not the output's Wayland transform.
-        let render_transform = self.output.render_transform;
-        self.output.damage_tracker = OutputDamageTracker::new(physical, 1.0, render_transform);
-        self.output.model.set_geometry(Rect::new(
+        let render_transform = self.output().render_transform;
+        self.output_mut().damage_tracker =
+            OutputDamageTracker::new(physical, 1.0, render_transform);
+        self.output_mut().model.set_geometry(Rect::new(
             0.0,
             0.0,
             f64::from(physical.w),
@@ -1144,7 +1161,7 @@ impl Crab {
     /// updates the area left for ordinary windows.
     fn sync_layer_zone(&mut self) {
         let zone = {
-            let mut map = layer_map_for_output(&self.output.wayland);
+            let mut map = layer_map_for_output(&self.output().wayland);
             map.arrange();
             map.non_exclusive_zone()
         };
@@ -1154,10 +1171,10 @@ impl Crab {
             f64::from(zone.size.w),
             f64::from(zone.size.h),
         );
-        let changed = area != self.output.model.usable_area;
+        let changed = area != self.output().model.usable_area;
         tracing::trace!(?area, changed, "synced the area left by layer surfaces");
         if changed {
-            self.output.model.usable_area = area;
+            self.output_mut().model.usable_area = area;
         }
     }
 
@@ -1180,7 +1197,7 @@ impl Crab {
 
         let layer = LayerSurface::new(surface, namespace.clone());
         let mapped = {
-            let mut map = layer_map_for_output(&self.output.wayland);
+            let mut map = layer_map_for_output(&self.output().wayland);
             map.map_layer(&layer)
         };
         if let Err(err) = mapped {
@@ -1214,7 +1231,7 @@ impl Crab {
 
         let committed = committed_frame(surface).is_some();
         let (layer, needs_configure, zone) = {
-            let mut map = layer_map_for_output(&self.output.wayland);
+            let mut map = layer_map_for_output(&self.output().wayland);
             // The initial configure must follow the first commit; arranging
             // first respects the size and anchors the client has just sent.
             map.arrange();
@@ -1238,8 +1255,8 @@ impl Crab {
             f64::from(zone.size.h),
         );
         let mut relayout = false;
-        if area != self.output.model.usable_area {
-            self.output.model.usable_area = area;
+        if area != self.output().model.usable_area {
+            self.output_mut().model.usable_area = area;
             relayout = true;
         }
 
@@ -1281,7 +1298,7 @@ impl Crab {
     pub(crate) fn remove_layer_surface(&mut self, surface: &WlrLayerSurface) {
         let wl_surface = surface.wl_surface().clone();
         {
-            let mut map = layer_map_for_output(&self.output.wayland);
+            let mut map = layer_map_for_output(&self.output().wayland);
             let found = map
                 .layers()
                 .find(|layer| layer.layer_surface() == surface)
@@ -1344,7 +1361,7 @@ impl Crab {
     /// Background surfaces are wallpaper and never take pointer input; bottom,
     /// top, and overlay surfaces do.
     pub(crate) fn layer_at(&self, position: Point<f64, Logical>) -> Option<LayerId> {
-        let map = layer_map_for_output(&self.output.wayland);
+        let map = layer_map_for_output(&self.output().wayland);
         for kind in [Layer::Overlay, Layer::Top, Layer::Bottom] {
             if let Some(layer) = map.layer_under(kind, position) {
                 return self.layer_id_for(layer.wl_surface());
@@ -1360,7 +1377,7 @@ impl Crab {
         position: Point<f64, Logical>,
         layers: &[Layer],
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let map = layer_map_for_output(&self.output.wayland);
+        let map = layer_map_for_output(&self.output().wayland);
         for &kind in layers {
             let Some(layer) = map.layer_under(kind, position) else {
                 continue;
@@ -1451,7 +1468,7 @@ impl Crab {
         let id = WindowId::new(self.next_window_id);
         self.next_window_id += 1;
 
-        let spaces = self.output.model.view.visible;
+        let spaces = self.output().model.view.visible;
         let mut window = Window::new(id, spaces);
         let (title, app_id) = read_toplevel_info(&surface);
         window.title = title;
@@ -1509,7 +1526,7 @@ impl Crab {
         self.compact_spaces();
         let on_view = self
             .window(id)
-            .is_some_and(|window| window.window.is_on(self.output.model.view.visible));
+            .is_some_and(|window| window.window.is_on(self.output().model.view.visible));
         if on_view {
             self.focus_window(Some(id));
         }
@@ -1574,10 +1591,10 @@ impl Crab {
             .get_parent_surface()
             .and_then(|parent| self.window_geometry_origin(&parent));
         match origin {
-            Some(origin) if self.output.size.w > 0 && self.output.size.h > 0 => positioner
+            Some(origin) if self.output().size.w > 0 && self.output().size.h > 0 => positioner
                 .get_unconstrained_geometry(Rectangle::new(
                     (-origin.x, -origin.y).into(),
-                    self.output.size,
+                    self.output().size,
                 )),
             _ => positioner.get_geometry(),
         }
@@ -1721,7 +1738,7 @@ impl Crab {
             }
         }
         {
-            let mut map = layer_map_for_output(&self.output.wayland);
+            let mut map = layer_map_for_output(&self.output().wayland);
             map.cleanup();
         }
         self.sync_layer_zone();
@@ -1869,7 +1886,7 @@ impl Crab {
         self.windows[index].rule_applied = true;
 
         let occupied = self.occupied_spaces();
-        let area = self.output.model.usable_area;
+        let area = self.output().model.usable_area;
         let window = &mut self.windows[index];
         window.window.pinned |= rule.pinned;
         window.window.always_on_top |= rule.always_on_top;
@@ -1928,7 +1945,7 @@ impl Crab {
         self.compact_spaces();
         for &id in ids {
             self.focus_stack.remove(FocusTarget::Window(id));
-            for space in &mut self.output.model.space_states {
+            for space in &mut self.output_mut().model.space_states {
                 space.forget(id);
             }
         }
@@ -1959,7 +1976,8 @@ impl Crab {
     /// Window membership is renumbered to match, and each space's layout state
     /// moves with it (see [`crab::core::Output::compact`]).
     fn compact_spaces(&mut self) {
-        let remap = self.output.model.compact(self.occupied_spaces());
+        let occupied = self.occupied_spaces();
+        let remap = self.output_mut().model.compact(occupied);
         for window in &mut self.windows {
             window.window.spaces = remap.map_mask(window.window.spaces);
         }
@@ -2009,7 +2027,7 @@ impl Crab {
 
     /// The drawn origin of a layer surface, in output coordinates.
     fn layer_origin(&self, layer: &LayerSurface) -> Option<Point<i32, Logical>> {
-        let map = layer_map_for_output(&self.output.wayland);
+        let map = layer_map_for_output(&self.output().wayland);
         map.layer_geometry(layer)
             .map(|geometry| geometry.loc + self.layer_offset(layer.wl_surface()))
     }
@@ -2080,7 +2098,7 @@ impl Crab {
         if let Some(new) = id {
             self.set_activated(new, true);
             self.focus_stack.focus(target);
-            if let Some(space) = self.output.model.current_space_state_mut() {
+            if let Some(space) = self.output_mut().model.current_space_state_mut() {
                 space.note_focus(new);
             }
         }
@@ -2217,7 +2235,7 @@ impl Crab {
 
     /// Focuses the next/previous visible window in list order.
     pub(crate) fn focus_cycle(&mut self, forward: bool) {
-        let view = self.output.model.view.visible;
+        let view = self.output().model.view.visible;
         let ids: Vec<WindowId> = self
             .windows
             .iter()
@@ -2262,7 +2280,7 @@ impl Crab {
         let Some(mask) = self.dynamic_space(index) else {
             return;
         };
-        self.output.model.view_space(mask);
+        self.output_mut().model.view_space(mask);
         self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
@@ -2276,7 +2294,7 @@ impl Crab {
         let Some(mask) = self.dynamic_space(index) else {
             return;
         };
-        self.output.model.toggle_view(mask);
+        self.output_mut().model.toggle_view(mask);
         self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
@@ -2287,7 +2305,7 @@ impl Crab {
     /// The step stops at space 1 and at the empty space past the last occupied
     /// one, so it can always reach a fresh space but never a hole beyond it.
     pub(crate) fn view_space_step(&mut self, step: i8) {
-        let Some(current) = self.output.model.current_space_index() else {
+        let Some(current) = self.output().model.current_space_index() else {
             return;
         };
         let occupied = self.occupied_spaces().iter_indices().count();
@@ -2312,7 +2330,7 @@ impl Crab {
     /// `viewprev`/`viewnext` aliases): empty spaces in between are skipped and
     /// the view stops at the outermost occupied space.
     pub(crate) fn view_space_have_client(&mut self, step: i8) {
-        let Some(current) = self.output.model.current_space_index() else {
+        let Some(current) = self.output().model.current_space_index() else {
             return;
         };
         let index = u8::try_from(current).unwrap_or(0).saturating_add(1);
@@ -2323,7 +2341,7 @@ impl Crab {
 
     /// Swaps to the previously-viewed space set.
     pub(crate) fn toggle_back(&mut self) {
-        self.output.model.toggle_back();
+        self.output_mut().model.toggle_back();
         self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
@@ -2341,7 +2359,7 @@ impl Crab {
         if let Some(window) = self.window_mut(id) {
             window.window.move_to_space(mask);
         }
-        self.output.model.view_space(mask);
+        self.output_mut().model.view_space(mask);
         self.compact_spaces();
         self.refocus_after_view_change();
         self.relayout();
@@ -2374,7 +2392,7 @@ impl Crab {
                 return;
             }
         }
-        let view = self.output.model.view.visible;
+        let view = self.output().model.view.visible;
         let on_screen = |window: &ManagedWindow| {
             window.mapped && window.window.is_on(view) && window.is_focusable()
         };
@@ -2386,7 +2404,7 @@ impl Crab {
             return;
         }
         let next = self
-            .output
+            .output()
             .model
             .current_space_state()
             .and_then(|space| {
@@ -2407,7 +2425,7 @@ impl Crab {
 
     /// Cycles the current space to the next mode within its layout family.
     pub(crate) fn cycle_layout_mode(&mut self) {
-        if let Some(space) = self.output.model.current_space_state_mut() {
+        if let Some(space) = self.output_mut().model.current_space_state_mut() {
             space.layout = space.layout.next_mode();
         }
         self.relayout();
@@ -2415,7 +2433,7 @@ impl Crab {
 
     /// Cycles the current space to the next layout family's default mode.
     pub(crate) fn cycle_layout_family(&mut self) {
-        if let Some(space) = self.output.model.current_space_state_mut() {
+        if let Some(space) = self.output_mut().model.current_space_state_mut() {
             space.layout = space.layout.next_family();
         }
         self.relayout();
@@ -2428,7 +2446,7 @@ impl Crab {
     /// parameters, so a family that owns its state — the scroller and its
     /// columns — gets to handle it (`crab::layout::apply_command`).
     pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
-        if let Some(space) = self.output.model.current_space_state_mut() {
+        if let Some(space) = self.output_mut().model.current_space_state_mut() {
             crab::layout::apply_command(
                 space.layout,
                 command,
@@ -2725,7 +2743,7 @@ impl Crab {
 
     /// Keeps a dragged/resized window partly on screen.
     fn clamp_rect(&self, rect: Rect) -> Rect {
-        let area = self.output.model.usable_area;
+        let area = self.output().model.usable_area;
         let x = rect
             .x
             .clamp(area.x, (area.right() - MIN_VISIBLE).max(area.x));
@@ -2737,8 +2755,8 @@ impl Crab {
 
     /// Clamps `position` into the visible area.
     pub(crate) fn clamp_to_output(&self, position: Point<f64, Logical>) -> Point<f64, Logical> {
-        let max_x = f64::from(self.output.size.w.max(1) - 1);
-        let max_y = f64::from(self.output.size.h.max(1) - 1);
+        let max_x = f64::from(self.output().size.w.max(1) - 1);
+        let max_y = f64::from(self.output().size.h.max(1) - 1);
         (position.x.clamp(0.0, max_x), position.y.clamp(0.0, max_y)).into()
     }
 }

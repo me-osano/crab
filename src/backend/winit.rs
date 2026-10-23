@@ -45,7 +45,7 @@ struct LoopData {
 /// it; `Output::finish_frame` then reports the follow-up frame, so no request
 /// is lost (`COMPOSITOR.md` §8.2).
 fn request_redraw(data: &mut LoopData) {
-    if data.state.output.model.queue_redraw() {
+    if data.state.output_mut().model.queue_redraw() {
         data.backend.window().request_redraw();
     }
 }
@@ -78,7 +78,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     backend.window().set_cursor_visible(false);
     state.set_size(backend.window_size());
     // Seed the redraw state machine so every later frame takes the same path.
-    state.output.model.queue_redraw();
+    state.output_mut().model.queue_redraw();
     backend.window().request_redraw();
 
     let mut event_loop: EventLoop<'static, LoopData> =
@@ -98,8 +98,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                 WinitEvent::Redraw => {
                     // winit's frame events are requests themselves (an expose or
                     // a resize), so fold them in before starting the frame.
-                    data.state.output.model.queue_redraw();
-                    if data.state.output.model.begin_frame() {
+                    data.state.output_mut().model.queue_redraw();
+                    if data.state.output_mut().model.begin_frame() {
                         // Re-time the animation clock to the frame being drawn.
                         // winit reports no presentation timestamp, so the loop
                         // clock read here stands in for the vertical blank; the
@@ -113,11 +113,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                         // schedules it; once everything settles the loop stops
                         // requesting frames and the compositor goes idle.
                         if data.state.is_animating() {
-                            data.state.output.model.queue_redraw();
+                            data.state.output_mut().model.queue_redraw();
                         }
                         // The swap in `render` waits for the vertical blank; a
                         // request that arrived during it needs another frame.
-                        if data.state.output.model.finish_frame() {
+                        if data.state.output_mut().model.finish_frame() {
                             data.backend.window().request_redraw();
                         }
                     }
@@ -190,7 +190,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     tracing::error!(?err, "failed to flush Wayland clients");
                 }
                 state.prune_dead();
-                if state.output.model.queue_redraw() {
+                if state.output_mut().model.queue_redraw() {
                     backend.window().request_redraw();
                 }
                 Ok(PostAction::Continue)

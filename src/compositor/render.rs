@@ -106,7 +106,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // Positions are logical; with M2's `Scale::Integer(1)` output they map
     // one-to-one onto the renderer's physical pixels.
     let border_width = state
-        .output
+        .output()
         .model
         .current_space_state()
         .map_or(0.0, |space| space.params.border_width)
@@ -121,7 +121,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // Layer-shell surfaces are arranged by Smithay's layer map. Background and
     // bottom layers go under ordinary windows; top and overlay layers go over
     // them and over window popups, matching the protocol's order.
-    let layer_map = layer_map_for_output(&state.output.wayland);
+    let layer_map = layer_map_for_output(&state.output().wayland);
     collect_layer_pass(
         state,
         &mut *renderer,
@@ -264,7 +264,7 @@ pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRe
     // so it can subtract opaque regions before deciding what is damaged.
     elements.reverse();
 
-    let (damage, states) = match state.output.damage_tracker.render_output(
+    let (damage, states) = match state.output_mut().damage_tracker.render_output(
         &mut *renderer,
         &mut framebuffer,
         age,
