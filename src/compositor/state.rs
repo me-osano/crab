@@ -1100,6 +1100,13 @@ impl Crab {
             .expect("the primary output is always registered")
     }
 
+    /// The crab output handle for a Smithay `Output` object.
+    fn output_id_for_wayland(&self, output: &Output) -> Option<OutputId> {
+        self.outputs
+            .iter()
+            .find_map(|(id, runtime)| (runtime.wayland == *output).then_some(*id))
+    }
+
     /// Registers an output and makes it primary when it is the first one.
     pub(crate) fn add_output(
         &mut self,
@@ -1226,15 +1233,18 @@ impl Crab {
             f64::from(physical.w),
             f64::from(physical.h),
         ));
-        self.sync_layer_zone();
+        self.sync_layer_zone(self.primary_output);
         self.relayout();
     }
 
-    /// Re-arranges the layer map after a size or exclusive-zone change and
-    /// updates the area left for ordinary windows.
-    fn sync_layer_zone(&mut self) {
+    /// Re-arranges one output's layer map after a size or exclusive-zone
+    /// change and updates the area that output leaves for ordinary windows.
+    fn sync_layer_zone(&mut self, output: OutputId) {
+        let Some(runtime) = self.outputs.get(&output) else {
+            return;
+        };
         let zone = {
-            let mut map = layer_map_for_output(&self.output().wayland);
+            let mut map = layer_map_for_output(&runtime.wayland);
             map.arrange();
             map.non_exclusive_zone()
         };
@@ -1244,15 +1254,28 @@ impl Crab {
             f64::from(zone.size.w),
             f64::from(zone.size.h),
         );
-        let changed = area != self.output().model.usable_area;
-        tracing::trace!(?area, changed, "synced the area left by layer surfaces");
+        let Some(runtime) = self.outputs.get_mut(&output) else {
+            return;
+        };
+        let changed = area != runtime.model.usable_area;
+        tracing::trace!(?area, changed, %output, "synced the area left by layer surfaces");
         if changed {
-            self.output_mut().model.usable_area = area;
+            runtime.model.usable_area = area;
         }
     }
 
-    /// Registers a new layer-shell surface and maps it onto the output.
-    pub(crate) fn add_layer_surface(&mut self, surface: WlrLayerSurface, namespace: String) {
+    /// Registers a new layer-shell surface and maps it onto `requested_output`
+    /// (or the primary output when none was named).
+    pub(crate) fn add_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        namespace: String,
+        requested_output: Option<Output>,
+    ) {
+        let output = requested_output
+            .as_ref()
+            .and_then(|output| self.output_id_for_wayland(output))
+            .unwrap_or(self.primary_output);
         let id = LayerId::new(self.next_layer_id);
         self.next_layer_id += 1;
 
@@ -1269,8 +1292,12 @@ impl Crab {
             .and_then(AnimationStyle::from_name);
 
         let layer = LayerSurface::new(surface, namespace.clone());
+        let Some(runtime) = self.outputs.get(&output) else {
+            tracing::warn!(%namespace, %output, "cannot map a layer surface on an unknown output");
+            return;
+        };
         let mapped = {
-            let mut map = layer_map_for_output(&self.output().wayland);
+            let mut map = layer_map_for_output(&runtime.wayland);
             map.map_layer(&layer)
         };
         if let Err(err) = mapped {
@@ -1278,16 +1305,16 @@ impl Crab {
             return;
         }
 
-        tracing::debug!(%namespace, "mapped a layer surface");
+        tracing::debug!(%namespace, %output, "mapped a layer surface");
         self.layers.push(LayerEntry {
             id,
             surface: layer,
-            output: self.primary_output,
+            output,
             style,
             open: Animated::new(1.0, OPEN_CURVE, Kind::WindowOpen),
             mapped: false,
         });
-        self.sync_layer_zone();
+        self.sync_layer_zone(output);
         self.relayout();
     }
 
@@ -1303,9 +1330,13 @@ impl Crab {
             return;
         };
 
+        let output = self.layers[index].output;
         let committed = committed_frame(surface).is_some();
+        let Some(runtime) = self.outputs.get(&output) else {
+            return;
+        };
         let (layer, needs_configure, zone) = {
-            let mut map = layer_map_for_output(&self.output().wayland);
+            let mut map = layer_map_for_output(&runtime.wayland);
             // The initial configure must follow the first commit; arranging
             // first respects the size and anchors the client has just sent.
             map.arrange();
@@ -1329,9 +1360,11 @@ impl Crab {
             f64::from(zone.size.h),
         );
         let mut relayout = false;
-        if area != self.output().model.usable_area {
-            self.output_mut().model.usable_area = area;
-            relayout = true;
+        if let Some(runtime) = self.outputs.get_mut(&output) {
+            if area != runtime.model.usable_area {
+                runtime.model.usable_area = area;
+                relayout = true;
+            }
         }
 
         let animate = self.config.animations.enabled;
@@ -1371,8 +1404,16 @@ impl Crab {
     /// Removes a layer-shell surface from the map and focus bookkeeping.
     pub(crate) fn remove_layer_surface(&mut self, surface: &WlrLayerSurface) {
         let wl_surface = surface.wl_surface().clone();
-        {
-            let mut map = layer_map_for_output(&self.output().wayland);
+        let Some(index) = self
+            .layers
+            .iter()
+            .position(|entry| entry.surface.wl_surface() == &wl_surface)
+        else {
+            return;
+        };
+        let output = self.layers[index].output;
+        if let Some(runtime) = self.outputs.get(&output) {
+            let mut map = layer_map_for_output(&runtime.wayland);
             let found = map
                 .layers()
                 .find(|layer| layer.layer_surface() == surface)
@@ -1382,21 +1423,14 @@ impl Crab {
             }
         }
 
-        let Some(index) = self
-            .layers
-            .iter()
-            .position(|entry| entry.surface.wl_surface() == &wl_surface)
-        else {
-            return;
-        };
         let id = self.layers.remove(index).id;
-        tracing::debug!(?id, "removed a layer surface");
+        tracing::debug!(?id, %output, "removed a layer surface");
         self.focus_stack.remove(FocusTarget::LayerSurface(id));
         let was_focused = self.focus == FocusTarget::LayerSurface(id);
         if was_focused {
             self.focus = FocusTarget::None;
         }
-        self.sync_layer_zone();
+        self.sync_layer_zone(output);
         if was_focused {
             self.refocus_after_view_change();
         }
@@ -1816,11 +1850,14 @@ impl Crab {
                 lost_focus = true;
             }
         }
-        {
-            let mut map = layer_map_for_output(&self.output().wayland);
-            map.cleanup();
+        let outputs: Vec<OutputId> = self.outputs.keys().copied().collect();
+        for output in outputs {
+            if let Some(runtime) = self.outputs.get(&output) {
+                let mut map = layer_map_for_output(&runtime.wayland);
+                map.cleanup();
+            }
+            self.sync_layer_zone(output);
         }
-        self.sync_layer_zone();
         if lost_focus {
             self.refocus_after_view_change();
         }
@@ -2110,7 +2147,13 @@ impl Crab {
 
     /// The drawn origin of a layer surface, in output coordinates.
     fn layer_origin(&self, layer: &LayerSurface) -> Option<Point<i32, Logical>> {
-        let map = layer_map_for_output(&self.output().wayland);
+        let output = self
+            .layers
+            .iter()
+            .find(|entry| entry.surface.wl_surface() == layer.wl_surface())
+            .map_or(self.primary_output, |entry| entry.output);
+        let runtime = self.outputs.get(&output)?;
+        let map = layer_map_for_output(&runtime.wayland);
         map.layer_geometry(layer)
             .map(|geometry| geometry.loc + self.layer_offset(layer.wl_surface()))
     }

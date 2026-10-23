@@ -5,6 +5,7 @@
 //! when a keyboard-interactive layer goes away.
 
 use smithay::delegate_layer_shell;
+use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::wayland::shell::wlr_layer::{
     Layer, LayerSurface as WlrLayerSurface, WlrLayerShellHandler, WlrLayerShellState,
@@ -20,13 +21,15 @@ impl WlrLayerShellHandler for Crab {
     fn new_layer_surface(
         &mut self,
         surface: WlrLayerSurface,
-        _output: Option<WlOutput>,
+        output: Option<WlOutput>,
         _layer: Layer,
         namespace: String,
     ) {
-        // crab has a single output for now, so an explicit or missing output
-        // both name the same layer map.
-        self.add_layer_surface(surface, namespace);
+        // A client may name an output or leave it to the compositor. Resolve
+        // the protocol object to crab's handle here; `add_layer_surface`
+        // falls back to the primary output when it is unknown.
+        let output = output.and_then(|output| Output::from_resource(&output));
+        self.add_layer_surface(surface, namespace, output);
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
