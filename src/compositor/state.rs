@@ -1120,8 +1120,15 @@ impl Crab {
             return id;
         }
         let first = self.outputs.is_empty();
-        self.outputs
-            .insert(id, OutputRuntime::new(output, model, render_transform));
+        let location = Point::<i32, Logical>::from((
+            model.geometry.x.round() as i32,
+            model.geometry.y.round() as i32,
+        ));
+        let runtime = OutputRuntime::new(output, model, render_transform);
+        runtime
+            .wayland
+            .change_current_state(None, None, None, Some(location));
+        self.outputs.insert(id, runtime);
         if first {
             self.primary_output = id;
         }
@@ -1208,32 +1215,42 @@ impl Crab {
     /// `Scale::Integer(1)`); fractional scale arrives with HDR and the render
     /// rework (post-0.1).
     pub(crate) fn set_size(&mut self, physical: Size<i32, Physical>) {
-        self.output_mut().size = (physical.w, physical.h).into();
+        self.set_output_size(self.primary_output, physical);
+    }
+
+    /// Updates one output's mode, damage tracker, and logical geometry.
+    ///
+    /// The winit backend drives this through [`Self::set_size`]; the DRM
+    /// backend will call it per connector when a mode is selected.
+    pub(crate) fn set_output_size(&mut self, output: OutputId, physical: Size<i32, Physical>) {
+        let Some(runtime) = self.outputs.get_mut(&output) else {
+            return;
+        };
+        runtime.size = (physical.w, physical.h).into();
         let mode = Mode {
             size: physical,
             refresh: 60_000,
         };
-        self.output().wayland.change_current_state(
+        runtime.wayland.change_current_state(
             Some(mode),
             Some(Transform::Normal),
             Some(Scale::Integer(1)),
             None,
         );
-        self.output().wayland.set_preferred(mode);
+        runtime.wayland.set_preferred(mode);
         // The tracker's static mode must follow the new size. Rebuilding it
         // deliberately loses the previous damage state, so the first frame
         // after a resize repaints everything. The transform is the backend's
         // framebuffer correction, not the output's Wayland transform.
-        let render_transform = self.output().render_transform;
-        self.output_mut().damage_tracker =
-            OutputDamageTracker::new(physical, 1.0, render_transform);
-        self.output_mut().model.set_geometry(Rect::new(
-            0.0,
-            0.0,
+        runtime.damage_tracker = OutputDamageTracker::new(physical, 1.0, runtime.render_transform);
+        let origin = runtime.model.geometry;
+        runtime.model.set_geometry(Rect::new(
+            origin.x,
+            origin.y,
             f64::from(physical.w),
             f64::from(physical.h),
         ));
-        self.sync_layer_zone(self.primary_output);
+        self.sync_layer_zone(output);
         self.relayout();
     }
 
@@ -2660,14 +2677,15 @@ impl Crab {
 
     /// Where an un-floated window should re-enter the tiling order.
     fn tiled_insert_index(&self, id: WindowId) -> usize {
+        let Some(output) = self.window(id).map(|window| window.window.output) else {
+            return self.windows.len();
+        };
         for target in self.focus_stack.iter() {
             if let Some(other) = target.window() {
                 if other != id {
-                    if let Some(position) = self
-                        .windows
-                        .iter()
-                        .position(|w| w.window.id == other && w.window.is_tiled())
-                    {
+                    if let Some(position) = self.windows.iter().position(|w| {
+                        w.window.id == other && w.window.output == output && w.window.is_tiled()
+                    }) {
                         return position + 1;
                     }
                 }
