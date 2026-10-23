@@ -1097,7 +1097,8 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 
 ### Milestone 3: Bare-metal backend (3-4 weeks)
 
-- [ ] libseat session, udev device discovery
+- [x] libseat session opening and initial udev DRM/connector discovery
+- [ ] udev hotplug and session pause/resume
 - [ ] DRM/KMS + GBM + EGL rendering, vblank-driven redraw state machine
 - [ ] libinput devices and per-device config
 - [ ] Hardware cursor plane

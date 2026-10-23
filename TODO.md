@@ -331,7 +331,8 @@ Goal: boot `crab` from a TTY and use it as the real session on one machine.
 (Design: `COMPOSITOR.md` §4, §8, §16.)
 
 ### 4.1 Session & device discovery
-- [ ] `libseat` session (session switching, pause/resume); `udev` device enumeration.
+- [x] `libseat` session opening, initial `udev` DRM enumeration, and connector/mode probing.
+- [ ] Session switching, pause/resume, and the udev hotplug event loop.
 - [ ] DRM device selection (primary vs render node) with a clear log line.
 - [ ] logind integration (`zbus`): VT switch, session pause/resume, lid, suspend inhibit.
 
