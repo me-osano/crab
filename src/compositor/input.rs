@@ -38,7 +38,14 @@ pub(crate) fn handle<B: InputBackend>(state: &mut Crab, event: InputEvent<B>) {
         InputEvent::Keyboard { event } => keyboard::<B>(state, event),
         InputEvent::PointerMotion { event } => motion_relative::<B>(state, &event),
         InputEvent::PointerMotionAbsolute { event } => {
-            let position = event.position_transformed(state.output().size);
+            // An absolute device reports a position in one output's local
+            // space. Translate it into the compositor's global space before
+            // hit-testing; a DRM backend that maps a device to another output
+            // will pass that output's origin here.
+            let runtime = state.output();
+            let origin = runtime.model.geometry;
+            let position = event.position_transformed(runtime.size)
+                + Point::<f64, Logical>::from((origin.x, origin.y));
             motion(state, position, event.time_msec());
         }
         InputEvent::PointerButton { event } => button::<B>(state, &event),

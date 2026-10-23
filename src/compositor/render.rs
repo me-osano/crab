@@ -277,8 +277,11 @@ pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId
 
     // And the cursor on top of all of it. A client's own cursor surface and the
     // built-in arrow are mutually exclusive; the arrow is made of solid runs so
-    // no icon set or texture is needed.
-    if output == state.primary_output && state.pointer_seen {
+    // no icon set or texture is needed. Only the output under the pointer draws
+    // it, and at that output's local coordinates.
+    let pointer_on_output = state.output_at(state.pointer_location) == Some(output);
+    if pointer_on_output && state.pointer_seen {
+        let pointer = state.pointer_location - output_origin.to_f64();
         let mut drew_cursor = false;
         match &state.cursor_image {
             CursorImageStatus::Hidden => {}
@@ -287,11 +290,7 @@ pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId
                 // Smithay's default. Clients that want text or resize cursors
                 // send their own surface through `wl_pointer.set_cursor` until
                 // icon-theme loading lands.
-                elements.extend(
-                    arrow_cursor(state.pointer_location)
-                        .into_iter()
-                        .map(SceneElement::Solid),
-                );
+                elements.extend(arrow_cursor(pointer).into_iter().map(SceneElement::Solid));
                 drew_cursor = true;
             }
             CursorImageStatus::Surface(surface) if surface.is_alive() => {
@@ -299,8 +298,8 @@ pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId
                 // Everything is drawn at scale 1, so logical and physical pixels
                 // are the same and only the hotspot offset is applied.
                 let location = Point::<i32, Physical>::from((
-                    (state.pointer_location.x - f64::from(hotspot.x)).round() as i32,
-                    (state.pointer_location.y - f64::from(hotspot.y)).round() as i32,
+                    (pointer.x - f64::from(hotspot.x)).round() as i32,
+                    (pointer.y - f64::from(hotspot.y)).round() as i32,
                 ));
                 let cursor = render_elements_from_surface_tree(
                     &mut *renderer,
@@ -320,11 +319,7 @@ pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId
         // A cursor surface with no buffer yet would leave the pointer invisible;
         // show the arrow until the client commits one.
         if !drew_cursor && !matches!(state.cursor_image, CursorImageStatus::Hidden) {
-            elements.extend(
-                arrow_cursor(state.pointer_location)
-                    .into_iter()
-                    .map(SceneElement::Solid),
-            );
+            elements.extend(arrow_cursor(pointer).into_iter().map(SceneElement::Solid));
         }
     }
 

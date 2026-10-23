@@ -199,6 +199,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] Per-output space views; moving windows/output focus between spaces.
 - [x] Windows are arranged on their owning output; layout, focus cycling, activation, and dynamic-space compaction are scoped to it.
 - [x] Output registry keyed by `OutputId`; adding an output makes the first one primary, and removing one migrates its windows and layer entries to a fallback output.
+- [x] Global pointer/input routing: window and layer hit-testing, popup origins, and the software cursor use the output under the pointer; a pointer in a gap snaps to the nearest output, and layer maps translate between output-local and global coordinates.
 - [x] **Dynamic numbering** (niri-style): a space exists while it holds a window or is the empty space past the last occupied one; spaces that are now empty and followed by occupied ones are removed and the survivors compacted from 1, with their layout state following and window membership renumbered through `SpaceRemap` — so there is never an empty space before the focused one, and removing the focused space hands the view to the space that moves up.
 - [x] `move-to-space` shows the target space, so focus follows the moved window.
 - [x] **No per-space configuration**: every space starts from `[layout]` defaults; cycling the layout changes only the current space at runtime.

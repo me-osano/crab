@@ -91,6 +91,96 @@ fn occupied_target(occupied: SpaceSet, current: u8, step: i8) -> Option<u8> {
     }
 }
 
+/// The rectangle an output occupies in the compositor's global logical space.
+fn output_rects(outputs: &HashMap<OutputId, OutputRuntime>) -> Vec<(OutputId, Rect)> {
+    outputs
+        .iter()
+        .map(|(id, runtime)| (*id, runtime.model.geometry))
+        .collect()
+}
+
+/// Whether `point` lies inside `rect`.
+///
+/// The right and bottom edges are exclusive: two outputs can share an edge
+/// without both claiming the pixel on it.
+fn rect_contains(rect: Rect, point: Point<f64, Logical>) -> bool {
+    point.x >= rect.x && point.x < rect.right() && point.y >= rect.y && point.y < rect.bottom()
+}
+
+/// Squared distance from `point` to the nearest point of `rect`.
+fn distance_to_rect_sq(rect: Rect, point: Point<f64, Logical>) -> f64 {
+    let dx = if point.x < rect.x {
+        rect.x - point.x
+    } else if point.x > rect.right() {
+        point.x - rect.right()
+    } else {
+        0.0
+    };
+    let dy = if point.y < rect.y {
+        rect.y - point.y
+    } else if point.y > rect.bottom() {
+        point.y - rect.bottom()
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
+/// The output under `position`, or the nearest one when the point falls in a
+/// gap between outputs.
+fn output_at_position(
+    outputs: &[(OutputId, Rect)],
+    position: Point<f64, Logical>,
+) -> Option<OutputId> {
+    outputs
+        .iter()
+        .find(|(_, rect)| rect_contains(*rect, position))
+        .map(|(id, _)| *id)
+        .or_else(|| {
+            outputs
+                .iter()
+                .min_by(|(id_a, a), (id_b, b)| {
+                    distance_to_rect_sq(*a, position)
+                        .total_cmp(&distance_to_rect_sq(*b, position))
+                        .then_with(|| id_a.cmp(id_b))
+                })
+                .map(|(id, _)| *id)
+        })
+}
+
+/// Clamps a pointer position onto the output layout.
+///
+/// A point already on an output is left alone. A point in a gap between
+/// outputs (or outside the layout entirely) is pulled onto the nearest output,
+/// so the pointer cannot disappear into dead space when monitors are arranged
+/// with a hole between them.
+fn clamp_to_outputs(
+    outputs: &[(OutputId, Rect)],
+    position: Point<f64, Logical>,
+) -> Point<f64, Logical> {
+    if outputs.is_empty()
+        || outputs
+            .iter()
+            .any(|(_, rect)| rect_contains(*rect, position))
+    {
+        return position;
+    }
+    let Some((_, rect)) = outputs.iter().min_by(|(id_a, a), (id_b, b)| {
+        distance_to_rect_sq(*a, position)
+            .total_cmp(&distance_to_rect_sq(*b, position))
+            .then_with(|| id_a.cmp(id_b))
+    }) else {
+        return position;
+    };
+    let max_x = (rect.right() - 1.0).max(rect.x);
+    let max_y = (rect.bottom() - 1.0).max(rect.y);
+    (
+        position.x.clamp(rect.x, max_x),
+        position.y.clamp(rect.y, max_y),
+    )
+        .into()
+}
+
 /// Logs one bind the config author wrote but crab could not compile.
 fn log_bind_issue(kind: &str, issue: &BindIssue) {
     tracing::warn!(
@@ -867,6 +957,15 @@ impl OutputRuntime {
             size: (0, 0).into(),
         }
     }
+
+    /// The output's top-left corner in the compositor's global logical space.
+    pub(crate) fn origin(&self) -> Point<i32, Logical> {
+        (
+            self.model.geometry.x.round() as i32,
+            self.model.geometry.y.round() as i32,
+        )
+            .into()
+    }
 }
 
 pub(crate) struct Crab {
@@ -973,6 +1072,33 @@ impl Crab {
         config: &Config,
         render_transform: Transform,
     ) -> Self {
+        let mut state = Self::new_without_outputs(display, config);
+        let output = Output::new(
+            "crab-0".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "crab".to_owned(),
+                model: "nested".to_owned(),
+            },
+        );
+        output.create_global::<Self>(display);
+        let output_state = OutputModel::new(
+            OutputId::new(0),
+            "crab-0",
+            Rect::default(),
+            1.0,
+            Self::initial_space_state(config),
+        );
+        state.add_output(output, output_state, render_transform);
+        state
+    }
+
+    /// Builds the compositor state without registering an output.
+    ///
+    /// The winit backend adds its nested output immediately. The DRM backend
+    /// will create one `Output` per connector and add each as it is discovered.
+    pub(crate) fn new_without_outputs(display: &DisplayHandle, config: &Config) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "crab");
         // Focus is pointless without a keyboard, and adding it can only fail if
@@ -993,35 +1119,6 @@ impl Crab {
         let fractional_scale_state = FractionalScaleManagerState::new::<Self>(display);
         let viewporter_state = ViewporterState::new::<Self>(display);
         let xdg_activation_state = XdgActivationState::new::<Self>(display);
-        let output = Output::new(
-            "crab-0".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "crab".to_owned(),
-                model: "nested".to_owned(),
-            },
-        );
-        output.create_global::<Self>(display);
-
-        // Every space starts with the configured layout and tunables; a space then
-        // remembers its own as the user cycles it (per-space layout memory).
-        let params = LayoutParams {
-            master_count: u32::try_from(config.master_count.max(0)).unwrap_or(0),
-            master_ratio: config.master_ratio,
-            gaps: f64::from(config.gaps),
-            border_width: f64::from(config.border_width),
-            position: TilePosition::Left,
-            column_width: ColumnWidth::Proportion(config.scroll.default_column_ratio),
-            center: config.scroll.center_focused_column,
-            ..LayoutParams::default()
-        };
-        let space_state = SpaceState::new(
-            LayoutKind::from_name(&config.layout).unwrap_or_default(),
-            params,
-        );
-        let output_id = OutputId::new(0);
-        let output_state = OutputModel::new(output_id, "crab-0", Rect::default(), 1.0, space_state);
 
         let (binds, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
         for issue in key_issues {
@@ -1042,7 +1139,7 @@ impl Crab {
             "compiled bindings"
         );
 
-        let mut state = Self {
+        Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
@@ -1057,7 +1154,7 @@ impl Crab {
             keyboard,
             pointer,
             outputs: HashMap::new(),
-            primary_output: output_id,
+            primary_output: OutputId::new(0),
             config: config.clone(),
             binds,
             mouse_binds,
@@ -1081,9 +1178,28 @@ impl Crab {
             cursor_image: CursorImageStatus::default_named(),
             next_window_id: 1,
             next_layer_id: 1,
+        }
+    }
+
+    /// The initial per-space state for a new output.
+    ///
+    /// Every space starts with the configured layout and tunables; a space then
+    /// remembers its own as the user cycles it (per-space layout memory).
+    fn initial_space_state(config: &Config) -> SpaceState {
+        let params = LayoutParams {
+            master_count: u32::try_from(config.master_count.max(0)).unwrap_or(0),
+            master_ratio: config.master_ratio,
+            gaps: f64::from(config.gaps),
+            border_width: f64::from(config.border_width),
+            position: TilePosition::Left,
+            column_width: ColumnWidth::Proportion(config.scroll.default_column_ratio),
+            center: config.scroll.center_focused_column,
+            ..LayoutParams::default()
         };
-        state.add_output(output, output_state, render_transform);
-        state
+        SpaceState::new(
+            LayoutKind::from_name(&config.layout).unwrap_or_default(),
+            params,
+        )
     }
 
     /// The output that currently owns focus and input.
@@ -1098,6 +1214,17 @@ impl Crab {
         self.outputs
             .get_mut(&self.primary_output)
             .expect("the primary output is always registered")
+    }
+
+    /// The output under `position`, or the nearest one when the point falls in
+    /// a gap between outputs.
+    pub(crate) fn output_at(&self, position: Point<f64, Logical>) -> Option<OutputId> {
+        output_at_position(&output_rects(&self.outputs), position)
+    }
+
+    /// The top-left corner of `output` in global logical coordinates.
+    fn output_origin(&self, output: OutputId) -> Option<Point<i32, Logical>> {
+        self.outputs.get(&output).map(OutputRuntime::origin)
     }
 
     /// The crab output handle for a Smithay `Output` object.
@@ -1260,14 +1387,18 @@ impl Crab {
         let Some(runtime) = self.outputs.get(&output) else {
             return;
         };
+        let origin = runtime.model.geometry;
         let zone = {
             let mut map = layer_map_for_output(&runtime.wayland);
             map.arrange();
             map.non_exclusive_zone()
         };
+        // Layer maps arrange in output-local coordinates; the layout works in
+        // the compositor's global space, so put the usable area back at the
+        // output's origin before any window is placed in it.
         let area = Rect::new(
-            f64::from(zone.loc.x),
-            f64::from(zone.loc.y),
+            origin.x + f64::from(zone.loc.x),
+            origin.y + f64::from(zone.loc.y),
             f64::from(zone.size.w),
             f64::from(zone.size.h),
         );
@@ -1487,9 +1618,13 @@ impl Crab {
     /// Background surfaces are wallpaper and never take pointer input; bottom,
     /// top, and overlay surfaces do.
     pub(crate) fn layer_at(&self, position: Point<f64, Logical>) -> Option<LayerId> {
-        let map = layer_map_for_output(&self.output().wayland);
+        let output = self.output_at(position)?;
+        let origin = self.output_origin(output)?;
+        let local = position - origin.to_f64();
+        let runtime = self.outputs.get(&output)?;
+        let map = layer_map_for_output(&runtime.wayland);
         for kind in [Layer::Overlay, Layer::Top, Layer::Bottom] {
-            if let Some(layer) = map.layer_under(kind, position) {
+            if let Some(layer) = map.layer_under(kind, local) {
                 return self.layer_id_for(layer.wl_surface());
             }
         }
@@ -1502,22 +1637,29 @@ impl Crab {
         &self,
         position: Point<f64, Logical>,
         layers: &[Layer],
+        output: OutputId,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let map = layer_map_for_output(&self.output().wayland);
+        let origin = self.output_origin(output)?;
+        let local = position - origin.to_f64();
+        let runtime = self.outputs.get(&output)?;
+        let map = layer_map_for_output(&runtime.wayland);
         for &kind in layers {
-            let Some(layer) = map.layer_under(kind, position) else {
+            let Some(layer) = map.layer_under(kind, local) else {
                 continue;
             };
             let Some(geometry) = map.layer_geometry(layer) else {
                 continue;
             };
-            let origin = geometry.loc + self.layer_offset(layer.wl_surface());
+            // Layer geometry is output-local; report the surface origin in
+            // global coordinates because that is what the seat subtracts from
+            // the pointer position.
+            let surface_origin = origin + geometry.loc + self.layer_offset(layer.wl_surface());
             let Some((surface, location)) =
-                layer.surface_under(position - origin.to_f64(), WindowSurfaceType::ALL)
+                layer.surface_under(position - surface_origin.to_f64(), WindowSurfaceType::ALL)
             else {
                 continue;
             };
-            return Some((surface, (origin + location).to_f64()));
+            return Some((surface, (surface_origin + location).to_f64()));
         }
         None
     }
@@ -2170,9 +2312,12 @@ impl Crab {
             .find(|entry| entry.surface.wl_surface() == layer.wl_surface())
             .map_or(self.primary_output, |entry| entry.output);
         let runtime = self.outputs.get(&output)?;
+        let origin = runtime.origin();
         let map = layer_map_for_output(&runtime.wayland);
+        // Layer maps place surfaces relative to their output; popups are
+        // tracked in global compositor coordinates, like window popups.
         map.layer_geometry(layer)
-            .map(|geometry| geometry.loc + self.layer_offset(layer.wl_surface()))
+            .map(|geometry| origin + geometry.loc + self.layer_offset(layer.wl_surface()))
     }
 
     /// The managed window with this id.
@@ -2311,14 +2456,18 @@ impl Crab {
     /// The top-most visible window covering `position`.
     pub(crate) fn window_at(&self, position: Point<f64, Logical>) -> Option<WindowId> {
         let point = crab::core::Point::new(position.x, position.y);
+        let output = self.output_at(position)?;
         // Test in the exact reverse of the painting order. Sharing
-        // [`Self::stacked_windows`] with the renderer is what guarantees a click
-        // lands on the window the user can see, including the floating focus
-        // stack and the always-on-top group.
-        self.stacked_windows().into_iter().rev().find(|id| {
-            self.window(*id)
-                .is_some_and(|window| window.visual_rect(&self.frame_clock).contains(point))
-        })
+        // [`Self::stacked_windows_on`] with the renderer is what guarantees a
+        // click lands on the window the user can see, including the floating
+        // focus stack and the always-on-top group.
+        self.stacked_windows_on(output)
+            .into_iter()
+            .rev()
+            .find(|id| {
+                self.window(*id)
+                    .is_some_and(|window| window.visual_rect(&self.frame_clock).contains(point))
+            })
     }
 
     /// Returns the top-most mapped surface covering `position`, with the
@@ -2335,15 +2484,17 @@ impl Crab {
         &self,
         position: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let output = self.output_at(position)?;
         // Top and overlay layers sit above ordinary windows and their popups.
-        if let Some(hit) = self.layer_surface_under(position, &[Layer::Overlay, Layer::Top]) {
+        if let Some(hit) = self.layer_surface_under(position, &[Layer::Overlay, Layer::Top], output)
+        {
             return Some(hit);
         }
         // A popup floats above every toplevel, so its tree gets first refusal:
         // this is what keeps the pointer on an open menu (and lets its grab see
         // that the pointer is still on the right client). Test them in reverse
         // painting order, like the toplevels below.
-        for id in self.stacked_windows().into_iter().rev() {
+        for id in self.stacked_windows_on(output).into_iter().rev() {
             let Some(window) = self.window(id) else {
                 continue;
             };
@@ -2368,7 +2519,7 @@ impl Crab {
             ));
         }
         // Bottom layers (panels that do take input) sit below windows.
-        self.layer_surface_under(position, &[Layer::Bottom])
+        self.layer_surface_under(position, &[Layer::Bottom], output)
     }
 
     /// Focuses the window under `position` (click-to-focus).
@@ -2920,11 +3071,12 @@ impl Crab {
         Rect::new(x, y, rect.w, rect.h)
     }
 
-    /// Clamps `position` into the visible area.
+    /// Clamps `position` onto the output layout.
+    ///
+    /// Unlike [`Self::output_at`], this never reports a point in dead space:
+    /// the pointer is pulled to the nearest monitor edge instead.
     pub(crate) fn clamp_to_output(&self, position: Point<f64, Logical>) -> Point<f64, Logical> {
-        let max_x = f64::from(self.output().size.w.max(1) - 1);
-        let max_y = f64::from(self.output().size.h.max(1) - 1);
-        (position.x.clamp(0.0, max_x), position.y.clamp(0.0, max_y)).into()
+        clamp_to_outputs(&output_rects(&self.outputs), position)
     }
 }
 
@@ -3123,6 +3275,64 @@ mod tests {
             layer,
             visible,
         }
+    }
+
+    fn output(id: u64, x: f64, y: f64, w: f64, h: f64) -> (OutputId, Rect) {
+        (OutputId::new(id), rect(x, y, w, h))
+    }
+
+    #[test]
+    fn the_output_under_a_point_wins_over_the_nearest_one() {
+        let outputs = [
+            output(1, 0.0, 0.0, 1920.0, 1080.0),
+            output(2, 1920.0, 0.0, 2560.0, 1440.0),
+        ];
+        assert_eq!(
+            output_at_position(&outputs, (100.0, 100.0).into()),
+            Some(OutputId::new(1))
+        );
+        assert_eq!(
+            output_at_position(&outputs, (2000.0, 500.0).into()),
+            Some(OutputId::new(2))
+        );
+        // The shared edge belongs to the output that starts there, not both.
+        assert_eq!(
+            output_at_position(&outputs, (1920.0, 500.0).into()),
+            Some(OutputId::new(2))
+        );
+    }
+
+    #[test]
+    fn a_point_in_a_gap_falls_back_to_the_nearest_output() {
+        // A vertical arrangement with a gap between the monitors.
+        let outputs = [
+            output(1, 0.0, 0.0, 100.0, 100.0),
+            output(2, 0.0, 200.0, 100.0, 100.0),
+        ];
+        assert_eq!(
+            output_at_position(&outputs, (50.0, 150.0).into()),
+            Some(OutputId::new(1)),
+            "the point is closer to the bottom edge of the upper output"
+        );
+        assert_eq!(
+            clamp_to_outputs(&outputs, (50.0, 150.0).into()),
+            (50.0, 99.0).into(),
+            "the pointer is pulled onto the nearest monitor instead of staying in the gap"
+        );
+    }
+
+    #[test]
+    fn a_point_on_an_output_is_left_where_it_is() {
+        let outputs = [output(1, 100.0, 200.0, 300.0, 400.0)];
+        assert_eq!(
+            clamp_to_outputs(&outputs, (250.0, 350.0).into()),
+            (250.0, 350.0).into()
+        );
+        assert_eq!(
+            clamp_to_outputs(&outputs, (0.0, 0.0).into()),
+            (100.0, 200.0).into(),
+            "a point outside the layout is clamped to the output's top-left corner"
+        );
     }
 
     #[test]
