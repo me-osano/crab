@@ -29,7 +29,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::core::{Color, LayoutKind, LayoutParams, OutputMode, OutputTransform, ScrollCenter};
+use crate::core::{
+    Color, LayoutKind, LayoutParams, OutputMode, OutputPreference, OutputSpecError,
+    OutputTransform, ScrollCenter,
+};
 use serde::Deserialize;
 
 /// The compositor configuration.
@@ -158,6 +161,41 @@ impl Config {
             pending.push("animations.animation_type_*");
         }
         pending
+    }
+
+    /// Resolves every `[output.<name>]` table into the pure planner's form.
+    ///
+    /// This parses the mode and transform strings once, so the backend can hand
+    /// the result straight to [`crate::core::OutputPlanner`] without knowing the
+    /// config syntax.
+    ///
+    /// # Errors
+    /// Fails if a mode or transform string is malformed. [`validate`] checks the
+    /// same values at startup; this method is for callers that construct a
+    /// [`Config`] directly or skip validation.
+    pub fn output_preferences(
+        &self,
+    ) -> Result<BTreeMap<String, OutputPreference>, OutputSpecError> {
+        self.outputs
+            .iter()
+            .map(|(name, output)| {
+                let mode = output.mode.as_deref().map(OutputMode::parse).transpose()?;
+                let transform = output
+                    .transform
+                    .as_deref()
+                    .map(OutputTransform::parse)
+                    .transpose()?;
+                Ok((
+                    name.clone(),
+                    OutputPreference {
+                        mode,
+                        scale: output.scale,
+                        transform,
+                        position: output.position,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
@@ -1312,6 +1350,28 @@ mod tests {
                 "accepted {config:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolves_output_preferences_for_the_planner() {
+        let cfg = parse(
+            r#"
+            [output.eDP-1]
+            mode = "2560x1440@144"
+            scale = 1.25
+            transform = "90"
+            position = { x = -1920, y = 0 }
+            "#,
+        )
+        .unwrap();
+        let preferences = cfg.output_preferences().unwrap();
+        let preference = &preferences["eDP-1"];
+        let mode = preference.mode.unwrap();
+        assert_eq!(mode.size(), (2560, 1440));
+        assert_eq!(mode.refresh_mhz, Some(144_000));
+        assert_eq!(preference.scale, Some(1.25));
+        assert_eq!(preference.transform, Some(OutputTransform::Rotate90));
+        assert_eq!(preference.position, Some((-1920, 0)));
     }
 
     #[test]

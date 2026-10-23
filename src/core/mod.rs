@@ -1,5 +1,5 @@
 //! Pure data model for crab: identifiers, geometry, colors, spaces, windows,
-//! outputs, focus, and rules.
+//! outputs, focus, rules, and connector-to-output planning.
 //!
 //! This module has **no** Smithay or Wayland dependencies (see `ROADMAP.md` §5),
 //! so it is fast to test and can be re-promoted into its own crate if a future
@@ -17,6 +17,7 @@ pub mod focus;
 pub mod geometry;
 pub mod ids;
 pub mod output;
+pub mod output_plan;
 pub mod params;
 pub mod rules;
 pub mod spaces;
@@ -27,6 +28,9 @@ pub use focus::{FocusStack, FocusTarget};
 pub use geometry::{Point, Rect, Size};
 pub use ids::{LayerId, OutputId, WindowId};
 pub use output::{Output, OutputMode, OutputSpecError, OutputTransform, RedrawState, SpaceState};
+pub use output_plan::{
+    ConnectorInfo, ConnectorMode, OutputPlan, OutputPlanError, OutputPlanner, OutputPreference,
+};
 pub use params::{
     Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutFamily, LayoutKind,
     LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, TilePosition, WidthPresets,

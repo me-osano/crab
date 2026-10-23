@@ -52,6 +52,16 @@ pub struct OutputMode {
     pub refresh_mhz: Option<u32>,
 }
 
+impl fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)?;
+        if let Some(refresh_mhz) = self.refresh_mhz {
+            write!(f, "@{:.3}", f64::from(refresh_mhz) / 1000.0)?;
+        }
+        Ok(())
+    }
+}
+
 impl OutputMode {
     /// Parses `WIDTHxHEIGHT` or `WIDTHxHEIGHT@RATE`, e.g. `2560x1440@144`.
     ///
@@ -169,6 +179,15 @@ impl OutputTransform {
             Self::Flipped180 => "flipped-180",
             Self::Flipped270 => "flipped-270",
         }
+    }
+
+    /// Whether this transform swaps the output's logical width and height.
+    #[must_use]
+    pub const fn swaps_axes(self) -> bool {
+        matches!(
+            self,
+            Self::Rotate90 | Self::Rotate270 | Self::Flipped90 | Self::Flipped270
+        )
     }
 }
 
