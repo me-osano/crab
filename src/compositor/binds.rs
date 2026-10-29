@@ -24,57 +24,16 @@
 
 use std::collections::BTreeMap;
 
-use crab::core::{Direction, SpaceSet};
-use smithay::input::keyboard::{Keysym, ModifiersState, keysyms, xkb};
+use crab::config::{Config, KeyMode};
+use crab::core::{LayoutKind, SpaceSet};
+use crab_ipc::Direction;
+#[cfg(test)]
+use smithay::input::keyboard::Keysym;
+use smithay::input::keyboard::{ModifiersState, keysyms, xkb};
 
 use crate::compositor::spawn::parse_command;
 
-/// A compositor action produced by a keybind or pointer grab.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Action {
-    /// View a single space (1-based dynamic index).
-    ViewSpace(u8),
-    /// Move the focused window to a space.
-    MoveToSpace(u8),
-    /// Toggle a space in the current view.
-    ToggleSpaceView(u8),
-    /// Toggle a space on the focused window.
-    ToggleSpace(u8),
-    /// Step the view one space left/normal or right/next.
-    ViewSpaceStep(i8),
-    /// Step the view to the next occupied space in a direction.
-    ViewSpaceHaveClient(i8),
-    /// Swap to the previously-viewed space set.
-    ToggleBack,
-    /// Directional focus.
-    Direction(Direction),
-    /// Move the focused window toward a direction in the layout order.
-    MoveWindow(Direction),
-    /// Focus the next (`true`) or previous (`false`) window.
-    CycleFocus(bool),
-    /// Cycle the space's layout mode within its family.
-    CycleLayoutMode,
-    /// Cycle the space's layout family (to the next family's default mode).
-    CycleLayoutFamily,
-    /// Flip the focused window between tiled and floating.
-    ToggleFloating,
-    /// Flip fullscreen for the focused window.
-    ToggleFullscreen,
-    /// Flip maximized for the focused window.
-    ToggleMaximized,
-    /// Grow (`true`) or shrink the master area.
-    MasterRatio(bool),
-    /// Add (`true`) or remove a master slot.
-    MasterCount(bool),
-    /// Cycle the focused scroll column's width through the presets.
-    PresetWidth,
-    /// Scroll the focused scroll column to the middle of the view.
-    CenterColumn,
-    /// Run a command (already split into argv).
-    Spawn(Vec<String>),
-    /// Ask the focused window to close.
-    Close,
-}
+pub(crate) use crab_ipc::Action;
 
 /// The modifier keys a chord requires, independent of lock state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -129,11 +88,41 @@ struct BindKey {
     keysym: u32,
 }
 
+/// Optional behavior flags written after a chord, as
+/// `"SUPER+q:release,pass-through"`.
+///
+/// `allow_when_locked` and `allow_inhibiting` are parsed and carried so the
+/// config vocabulary is stable, but crab has no lock screen or keyboard
+/// inhibitor yet, so nothing gates on them today (M6).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BindFlags {
+    /// Re-fire the action while the key is held (key repeat).
+    pub(crate) repeat: bool,
+    /// Keep the bind active while the session is locked.
+    pub(crate) allow_when_locked: bool,
+    /// Keep the bind active while a client holds a keyboard inhibitor.
+    pub(crate) allow_inhibiting: bool,
+    /// Run the action when the key is released rather than pressed.
+    pub(crate) release: bool,
+    /// Also forward the key to the focused client.
+    pub(crate) pass_through: bool,
+}
+
+/// A matched binding: the action to run and how input should treat the key.
+#[derive(Clone, Debug)]
+pub(crate) struct BoundAction {
+    /// The action the chord runs.
+    pub(crate) action: Action,
+    /// The chord's behavior flags.
+    pub(crate) flags: BindFlags,
+}
+
 /// One compiled binding.
 #[derive(Clone, Debug)]
 struct Bind {
     key: BindKey,
     action: Action,
+    flags: BindFlags,
 }
 
 /// A chord/action pair that was skipped, with the reason.
@@ -189,14 +178,37 @@ impl BindTable {
     ///
     /// Lock-state modifiers (`caps_lock`, `num_lock`) are ignored: a chord means
     /// the same thing with NumLock on.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn action(&self, modifiers: &ModifiersState, keysym: Keysym) -> Option<Action> {
+        self.bind(modifiers, keysym.raw()).map(|bound| bound.action)
+    }
+
+    /// The binding a chord matches, with its flags, if any.
+    #[must_use]
+    pub(crate) fn bind(&self, modifiers: &ModifiersState, keysym: u32) -> Option<BoundAction> {
         let mods = Mods::from_state(modifiers);
         self.binds
             .iter()
             .rev()
-            .find(|bind| bind.key.mods == mods && bind.key.keysym == keysym.raw())
-            .map(|bind| bind.action.clone())
+            .find(|bind| bind.key.mods == mods && bind.key.keysym == keysym)
+            .map(|bind| BoundAction {
+                action: bind.action.clone(),
+                flags: bind.flags,
+            })
+    }
+
+    /// Compiles only `binds` (no built-ins), for one key mode's overlay.
+    #[must_use]
+    pub(crate) fn compile_overlay(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
     }
 
     /// Adds one binding, replacing any existing bind with the same chord.
@@ -206,10 +218,10 @@ impl BindTable {
             action: action.to_owned(),
             reason,
         };
-        let key = parse_chord(chord).map_err(issue)?;
+        let (key, flags) = parse_chord_with_flags(chord).map_err(issue)?;
         let action = parse_action(action).map_err(issue)?;
         self.binds.retain(|bind| bind.key != key);
-        self.binds.push(Bind { key, action });
+        self.binds.push(Bind { key, action, flags });
         Ok(())
     }
 }
@@ -268,6 +280,19 @@ impl MouseBindTable {
         self.binds.len()
     }
 
+    /// Compiles only `binds` (no built-ins), for one key mode's overlay.
+    #[must_use]
+    pub(crate) fn compile_overlay(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
+    }
+
     /// The action a button press triggers, if any.
     #[must_use]
     pub(crate) fn action(&self, modifiers: &ModifiersState, button: u32) -> Option<MouseAction> {
@@ -314,6 +339,99 @@ pub(crate) enum ScrollAxis {
     Vertical,
 }
 
+/// Gesture direction and finger count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GestureDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// One compiled gesture binding.
+#[derive(Clone, Debug)]
+struct GestureBind {
+    mods: Mods,
+    fingers: u32,
+    dir: GestureDir,
+    action: Action,
+}
+
+/// The compiled `[gesturebinds]` table.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GestureBindTable {
+    binds: Vec<GestureBind>,
+}
+
+impl GestureBindTable {
+    /// Compiles `[gesturebinds]` into a lookup table.
+    #[must_use]
+    pub(crate) fn compile(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
+    }
+
+    /// Number of compiled gesture bindings (used by startup logging).
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.binds.len()
+    }
+
+    /// Compiles only `binds`, for one key mode's overlay.
+    #[must_use]
+    pub(crate) fn compile_overlay(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
+    }
+
+    /// The action a gesture triggers, if any.
+    #[must_use]
+    pub(crate) fn action(
+        &self,
+        modifiers: &ModifiersState,
+        dir: GestureDir,
+        fingers: u32,
+    ) -> Option<Action> {
+        let mods = Mods::from_state(modifiers);
+        self.binds
+            .iter()
+            .rev()
+            .find(|bind| bind.mods == mods && bind.dir == dir && bind.fingers == fingers)
+            .map(|bind| bind.action.clone())
+    }
+
+    fn insert(&mut self, chord: &str, action: &str) -> Result<(), BindIssue> {
+        let issue = |reason: String| BindIssue {
+            chord: chord.to_owned(),
+            action: action.to_owned(),
+            reason,
+        };
+        let (mods, dir, fingers) = parse_gesture_chord(chord).map_err(issue)?;
+        let action = parse_action(action).map_err(issue)?;
+        self.binds
+            .retain(|bind| bind.mods != mods || bind.dir != dir || bind.fingers != fingers);
+        self.binds.push(GestureBind {
+            mods,
+            dir,
+            fingers,
+            action,
+        });
+        Ok(())
+    }
+}
+
 /// One compiled axis binding.
 #[derive(Clone, Debug)]
 struct AxisBind {
@@ -347,6 +465,19 @@ impl AxisBindTable {
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.binds.len()
+    }
+
+    /// Compiles only `binds`, for one key mode's overlay.
+    #[must_use]
+    pub(crate) fn compile_overlay(binds: &BTreeMap<String, String>) -> (Self, Vec<BindIssue>) {
+        let mut table = Self::default();
+        let mut issues = Vec::new();
+        for (chord, action) in binds {
+            if let Err(issue) = table.insert(chord, action) {
+                issues.push(issue);
+            }
+        }
+        (table, issues)
     }
 
     /// The action a scroll event triggers, if any.
@@ -389,19 +520,168 @@ impl AxisBindTable {
     }
 }
 
-/// Parses `MOD+MOD+KEY` into the modifier set and base key it fires on.
-fn parse_chord(chord: &str) -> Result<BindKey, String> {
-    let mut parts: Vec<&str> = chord.split('+').map(str::trim).collect();
-    let key_name = parts.pop().unwrap_or_default();
-    if key_name.is_empty() {
+/// All bind tables compiled for one key mode.
+///
+/// A mode holds only its own entries (no built-ins and no default table).
+/// Lookup walks the mode stack top-down and falls back to the default tables,
+/// so a mode composes with the modes below it and with the base config.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ModeBinds {
+    /// Keyboard bindings declared for this mode.
+    pub(crate) keys: BindTable,
+    /// Pointer bindings declared for this mode.
+    pub(crate) mouse: MouseBindTable,
+    /// Scroll bindings declared for this mode.
+    pub(crate) axis: AxisBindTable,
+    /// Gesture bindings declared for this mode.
+    pub(crate) gestures: GestureBindTable,
+}
+
+impl ModeBinds {
+    /// Compiles one `[modes.<name>]` table.
+    #[must_use]
+    pub(crate) fn compile(mode: &KeyMode) -> (Self, Vec<BindIssue>) {
+        let (keys, mut issues) = BindTable::compile_overlay(&mode.binds);
+        let (mouse, mouse_issues) = MouseBindTable::compile_overlay(&mode.mouse_binds);
+        issues.extend(mouse_issues);
+        let (axis, axis_issues) = AxisBindTable::compile_overlay(&mode.axis_binds);
+        issues.extend(axis_issues);
+        let (gestures, gesture_issues) = GestureBindTable::compile_overlay(&mode.gesture_binds);
+        issues.extend(gesture_issues);
+        (
+            Self {
+                keys,
+                mouse,
+                axis,
+                gestures,
+            },
+            issues,
+        )
+    }
+}
+
+/// Every compiled bind table for a config: the default tables plus each mode.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CompiledBinds {
+    /// Built-in keyboard binds plus `[binds.*]`.
+    pub(crate) keys: BindTable,
+    /// Built-in pointer binds plus `[mousebinds]`.
+    pub(crate) mouse: MouseBindTable,
+    /// `[axisbinds]`.
+    pub(crate) axis: AxisBindTable,
+    /// `[gesturebinds]`.
+    pub(crate) gestures: GestureBindTable,
+    /// Per-mode overlays keyed by mode name.
+    pub(crate) modes: BTreeMap<String, ModeBinds>,
+}
+
+impl CompiledBinds {
+    /// Compiles every bind table in `config`.
+    ///
+    /// Skipped entries are returned with a section label (`"key"`, `"mouse"`,
+    /// `"mode resize"`, …) so the caller can log them the same way for startup
+    /// and reload.
+    #[must_use]
+    pub(crate) fn compile(config: &Config) -> (Self, Vec<(String, BindIssue)>) {
+        let mut issues = Vec::new();
+
+        let (keys, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
+        issues.extend(
+            key_issues
+                .into_iter()
+                .map(|issue| ("key".to_owned(), issue)),
+        );
+
+        let (mouse, mouse_issues) = MouseBindTable::compile(&config.mouse_binds);
+        issues.extend(
+            mouse_issues
+                .into_iter()
+                .map(|issue| ("mouse".to_owned(), issue)),
+        );
+
+        let (axis, axis_issues) = AxisBindTable::compile(&config.axis_binds);
+        issues.extend(
+            axis_issues
+                .into_iter()
+                .map(|issue| ("axis".to_owned(), issue)),
+        );
+
+        let (gestures, gesture_issues) = GestureBindTable::compile(&config.gesture_binds);
+        issues.extend(
+            gesture_issues
+                .into_iter()
+                .map(|issue| ("gesture".to_owned(), issue)),
+        );
+
+        let mut modes = BTreeMap::new();
+        for (name, mode) in &config.modes {
+            let (compiled, mode_issues) = ModeBinds::compile(mode);
+            issues.extend(
+                mode_issues
+                    .into_iter()
+                    .map(|issue| (format!("mode {name}"), issue)),
+            );
+            modes.insert(name.clone(), compiled);
+        }
+
+        (
+            Self {
+                keys,
+                mouse,
+                axis,
+                gestures,
+                modes,
+            },
+            issues,
+        )
+    }
+}
+
+fn parse_chord_with_flags(chord: &str) -> Result<(BindKey, BindFlags), String> {
+    let mut flags = BindFlags::default();
+    let mut chord_clean = chord.trim().to_owned();
+    if let Some((keys, flag_part)) = chord_clean.clone().split_once(':') {
+        chord_clean = keys.trim().to_owned();
+        for flag in flag_part.split(',') {
+            let flag = flag.trim();
+            if flag.is_empty() {
+                continue;
+            }
+            match flag.to_ascii_lowercase().as_str() {
+                "repeat" => flags.repeat = true,
+                "norepeat" | "no-repeat" => flags.repeat = false,
+                "allow-when-locked" | "locked" => flags.allow_when_locked = true,
+                "allow-inhibiting" => flags.allow_inhibiting = true,
+                "release" => flags.release = true,
+                "pass-through" | "pass_through" | "passthrough" => flags.pass_through = true,
+                other => return Err(format!("unknown bind flag `{other}`")),
+            }
+        }
+    }
+    let parts_vec: Vec<String> = chord_clean
+        .split('+')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts_vec.is_empty() {
         return Err("missing key name".to_owned());
     }
-    let mods = parse_mods(&parts)?;
-    let keysym = lookup_keysym(key_name);
+    let key_name = parts_vec[parts_vec.len() - 1].clone();
+    let mod_parts = &parts_vec[0..parts_vec.len() - 1];
+    let mod_refs: Vec<&str> = mod_parts.iter().map(String::as_str).collect();
+    let mods = parse_mods(&mod_refs)?;
+    let keysym = lookup_keysym(&key_name);
     if keysym == keysyms::KEY_NoSymbol {
         return Err(format!("unknown key `{key_name}`"));
     }
-    Ok(BindKey { mods, keysym })
+    Ok((BindKey { mods, keysym }, flags))
+}
+
+/// Parses `MOD+MOD+KEY` into the modifier set and base key it fires on.
+#[cfg(test)]
+fn parse_chord(chord: &str) -> Result<BindKey, String> {
+    let (key, _) = parse_chord_with_flags(chord)?;
+    Ok(key)
 }
 
 /// Parses `MOD+MOD+btn_left` into modifiers and a Linux `BTN_*` code.
@@ -433,6 +713,48 @@ fn parse_axis_chord(chord: &str) -> Result<(Mods, ScrollAxis, bool), String> {
         other => return Err(format!("unknown axis direction `{other}`")),
     };
     Ok((mods, axis, positive))
+}
+
+/// Parses `MOD+MOD+DIR+N` or `DIR+N` into modifiers, direction, and finger count.
+fn parse_gesture_chord(chord: &str) -> Result<(Mods, GestureDir, u32), String> {
+    let parts: Vec<String> = chord
+        .split('+')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut mods_list: Vec<String> = Vec::new();
+    let mut dir_found: Option<GestureDir> = None;
+    let mut fingers_found: u32 = 3;
+    for p in &parts {
+        let pl = p.to_ascii_lowercase();
+        if pl == "none" {
+            continue;
+        }
+        if Mods::parse(&pl).is_some() {
+            mods_list.push(pl.clone());
+            continue;
+        }
+        if matches!(pl.as_str(), "left" | "right" | "up" | "down") {
+            dir_found = match pl.as_str() {
+                "left" => Some(GestureDir::Left),
+                "right" => Some(GestureDir::Right),
+                "up" => Some(GestureDir::Up),
+                "down" => Some(GestureDir::Down),
+                _ => None,
+            };
+            continue;
+        }
+        if let Ok(n) = pl.parse::<u32>() {
+            if (1..=5).contains(&n) {
+                fingers_found = n;
+                continue;
+            }
+        }
+    }
+    let dir = dir_found.ok_or_else(|| "missing gesture direction".to_string())?;
+    let mods_refs: Vec<&str> = mods_list.iter().map(|s| s.as_str()).collect();
+    let mods = parse_mods(&mods_refs)?;
+    Ok((mods, dir, fingers_found))
 }
 
 /// Parses the modifier parts of a chord. `NONE` is accepted as an explicit
@@ -492,60 +814,142 @@ fn lookup_keysym(name: &str) -> u32 {
 }
 
 /// Turns an authored action string into an [`Action`].
+///
+/// Mango's spellings are aliases for the canonical action names where they
+/// differ (`killclient` → close-window, `focusdir:left` → focus-direction).
 fn parse_action(authored: &str) -> Result<Action, String> {
     let action = authored.trim();
     let action = action.strip_suffix(',').unwrap_or(action).trim();
 
     if let Some(command) = action.strip_prefix("spawn:") {
         return parse_command(command)
-            .map(Action::Spawn)
+            .map(|command| Action::Spawn { command })
             .map_err(|reason| format!("invalid spawn command: {reason}"));
     }
-    if let Some(value) = action.strip_prefix("focusdir:") {
-        return parse_direction(value).map(Action::Direction);
+    if let Some(value) = action
+        .strip_prefix("focusdir:")
+        .or_else(|| action.strip_prefix("focus-direction:"))
+    {
+        return parse_direction(value).map(|direction| Action::FocusDirection { direction });
     }
-    if let Some(value) = action.strip_prefix("move_client:") {
-        return parse_direction(value).map(Action::MoveWindow);
+    if let Some(value) = action
+        .strip_prefix("move_client:")
+        .or_else(|| action.strip_prefix("move-window:"))
+    {
+        return parse_direction(value).map(|direction| Action::MoveWindow { direction });
     }
-    if let Some(value) = action.strip_prefix("view_space:") {
-        return parse_index(value).map(Action::ViewSpace);
+    if let Some(value) = action
+        .strip_prefix("view_space:")
+        .or_else(|| action.strip_prefix("view-space:"))
+    {
+        return parse_index(value).map(|index| Action::ViewSpace { index });
     }
-    if let Some(value) = action.strip_prefix("move_client_space:") {
-        return parse_index(value).map(Action::MoveToSpace);
+    if let Some(value) = action
+        .strip_prefix("move_client_space:")
+        .or_else(|| action.strip_prefix("move-to-space:"))
+    {
+        return parse_index(value).map(|index| Action::MoveToSpace { index });
     }
     if let Some(value) = action
         .strip_prefix("toggle_space_view:")
         .or_else(|| action.strip_prefix("toggle_view_space:"))
+        .or_else(|| action.strip_prefix("toggle-space-view:"))
     {
-        return parse_index(value).map(Action::ToggleSpaceView);
+        return parse_index(value).map(|index| Action::ToggleSpaceView { index });
     }
-    if let Some(value) = action.strip_prefix("toggle_space:") {
-        return parse_index(value).map(Action::ToggleSpace);
+    if let Some(value) = action
+        .strip_prefix("toggle_space:")
+        .or_else(|| action.strip_prefix("toggle-space:"))
+    {
+        return parse_index(value).map(|index| Action::ToggleSpace { index });
+    }
+    if let Some(value) = action
+        .strip_prefix("set_layout:")
+        .or_else(|| action.strip_prefix("set-layout:"))
+    {
+        let name = value.trim();
+        if name.is_empty() {
+            return Err("empty layout name".to_owned());
+        }
+        if LayoutKind::from_name(name).is_none() {
+            return Err(format!("unknown layout `{name}`"));
+        }
+        return Ok(Action::SetLayout {
+            name: name.to_owned(),
+        });
+    }
+    if let Some(value) = action
+        .strip_prefix("enter_mode:")
+        .or_else(|| action.strip_prefix("enter-mode:"))
+        .or_else(|| action.strip_prefix("mode:"))
+    {
+        let name = value.trim();
+        if name.is_empty() {
+            return Err("empty mode name".to_owned());
+        }
+        return Ok(Action::EnterMode {
+            name: name.to_owned(),
+        });
+    }
+    if let Some(value) = action
+        .strip_prefix("focus_window:")
+        .or_else(|| action.strip_prefix("focus-window:"))
+    {
+        let id = value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("`{}` is not a window id", value.trim()))?;
+        if id == 0 {
+            return Err("window id must be at least 1".to_owned());
+        }
+        return Ok(Action::FocusWindow { id });
     }
 
     match action.to_ascii_lowercase().as_str() {
-        "killclient" | "close" | "closewindow" | "close_window" => Ok(Action::Close),
-        "toggle_back" | "view_back" => Ok(Action::ToggleBack),
-        "view_space_left" | "view_space_prev" | "viewprev" => Ok(Action::ViewSpaceStep(-1)),
-        "view_space_right" | "view_space_next" | "viewnext" => Ok(Action::ViewSpaceStep(1)),
-        "switch_layout" | "cycle_layout_family" => Ok(Action::CycleLayoutFamily),
-        "cycle_layout" | "cycle_layout_mode" => Ok(Action::CycleLayoutMode),
+        "killclient" | "close" | "closewindow" | "close_window" | "close-window" => {
+            Ok(Action::CloseWindow)
+        }
+        "quit" | "exit" => Ok(Action::Quit),
+        "reload_config" | "reload-config" => Ok(Action::ReloadConfig),
+        "toggle_back" | "view_back" | "toggle-back" => Ok(Action::ToggleBack),
+        "view_space_left" | "view_space_prev" | "viewprev" => {
+            Ok(Action::ViewSpaceStep { step: -1 })
+        }
+        "view_space_right" | "view_space_next" | "viewnext" => {
+            Ok(Action::ViewSpaceStep { step: 1 })
+        }
+        "switch_layout" | "cycle_layout_family" | "cycle-layout-family" => {
+            Ok(Action::CycleLayoutFamily)
+        }
+        "cycle_layout" | "cycle_layout_mode" | "cycle-layout" => Ok(Action::CycleLayout),
         "toogle_window_floating"
         | "toggle_window_floating"
         | "toggle_floating"
-        | "togglefloating" => Ok(Action::ToggleFloating),
-        "toggle_fullscreen" | "togglefullscreen" => Ok(Action::ToggleFullscreen),
-        "toggle_maximize_window" | "toggle_maximized" | "togglemaximizescreen" => {
-            Ok(Action::ToggleMaximized)
+        | "togglefloating"
+        | "toggle-floating" => Ok(Action::ToggleFloating),
+        "toggle_fullscreen" | "togglefullscreen" | "toggle-fullscreen" => {
+            Ok(Action::ToggleFullscreen)
         }
-        "focus_cycle_next" | "focusnext" => Ok(Action::CycleFocus(true)),
-        "focus_cycle_prev" | "focusprev" => Ok(Action::CycleFocus(false)),
-        "inc_master_ratio" | "master_ratio+" => Ok(Action::MasterRatio(true)),
-        "dec_master_ratio" | "master_ratio-" => Ok(Action::MasterRatio(false)),
-        "inc_master_count" | "master_count+" => Ok(Action::MasterCount(true)),
-        "dec_master_count" | "master_count-" => Ok(Action::MasterCount(false)),
-        "preset_width" | "switch_preset_width" => Ok(Action::PresetWidth),
-        "center_column" => Ok(Action::CenterColumn),
+        "toggle_maximize_window"
+        | "toggle_maximized"
+        | "togglemaximizescreen"
+        | "toggle-maximized" => Ok(Action::ToggleMaximized),
+        "focus_cycle_next" | "focusnext" => Ok(Action::FocusCycle { forward: true }),
+        "focus_cycle_prev" | "focusprev" => Ok(Action::FocusCycle { forward: false }),
+        "switch_keyboard_layout" | "next_keyboard_layout" | "switch-keyboard-layout" => {
+            Ok(Action::SwitchKeyboardLayout { forward: true })
+        }
+        "switch_keyboard_layout_prev" | "prev_keyboard_layout" | "switch-keyboard-layout-prev" => {
+            Ok(Action::SwitchKeyboardLayout { forward: false })
+        }
+        "inc_master_ratio" | "master_ratio+" => Ok(Action::MasterRatio { grow: true }),
+        "dec_master_ratio" | "master_ratio-" => Ok(Action::MasterRatio { grow: false }),
+        "inc_master_count" | "master_count+" => Ok(Action::MasterCount { add: true }),
+        "dec_master_count" | "master_count-" => Ok(Action::MasterCount { add: false }),
+        "leave_mode" | "leave-mode" | "exit_mode" | "exit-mode" => Ok(Action::LeaveMode),
+        "pop_mode" | "pop-mode" => Ok(Action::PopMode),
+        "preset_width" | "switch_preset_width" | "preset-width" => Ok(Action::PresetWidth),
+        "center_column" | "center-column" => Ok(Action::CenterColumn),
         "" => Err("empty action".to_owned()),
         // Mango actions for features crab does not implement yet. They are
         // accepted by the parser and skipped here with a startup warning.
@@ -556,8 +960,12 @@ fn parse_action(authored: &str) -> Result<Action, String> {
             Err("minimizing windows is not implemented yet".to_owned())
         }
         "toggle_scratchpad" => Err("scratchpads are not implemented yet".to_owned()),
-        "viewprev_have_client" | "viewtoleft_have_client" => Ok(Action::ViewSpaceHaveClient(-1)),
-        "viewnext_have_client" | "viewtoright_have_client" => Ok(Action::ViewSpaceHaveClient(1)),
+        "viewprev_have_client" | "viewtoleft_have_client" => {
+            Ok(Action::ViewSpaceHaveClient { step: -1 })
+        }
+        "viewnext_have_client" | "viewtoright_have_client" => {
+            Ok(Action::ViewSpaceHaveClient { step: 1 })
+        }
         other => Err(format!("unknown action `{other}`")),
     }
 }
@@ -624,6 +1032,8 @@ fn builtins() -> Vec<(String, String)> {
         ("SUPER+SHIFT+space", "toggle_floating"),
         ("SUPER+CTRL+space", "switch_layout"),
         ("SUPER+space", "cycle_layout_mode"),
+        ("SUPER+ALT+space", "next_keyboard_layout"),
+        ("SUPER+ALT+SHIFT+space", "prev_keyboard_layout"),
         ("SUPER+f", "toggle_fullscreen"),
         ("SUPER+SHIFT+h", "dec_master_count"),
         ("SUPER+SHIFT+l", "inc_master_count"),
@@ -699,11 +1109,9 @@ mod tests {
         let table = table(&[("SUPER+space", "spawn:rofi -show drun")]);
         assert_eq!(
             table.action(&mods(false, false, false, true), key("space")),
-            Some(Action::Spawn(vec![
-                "rofi".to_owned(),
-                "-show".to_owned(),
-                "drun".to_owned()
-            ]))
+            Some(Action::Spawn {
+                command: vec!["rofi".to_owned(), "-show".to_owned(), "drun".to_owned()]
+            })
         );
     }
 
@@ -721,7 +1129,7 @@ mod tests {
         let table = table(&[("SUPER+q", "killclient")]);
         assert_eq!(
             table.action(&mods(false, false, false, true), key("q")),
-            Some(Action::Close)
+            Some(Action::CloseWindow)
         );
         assert_eq!(
             table.action(&mods(false, false, true, true), key("q")),
@@ -745,12 +1153,53 @@ mod tests {
         );
         assert_eq!(
             parse_action("view_space_left").unwrap(),
-            Action::ViewSpaceStep(-1)
+            Action::ViewSpaceStep { step: -1 }
         );
         assert_eq!(
             parse_action("switch_layout").unwrap(),
             Action::CycleLayoutFamily
         );
+        assert_eq!(
+            parse_action("next_keyboard_layout").unwrap(),
+            Action::SwitchKeyboardLayout { forward: true }
+        );
+        assert_eq!(
+            parse_action("prev_keyboard_layout").unwrap(),
+            Action::SwitchKeyboardLayout { forward: false }
+        );
+    }
+
+    #[test]
+    fn canonical_action_names_parse_too() {
+        assert_eq!(parse_action("quit").unwrap(), Action::Quit);
+        assert_eq!(
+            parse_action("toggle-floating").unwrap(),
+            Action::ToggleFloating
+        );
+        assert_eq!(
+            parse_action("focus-direction:left").unwrap(),
+            Action::FocusDirection {
+                direction: Direction::Left
+            }
+        );
+        assert_eq!(
+            parse_action("move-window:down").unwrap(),
+            Action::MoveWindow {
+                direction: Direction::Down
+            }
+        );
+        assert_eq!(
+            parse_action("set-layout:monocle").unwrap(),
+            Action::SetLayout {
+                name: "monocle".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_action("focus-window:7").unwrap(),
+            Action::FocusWindow { id: 7 }
+        );
+        assert!(parse_action("set-layout:nope").is_err());
+        assert!(parse_action("focus-window:0").is_err());
     }
 
     #[test]
@@ -782,7 +1231,7 @@ mod tests {
         assert!(issues.is_empty());
         assert!(matches!(
             table.action(&mods(false, false, false, false), key("XF86AudioMute")),
-            Some(Action::Spawn(_))
+            Some(Action::Spawn { .. })
         ));
     }
 
@@ -790,7 +1239,7 @@ mod tests {
     fn builtins_are_all_valid() {
         let (table, issues) = BindTable::compile(&BTreeMap::new(), &BTreeMap::new());
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(table.len(), 36 + 18);
+        assert_eq!(table.len(), 36 + 20);
     }
 
     fn mouse_table(entries: &[(&str, &str)]) -> MouseBindTable {
@@ -892,11 +1341,11 @@ mod tests {
         let super_held = mods(false, false, false, true);
         assert_eq!(
             table.action(&super_held, ScrollAxis::Vertical, false),
-            Some(Action::ViewSpaceHaveClient(-1))
+            Some(Action::ViewSpaceHaveClient { step: -1 })
         );
         assert_eq!(
             table.action(&super_held, ScrollAxis::Vertical, true),
-            Some(Action::ViewSpaceHaveClient(1))
+            Some(Action::ViewSpaceHaveClient { step: 1 })
         );
         assert_eq!(
             table.action(&super_held, ScrollAxis::Horizontal, false),
@@ -909,7 +1358,7 @@ mod tests {
                 ScrollAxis::Horizontal,
                 false
             ),
-            Some(Action::ViewSpaceStep(-1))
+            Some(Action::ViewSpaceStep { step: -1 })
         );
     }
 
@@ -925,11 +1374,121 @@ mod tests {
     fn have_client_actions_parse() {
         assert_eq!(
             parse_action("viewprev_have_client").unwrap(),
-            Action::ViewSpaceHaveClient(-1)
+            Action::ViewSpaceHaveClient { step: -1 }
         );
         assert_eq!(
             parse_action("viewtoright_have_client").unwrap(),
-            Action::ViewSpaceHaveClient(1)
+            Action::ViewSpaceHaveClient { step: 1 }
         );
+    }
+
+    #[test]
+    fn mode_actions_parse() {
+        assert_eq!(
+            parse_action("enter_mode:resize").unwrap(),
+            Action::EnterMode {
+                name: "resize".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_action("enter-mode:resize").unwrap(),
+            Action::EnterMode {
+                name: "resize".to_owned()
+            }
+        );
+        assert_eq!(parse_action("leave_mode").unwrap(), Action::LeaveMode);
+        assert_eq!(parse_action("pop-mode").unwrap(), Action::PopMode);
+        assert!(parse_action("enter_mode:").is_err());
+    }
+
+    #[test]
+    fn bind_flags_parse_after_the_chord() {
+        let (_, flags) = parse_chord_with_flags("SUPER+q:release,pass-through").unwrap();
+        assert!(flags.release);
+        assert!(flags.pass_through);
+        assert!(!flags.repeat);
+
+        let (key, flags) = parse_chord_with_flags("SUPER+r:repeat").unwrap();
+        assert_eq!(key.keysym, keysyms::KEY_r);
+        assert!(flags.repeat);
+    }
+
+    #[test]
+    fn unknown_bind_flags_are_an_issue() {
+        let map = BTreeMap::from([("SUPER+q:nonsense".to_owned(), "killclient".to_owned())]);
+        let (table, issues) = BindTable::compile(&map, &BTreeMap::new());
+        assert_eq!(table.len(), builtins().len(), "built-ins still compile");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].reason.contains("unknown bind flag"));
+    }
+
+    #[test]
+    fn mode_overlays_contain_only_their_own_binds() {
+        let mode = KeyMode {
+            binds: BTreeMap::from([("SUPER+q".to_owned(), "enter_mode:resize".to_owned())]),
+            ..KeyMode::default()
+        };
+        let (compiled, issues) = ModeBinds::compile(&mode);
+        assert!(issues.is_empty());
+        assert_eq!(
+            compiled
+                .keys
+                .bind(&mods(false, false, false, true), keysyms::KEY_q)
+                .map(|bound| bound.action),
+            Some(Action::EnterMode {
+                name: "resize".to_owned()
+            })
+        );
+        assert!(
+            compiled
+                .keys
+                .bind(&mods(false, false, false, true), keysyms::KEY_Tab)
+                .is_none(),
+            "the default table is not copied into the mode"
+        );
+    }
+
+    #[test]
+    fn mode_overlays_compile_mouse_and_axis_binds() {
+        let mode = KeyMode {
+            mouse_binds: BTreeMap::from([(
+                "SUPER+btn_left".to_owned(),
+                "toggle_floating".to_owned(),
+            )]),
+            axis_binds: BTreeMap::from([("SUPER+UP".to_owned(), "viewprev".to_owned())]),
+            ..KeyMode::default()
+        };
+        let (compiled, issues) = ModeBinds::compile(&mode);
+        assert!(issues.is_empty());
+        assert!(
+            compiled
+                .mouse
+                .action(&mods(false, false, false, true), 0x110)
+                .is_some()
+        );
+        assert_eq!(
+            compiled.axis.action(
+                &mods(false, false, false, true),
+                ScrollAxis::Vertical,
+                false
+            ),
+            Some(Action::ViewSpaceStep { step: -1 })
+        );
+    }
+
+    #[test]
+    fn compiled_binds_include_every_mode() {
+        let mut config = Config::default();
+        config.modes.insert(
+            "resize".to_owned(),
+            KeyMode {
+                binds: BTreeMap::from([("h".to_owned(), "master_ratio-".to_owned())]),
+                ..KeyMode::default()
+            },
+        );
+        let (compiled, issues) = CompiledBinds::compile(&config);
+        assert!(issues.is_empty());
+        assert!(compiled.modes.contains_key("resize"));
+        assert_eq!(compiled.keys.len(), builtins().len());
     }
 }

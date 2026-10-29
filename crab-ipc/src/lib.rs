@@ -11,7 +11,8 @@
 mod client;
 mod protocol;
 
-pub use client::{Client, IpcError, socket_path};
+pub use client::{Client, IpcError, socket_path, socket_path_for};
 pub use protocol::{
-    Action, Event, OutputInfo, PROTOCOL_VERSION, Request, Response, TagInfo, WindowInfo,
+    Action, Direction, Event, OutputInfo, PROTOCOL_VERSION, RectInfo, Request, Response, SpaceInfo,
+    WindowInfo,
 };

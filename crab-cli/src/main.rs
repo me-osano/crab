@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! crab-cli version
-//! crab-cli outputs | tags | windows | focused-window | layouts
-//! crab-cli dispatch '{"view-tag":{"index":2}}'
+//! crab-cli outputs | spaces | windows | focused-window | layouts
+//! crab-cli dispatch '{"view-space":{"index":2}}'
 //! crab-cli watch
 //! ```
 
@@ -29,21 +29,25 @@ enum Command {
     Version,
     /// List outputs.
     Outputs,
-    /// List the tags visible on each output.
-    Tags,
+    /// List the spaces that currently exist on each output.
+    Spaces,
     /// List managed windows.
     Windows,
     /// Describe the focused window.
     FocusedWindow,
-    /// List available layout names.
+    /// List available layout families and modes.
     Layouts,
-    /// Run an action (JSON, e.g. `{"view-tag":{"index":2}}`).
+    /// Run an action (JSON, e.g. `{"view-space":{"index":2}}`).
     Dispatch {
         /// The action as a JSON object.
         action: String,
     },
     /// Stream events as JSON lines until interrupted.
     Watch,
+    /// Re-read and apply the active config file.
+    ConfigReload,
+    /// Parse and validate the active config file without applying.
+    ConfigValidate,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -53,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     match args.command {
         Command::Version => print(&client.call(&Request::Version)?, args.raw),
         Command::Outputs => print(&client.call(&Request::Outputs)?, args.raw),
-        Command::Tags => print(&client.call(&Request::Tags)?, args.raw),
+        Command::Spaces => print(&client.call(&Request::Spaces)?, args.raw),
         Command::Windows => print(&client.call(&Request::Windows)?, args.raw),
         Command::FocusedWindow => print(&client.call(&Request::FocusedWindow)?, args.raw),
         Command::Layouts => print(&client.call(&Request::Layouts)?, args.raw),
@@ -62,10 +66,15 @@ fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("parsing action JSON: {json}"))?;
             print(&client.call(&Request::Dispatch { action })?, args.raw);
         }
+        Command::ConfigReload => print(&client.call(&Request::ConfigReload)?, args.raw),
+        Command::ConfigValidate => print(&client.call(&Request::ConfigValidate)?, args.raw),
         Command::Watch => {
             client.send(&Request::Subscribe)?;
             loop {
                 match client.read_event() {
+                    // Forward compatibility: an old CLI ignores event kinds it
+                    // does not know instead of failing the stream.
+                    Ok(crab_ipc::Event::Unknown) => {}
                     Ok(event) => println!("{}", serde_json::to_string(&event)?),
                     Err(crab_ipc::IpcError::Closed) => break,
                     Err(err) => return Err(err).context("reading event stream"),

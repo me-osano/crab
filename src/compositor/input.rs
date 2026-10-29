@@ -14,19 +14,26 @@
 //! and protocol breadth (M3); the `_ => {}` arm of [`handle`] is where they will
 //! arrive.
 
-use crab::core::LayoutCommand;
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, ButtonState, Event as _, InputBackend, InputEvent, KeyState,
-    KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis, ButtonState, Event as _, GestureBeginEvent,
+    GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
+use crate::compositor::actions;
+use crate::compositor::binds::GestureDir;
 use crate::compositor::binds::{Action, MouseAction, ScrollAxis};
-use crate::compositor::spawn;
-use crate::compositor::state::{Crab, GrabMode, Interaction};
+use crate::compositor::state::{BoundKey, Crab, GrabMode, Interaction};
+
+thread_local! {
+    static GESTURE_FINGERS: std::cell::Cell<u32> = const { std::cell::Cell::new(3) };
+    static GESTURE_DX: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static GESTURE_DY: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
 
 /// How much a continuous scroll delta must cover before it counts as one axis
 /// bind step. Discrete wheel events use `amount_v120` and need only one notch.
@@ -50,23 +57,41 @@ pub(crate) fn handle<B: InputBackend>(state: &mut Crab, event: InputEvent<B>) {
         }
         InputEvent::PointerButton { event } => button::<B>(state, &event),
         InputEvent::PointerAxis { event } => axis::<B>(state, &event),
+        InputEvent::GestureSwipeBegin { event } => {
+            GESTURE_FINGERS.with(|f| f.set(event.fingers()));
+            GESTURE_DX.with(|v| v.set(0.0));
+            GESTURE_DY.with(|v| v.set(0.0));
+            let _ = state;
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            GESTURE_DX.with(|v| v.set(v.get() + event.delta_x()));
+            GESTURE_DY.with(|v| v.set(v.get() + event.delta_y()));
+            let _ = state;
+        }
+        InputEvent::GestureSwipeEnd { event } => {
+            swipe_gesture_end::<B>(state, &event);
+        }
         _ => {}
     }
 }
 
 /// Forwards a key to the focused client, intercepting crab's own binds.
+///
+/// Bind flags decide the details: [`release`](crate::compositor::binds::BindFlags::release)
+/// runs the action on key-up, [`pass_through`](crate::compositor::binds::BindFlags::pass_through)
+/// also sends the key to the client, and
+/// [`repeat`](crate::compositor::binds::BindFlags::repeat) re-runs it on repeat
+/// presses reported by the backend.
 fn keyboard<B: InputBackend>(state: &mut Crab, event: B::KeyboardKeyEvent) {
     let keycode = event.key_code();
+    let raw = keycode.raw();
     let key_state = event.state();
-
-    // A key swallowed on press also swallows its release, so clients never see
-    // a dangling modifier-combo half.
-    if key_state == KeyState::Released && state.bound_keys.remove(&keycode.raw()) {
-        return;
-    }
-
     let keyboard = state.keyboard.clone();
-    let action = keyboard.input::<Action, _>(
+    // Actions are collected instead of returned through `FilterResult` so a
+    // bind can both run and forward its key (`pass-through`).
+    let mut actions: Vec<Action> = Vec::new();
+
+    let _ = keyboard.input::<(), _>(
         state,
         keycode,
         key_state,
@@ -76,9 +101,6 @@ fn keyboard<B: InputBackend>(state: &mut Crab, event: B::KeyboardKeyEvent) {
             // Both keyboard and pointer chords match the exact modifier set, so
             // remember what is down even when the key itself is forwarded.
             state.modifiers = *modifiers;
-            if key_state != KeyState::Pressed {
-                return FilterResult::Forward;
-            }
             // The *base* symbol (level 0, unshifted): `Super+1` and
             // `Super+Shift+1` both match `KEY_1`, and the modifiers pick the
             // space operation.
@@ -87,53 +109,84 @@ fn keyboard<B: InputBackend>(state: &mut Crab, event: B::KeyboardKeyEvent) {
                 .first()
                 .copied()
                 .unwrap_or_else(|| keysym.modified_sym());
-            match state.binds.action(modifiers, base) {
-                Some(action) => {
-                    state.bound_keys.insert(keycode.raw());
-                    FilterResult::Intercept(action)
+
+            match key_state {
+                KeyState::Pressed => {
+                    // A key still held from an earlier press is key repeat.
+                    // Re-fire only when the bind opted into it, and always
+                    // treat the repeat exactly like the original press.
+                    if let Some(bound) = state.bound_keys.get(&raw) {
+                        if bound.repeat {
+                            if let Some(action) = bound.action.clone() {
+                                actions.push(action);
+                            }
+                        }
+                        return if bound.forwarded {
+                            FilterResult::Forward
+                        } else {
+                            FilterResult::Intercept(())
+                        };
+                    }
+
+                    let Some(bound) = state.key_bind(modifiers, base.raw()) else {
+                        return FilterResult::Forward;
+                    };
+                    let forwarded = bound.flags.pass_through;
+                    let repeat = bound.flags.repeat;
+                    let (press_action, release_action) = if bound.flags.release {
+                        (None, Some(bound.action))
+                    } else {
+                        (Some(bound.action), None)
+                    };
+                    if let Some(action) = press_action.clone() {
+                        actions.push(action);
+                    }
+                    state.bound_keys.insert(
+                        raw,
+                        BoundKey {
+                            action: press_action,
+                            release_action,
+                            forwarded,
+                            repeat,
+                        },
+                    );
+                    if forwarded {
+                        FilterResult::Forward
+                    } else {
+                        FilterResult::Intercept(())
+                    }
                 }
-                None => FilterResult::Forward,
+                KeyState::Released => {
+                    // A pressed bind always removes its entry, so a bound
+                    // release is swallowed (or forwarded for pass-through) even
+                    // when no action runs.
+                    match state.bound_keys.remove(&raw) {
+                        Some(bound) => {
+                            if let Some(action) = bound.release_action {
+                                actions.push(action);
+                            }
+                            if bound.forwarded {
+                                FilterResult::Forward
+                            } else {
+                                FilterResult::Intercept(())
+                            }
+                        }
+                        None => FilterResult::Forward,
+                    }
+                }
             }
         },
     );
 
-    if let Some(action) = action {
+    for action in actions {
         apply(state, action);
     }
 }
 
 /// Runs the action a bind produced.
 fn apply(state: &mut Crab, action: Action) {
-    match action {
-        Action::ViewSpace(index) => state.view_space(index),
-        Action::MoveToSpace(index) => state.move_to_space(index),
-        Action::ToggleSpaceView(index) => state.toggle_view_space(index),
-        Action::ToggleSpace(index) => state.toggle_space(index),
-        Action::ViewSpaceStep(step) => state.view_space_step(step),
-        Action::ViewSpaceHaveClient(step) => state.view_space_have_client(step),
-        Action::ToggleBack => state.toggle_back(),
-        Action::Direction(dir) => state.focus_direction(dir),
-        Action::MoveWindow(dir) => state.move_window(dir),
-        Action::CycleFocus(forward) => state.focus_cycle(forward),
-        Action::CycleLayoutMode => state.cycle_layout_mode(),
-        Action::CycleLayoutFamily => state.cycle_layout_family(),
-        Action::ToggleFloating => state.toggle_floating(),
-        Action::ToggleFullscreen => state.toggle_fullscreen(),
-        Action::ToggleMaximized => state.toggle_maximized(),
-        Action::MasterRatio(grow) => state.layout_command(if grow {
-            LayoutCommand::IncMasterRatio
-        } else {
-            LayoutCommand::DecMasterRatio
-        }),
-        Action::MasterCount(add) => state.layout_command(if add {
-            LayoutCommand::IncMasterCount
-        } else {
-            LayoutCommand::DecMasterCount
-        }),
-        Action::PresetWidth => state.layout_command(LayoutCommand::SwitchPresetWidth),
-        Action::CenterColumn => state.layout_command(LayoutCommand::CenterColumn),
-        Action::Spawn(argv) => spawn::spawn(&argv, state.wayland_display.as_deref()),
-        Action::Close => state.close_focused(),
+    if let Err(reason) = actions::apply(state, action) {
+        tracing::warn!(%reason, "bind action failed");
     }
 }
 
@@ -202,7 +255,7 @@ fn button<B: InputBackend>(state: &mut Crab, event: &B::PointerButtonEvent) {
     let serial = SERIAL_COUNTER.next_serial();
     if pressed == ButtonState::Pressed && !grabbed {
         let position = state.pointer_location;
-        if let Some(action) = state.mouse_binds.action(&state.modifiers, button) {
+        if let Some(action) = state.mouse_bind(&state.modifiers, button) {
             state.bound_buttons.insert(button);
             state.focus_at(position);
             match action {
@@ -286,7 +339,7 @@ fn release_outcome(was_bound: bool, interaction: Option<&Interaction>) -> Releas
 /// does not fire on every frame.
 fn axis<B: InputBackend>(state: &mut Crab, event: &B::PointerAxisEvent) {
     if let Some((axis, positive)) = axis_step::<B>(event) {
-        if let Some(action) = state.axis_binds.action(&state.modifiers, axis, positive) {
+        if let Some(action) = state.axis_bind(&state.modifiers, axis, positive) {
             apply(state, action);
             return;
         }
@@ -325,6 +378,34 @@ fn axis_step<B: InputBackend>(event: &B::PointerAxisEvent) -> Option<(ScrollAxis
         }
     }
     None
+}
+
+fn swipe_gesture_end<B: InputBackend>(state: &mut Crab, event: &B::GestureSwipeEndEvent) {
+    let fingers = GESTURE_FINGERS.with(|f| f.get());
+    let dx = GESTURE_DX.with(|v| v.get());
+    let dy = GESTURE_DY.with(|v| v.get());
+    let _ = event;
+    if dx.abs() > dy.abs() && dx.abs() > 30.0 {
+        let dir = if dx > 0.0 {
+            GestureDir::Right
+        } else {
+            GestureDir::Left
+        };
+        if let Some(action) = state.gesture_bind(&state.modifiers, dir, fingers) {
+            apply(state, action);
+        }
+    } else if dy.abs() > dx.abs() && dy.abs() > 30.0 {
+        let dir = if dy > 0.0 {
+            GestureDir::Down
+        } else {
+            GestureDir::Up
+        };
+        if let Some(action) = state.gesture_bind(&state.modifiers, dir, fingers) {
+            apply(state, action);
+        }
+    }
+    GESTURE_DX.with(|v| v.set(0.0));
+    GESTURE_DY.with(|v| v.set(0.0));
 }
 
 #[cfg(test)]

@@ -13,7 +13,8 @@
 //! layout. That glue is binary-only, so it may depend on Smithay freely; the
 //! library's four modules stay pure (`scripts/check-boundaries.sh`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crab::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
@@ -30,7 +31,7 @@ use smithay::desktop::{
     LayerSurface, PopupKind, PopupManager, WindowSurfaceType, layer_map_for_output,
 };
 use smithay::input::SeatState;
-use smithay::input::keyboard::{KeyboardHandle, ModifiersState};
+use smithay::input::keyboard::{KeyboardHandle, ModifiersState, XkbConfig};
 use smithay::input::pointer::{CursorImageStatus, PointerHandle};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -54,7 +55,10 @@ use smithay::wayland::shm::ShmState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 
-use crate::compositor::binds::{AxisBindTable, BindIssue, BindTable, MouseBindTable};
+use crate::compositor::binds::{
+    Action, AxisBindTable, BindIssue, BindTable, BoundAction, CompiledBinds, GestureBindTable,
+    ModeBinds, MouseBindTable,
+};
 use crate::compositor::fit::WindowFit;
 use crate::compositor::layout;
 use crate::compositor::spawn;
@@ -65,6 +69,15 @@ pub(crate) const DEFAULT_WINDOW_SIZE: (i32, i32) = (800, 600);
 
 /// How much of a window must stay on screen when it is dragged, in pixels.
 const MIN_VISIBLE: f64 = 32.0;
+
+/// Deepest key-mode stack crab will keep. Entering a mode already on the stack
+/// (but not on top) is allowed, so a cap prevents a dispatch loop or a
+/// misbehaving client from growing it without bound.
+const MAX_MODE_DEPTH: usize = 8;
+
+/// How close a moved window's edge must be to an output edge before it snaps,
+/// in logical pixels.
+const SNAP_DISTANCE: f64 = 16.0;
 
 /// How many different sizes a client may commit instead of the one it was
 /// configured to before we stop asking it to resize.
@@ -97,6 +110,24 @@ fn occupied_target(occupied: SpaceSet, current: u8, step: i8) -> Option<u8> {
 /// soon as the connector is named and must be in place before the first mode is
 /// set, because [`Crab::set_output_size`] preserves the model's origin.
 fn apply_configured_position(config: &Config, model: &mut OutputModel) {
+    let Some((x, y)) = config
+        .outputs
+        .get(&model.name)
+        .and_then(|output| output.position)
+    else {
+        return;
+    };
+    let geometry = model.geometry;
+    model.set_geometry(Rect::new(
+        f64::from(x),
+        f64::from(y),
+        geometry.w,
+        geometry.h,
+    ));
+}
+
+/// Applies configured position if the model is still at origin.
+pub(crate) fn apply_configured_position_if_empty(config: &Config, model: &mut OutputModel) {
     let Some((x, y)) = config
         .outputs
         .get(&model.name)
@@ -204,7 +235,7 @@ fn clamp_to_outputs(
 }
 
 /// Logs one bind the config author wrote but crab could not compile.
-fn log_bind_issue(kind: &str, issue: &BindIssue) {
+pub(crate) fn log_bind_issue(kind: &str, issue: &BindIssue) {
     tracing::warn!(
         kind,
         chord = %issue.chord,
@@ -882,6 +913,32 @@ impl GrabMode {
     }
 }
 
+/// Snaps a moved rectangle flush when an edge is within `threshold` of the
+/// matching usable-area edge.
+///
+/// The nearest edge wins when both are in range (a window wider or taller than
+/// the area), and the size never changes. Resizes do not use this: the pointer
+/// names the exact edge the client asked for.
+fn snap_move_to_edges(rect: Rect, area: Rect, threshold: f64) -> Rect {
+    fn axis(near: f64, far: f64, area_near: f64, area_far: f64, threshold: f64) -> f64 {
+        let near_gap = (near - area_near).abs();
+        let far_gap = (far - area_far).abs();
+        match (near_gap <= threshold, far_gap <= threshold) {
+            (true, true) if far_gap < near_gap => area_far - (far - near),
+            (true, _) => area_near,
+            (false, true) => area_far - (far - near),
+            (false, false) => near,
+        }
+    }
+
+    Rect::new(
+        axis(rect.x, rect.right(), area.x, area.right(), threshold),
+        axis(rect.y, rect.bottom(), area.y, area.bottom(), threshold),
+        rect.w,
+        rect.h,
+    )
+}
+
 /// Which sides of a rectangle a resize drags.
 #[derive(Clone, Copy, Debug)]
 struct Edges {
@@ -990,6 +1047,19 @@ impl OutputRuntime {
     }
 }
 
+/// What a bound key should do when it is released.
+#[derive(Clone, Debug)]
+pub(crate) struct BoundKey {
+    /// Action re-fired on key repeat, if the bind opted into `repeat`.
+    pub(crate) action: Option<Action>,
+    /// Action to run on release, for a `release` bind.
+    pub(crate) release_action: Option<Action>,
+    /// Whether the press reached the client, so its release must too.
+    pub(crate) forwarded: bool,
+    /// Whether holding the key repeats the action.
+    pub(crate) repeat: bool,
+}
+
 pub(crate) struct Crab {
     pub(crate) compositor_state: CompositorState,
     pub(crate) xdg_shell_state: XdgShellState,
@@ -1009,6 +1079,8 @@ pub(crate) struct Crab {
     pub(crate) data_device_state: DataDeviceState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) keyboard: KeyboardHandle<Self>,
+    /// Name of the active xkb layout, as reported by the keymap.
+    pub(crate) keyboard_layout: Option<String>,
     pub(crate) pointer: PointerHandle<Self>,
     /// Every output, keyed by the stable id in its model.
     pub(crate) outputs: HashMap<OutputId, OutputRuntime>,
@@ -1023,13 +1095,36 @@ pub(crate) struct Crab {
     pub(crate) mouse_binds: MouseBindTable,
     /// The compiled scroll binds (`[axisbinds]`).
     pub(crate) axis_binds: AxisBindTable,
+    /// The compiled gesture binds (`[gesturebinds]`).
+    pub(crate) gesture_binds: GestureBindTable,
+    /// Per-mode overlay binds (`[modes.<name>]`), layered over the tables above
+    /// while a mode is active.
+    pub(crate) mode_binds: BTreeMap<String, ModeBinds>,
     /// Current keyboard modifiers, used by pointer and axis chords.
     pub(crate) modifiers: ModifiersState,
+    /// Key mode stack; the default mode is always the first entry.
+    pub(crate) mode_stack: Vec<String>,
     /// crab's own Wayland socket name, once the backend has bound it.
     ///
     /// `spawn:` and `[autostart]` pass this as `WAYLAND_DISPLAY` so launched
     /// clients connect to crab rather than to the host compositor.
     pub(crate) wayland_display: Option<String>,
+    /// Path of the IPC Unix socket, once the backend has bound it.
+    ///
+    /// Spawned and autostarted processes receive it as `CRAB_SOCKET`, so they
+    /// find the server without having to parse `WAYLAND_DISPLAY`.
+    pub(crate) ipc_socket: Option<PathBuf>,
+    /// Path of the loaded config file, if any.
+    pub(crate) config_path: Option<PathBuf>,
+    /// Set by the IPC `quit` action; the backend stops its event loop after the
+    /// current dispatch.
+    pub(crate) quit_requested: bool,
+    /// Config epoch, incremented on each reload attempt.
+    pub(crate) config_epoch: u64,
+    /// Last config reload error, if any.
+    pub(crate) config_error: Option<String>,
+    /// When the current config error first appeared.
+    pub(crate) config_error_since: Option<std::time::Instant>,
     /// Managed toplevels, in layout order (first = first tile).
     pub(crate) windows: Vec<ManagedWindow>,
     /// Layer-shell surfaces, in mapping order. Rendering groups them by layer.
@@ -1046,9 +1141,12 @@ pub(crate) struct Crab {
     pub(crate) focus: FocusTarget,
     /// Most-recently-used focus order, used for stacking and fallback focus.
     pub(crate) focus_stack: FocusStack,
-    /// Keycodes swallowed by a keybind, so the matching release is swallowed
-    /// too.
-    pub(crate) bound_keys: HashSet<u32>,
+    /// Keys a bind claimed on press, kept until the matching release.
+    ///
+    /// The entry records what the release should do: run a `release` bind,
+    /// forward the release because the press was a `pass-through`, or swallow
+    /// it because the client never saw the press.
+    pub(crate) bound_keys: HashMap<u32, BoundKey>,
     /// Buttons swallowed by a mouse bind, so the matching release is swallowed
     /// too.
     pub(crate) bound_buttons: HashSet<u32>,
@@ -1123,15 +1221,33 @@ impl Crab {
     pub(crate) fn new_without_outputs(display: &DisplayHandle, config: &Config) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "crab");
-        // Focus is pointless without a keyboard, and adding it can only fail if
-        // keymap creation fails, which is not recoverable at startup.
-        let keyboard = seat
-            .add_keyboard(
-                Default::default(),
-                config.input.repeat_delay.max(0),
-                config.input.repeat_rate.max(0),
-            )
-            .expect("failed to add the default keyboard to the seat");
+        // A bad configured layout falls back to xkbcommon's defaults instead of
+        // stopping the session; the error is logged and the config stays
+        // otherwise usable.
+        let xkb_config = XkbConfig {
+            layout: &config.input.xkb_rules_layout,
+            ..Default::default()
+        };
+        let keyboard = match seat.add_keyboard(
+            xkb_config,
+            config.input.repeat_delay.max(0),
+            config.input.repeat_rate.max(0),
+        ) {
+            Ok(keyboard) => keyboard,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    layout = %config.input.xkb_rules_layout,
+                    "failed to load the configured keyboard layout; using xkb defaults"
+                );
+                seat.add_keyboard(
+                    Default::default(),
+                    config.input.repeat_delay.max(0),
+                    config.input.repeat_rate.max(0),
+                )
+                .expect("failed to add the default keyboard to the seat")
+            }
+        };
         let pointer = seat.add_pointer();
 
         // Physical size comes from the backend once it exists; M2 starts at
@@ -1142,26 +1258,20 @@ impl Crab {
         let viewporter_state = ViewporterState::new::<Self>(display);
         let xdg_activation_state = XdgActivationState::new::<Self>(display);
 
-        let (binds, key_issues) = BindTable::compile(&config.binds.default, &config.binds.locked);
-        for issue in key_issues {
-            log_bind_issue("key", &issue);
-        }
-        let (mouse_binds, mouse_issues) = MouseBindTable::compile(&config.mouse_binds);
-        for issue in mouse_issues {
-            log_bind_issue("mouse", &issue);
-        }
-        let (axis_binds, axis_issues) = AxisBindTable::compile(&config.axis_binds);
-        for issue in axis_issues {
-            log_bind_issue("axis", &issue);
+        let (compiled, issues) = CompiledBinds::compile(config);
+        for (kind, issue) in issues {
+            log_bind_issue(&kind, &issue);
         }
         tracing::debug!(
-            key = binds.len(),
-            mouse = mouse_binds.len(),
-            axis = axis_binds.len(),
+            key = compiled.keys.len(),
+            mouse = compiled.mouse.len(),
+            axis = compiled.axis.len(),
+            gesture = compiled.gestures.len(),
+            modes = compiled.modes.len(),
             "compiled bindings"
         );
 
-        Self {
+        let mut state = Self {
             compositor_state: CompositorState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
@@ -1174,22 +1284,32 @@ impl Crab {
             data_device_state: DataDeviceState::new::<Self>(display),
             seat_state,
             keyboard,
+            keyboard_layout: None,
             pointer,
             outputs: HashMap::new(),
             primary_output: OutputId::new(0),
             config: config.clone(),
-            binds,
-            mouse_binds,
-            axis_binds,
+            binds: compiled.keys,
+            mouse_binds: compiled.mouse,
+            axis_binds: compiled.axis,
+            gesture_binds: compiled.gestures,
+            mode_binds: compiled.modes,
             modifiers: ModifiersState::default(),
+            mode_stack: vec!["default".to_owned()],
             wayland_display: None,
+            ipc_socket: None,
+            config_path: None,
+            quit_requested: false,
+            config_epoch: 0,
+            config_error: None,
+            config_error_since: None,
             windows: Vec::new(),
             layers: Vec::new(),
             closings: Vec::new(),
             popup_manager: PopupManager::default(),
             focus: FocusTarget::None,
             focus_stack: FocusStack::new(),
-            bound_keys: HashSet::new(),
+            bound_keys: HashMap::new(),
             bound_buttons: HashSet::new(),
             interaction: None,
             last_pointer_press: None,
@@ -1200,7 +1320,9 @@ impl Crab {
             cursor_image: CursorImageStatus::default_named(),
             next_window_id: 1,
             next_layer_id: 1,
-        }
+        };
+        state.refresh_keyboard_layout();
+        state
     }
 
     /// The initial per-space state for a new output.
@@ -1344,6 +1466,71 @@ impl Crab {
         self.wayland_display = Some(name);
     }
 
+    /// Records the IPC socket path; spawned clients receive it as
+    /// `CRAB_SOCKET`.
+    pub(crate) fn set_ipc_socket(&mut self, path: PathBuf) {
+        self.ipc_socket = Some(path);
+    }
+
+    /// Records the path of the config file used to start the compositor.
+    pub(crate) fn set_config_path(&mut self, path: Option<PathBuf>) {
+        self.config_path = path;
+    }
+
+    /// Reads the active xkb layout name back into the compositor state.
+    pub(crate) fn refresh_keyboard_layout(&mut self) {
+        let keyboard = self.keyboard.clone();
+        let layout = keyboard.with_xkb_state(self, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            xkb.layout_name(xkb.active_layout()).to_owned()
+        });
+        self.keyboard_layout = Some(layout);
+    }
+
+    /// Cycles the active xkb layout, returning whether it actually changed.
+    ///
+    /// Cycling a keymap with a single layout is a no-op, so an event is only
+    /// emitted when the name changes.
+    pub(crate) fn switch_keyboard_layout(&mut self, forward: bool) -> bool {
+        let keyboard = self.keyboard.clone();
+        let previous = self.keyboard_layout.clone();
+        let current = keyboard.with_xkb_state(self, |mut ctx| {
+            if forward {
+                ctx.cycle_next_layout();
+            } else {
+                ctx.cycle_prev_layout();
+            }
+            let xkb = ctx.xkb().lock().unwrap();
+            xkb.layout_name(xkb.active_layout()).to_owned()
+        });
+        self.keyboard_layout = Some(current);
+        self.keyboard_layout != previous
+    }
+
+    /// Replaces the keymap with one built from `layout`.
+    ///
+    /// Smithay compiles the new keymap before touching the live state, so an
+    /// invalid layout leaves the previous keymap in place.
+    pub(crate) fn apply_keyboard_layout(&mut self, layout: &str) -> Result<(), String> {
+        let keyboard = self.keyboard.clone();
+        keyboard
+            .set_xkb_config(
+                self,
+                XkbConfig {
+                    layout,
+                    ..Default::default()
+                },
+            )
+            .map_err(|err| format!("failed to load keyboard layout `{layout}`: {err:?}"))?;
+        self.refresh_keyboard_layout();
+        Ok(())
+    }
+
+    /// Asks the backend to stop the event loop after the current dispatch.
+    pub(crate) fn request_quit(&mut self) {
+        self.quit_requested = true;
+    }
+
     /// Runs the `[autostart] exec_once` commands.
     ///
     /// This is called once the socket exists, so `WAYLAND_DISPLAY` can point at
@@ -1354,7 +1541,11 @@ impl Crab {
             match spawn::parse_command(line) {
                 Ok(argv) => {
                     tracing::info!(command = %line, "starting an autostart command");
-                    spawn::spawn(&argv, self.wayland_display.as_deref());
+                    spawn::spawn(
+                        &argv,
+                        self.wayland_display.as_deref(),
+                        self.ipc_socket.as_deref(),
+                    );
                 }
                 Err(reason) => {
                     tracing::warn!(command = %line, %reason, "invalid autostart command");
@@ -2117,6 +2308,128 @@ impl Crab {
         self.forget_windows(&[id]);
     }
 
+    /// The active key mode: the top of the stack.
+    #[must_use]
+    pub(crate) fn active_mode(&self) -> &str {
+        self.mode_stack
+            .last()
+            .map_or("default", std::string::String::as_str)
+    }
+
+    /// Enter a key mode/submap.
+    ///
+    /// Unknown modes and the reserved `default` name are ignored with a
+    /// warning: a bad IPC request or stale bind must not break input. Entering
+    /// the mode already on top is a no-op so a held key cannot deepen the stack.
+    pub(crate) fn enter_mode(&mut self, name: &str) {
+        if name == "default" || !self.mode_binds.contains_key(name) {
+            tracing::warn!(mode = name, "ignoring request to enter an unknown key mode");
+            return;
+        }
+        if self.active_mode() == name {
+            return;
+        }
+        if self.mode_stack.len() >= MAX_MODE_DEPTH {
+            tracing::warn!(mode = name, "key mode stack is full; ignoring enter_mode");
+            return;
+        }
+        self.mode_stack.push(name.to_owned());
+    }
+
+    /// Leave every active mode, returning to the default mode.
+    pub(crate) fn leave_mode(&mut self) {
+        self.mode_stack.truncate(1);
+    }
+
+    /// Pop one mode from the mode stack, staying in default if it is the only
+    /// entry.
+    pub(crate) fn pop_mode(&mut self) {
+        if self.mode_stack.len() > 1 {
+            self.mode_stack.pop();
+        }
+    }
+
+    /// Drops modes that no longer exist after a reload.
+    ///
+    /// The stack keeps its order but loses unknown names, so a reload that
+    /// deletes the active mode falls back to the mode below it instead of
+    /// leaving input stuck in a mode with no binds.
+    pub(crate) fn prune_modes(&mut self) {
+        self.mode_stack
+            .retain(|mode| mode == "default" || self.mode_binds.contains_key(mode));
+        if self.mode_stack.first().map(String::as_str) != Some("default") {
+            self.mode_stack.insert(0, "default".to_owned());
+        }
+    }
+
+    /// The keyboard binding for `keysym`, walking the mode stack top-down and
+    /// falling back to the default tables.
+    #[must_use]
+    pub(crate) fn key_bind(&self, modifiers: &ModifiersState, keysym: u32) -> Option<BoundAction> {
+        for mode in self.mode_stack.iter().skip(1).rev() {
+            if let Some(compiled) = self.mode_binds.get(mode) {
+                if let Some(bound) = compiled.keys.bind(modifiers, keysym) {
+                    return Some(bound);
+                }
+            }
+        }
+        self.binds.bind(modifiers, keysym)
+    }
+
+    /// The pointer-button binding for `button`, using the same mode stack.
+    #[must_use]
+    pub(crate) fn mouse_bind(
+        &self,
+        modifiers: &ModifiersState,
+        button: u32,
+    ) -> Option<crate::compositor::binds::MouseAction> {
+        for mode in self.mode_stack.iter().skip(1).rev() {
+            if let Some(compiled) = self.mode_binds.get(mode) {
+                if let Some(action) = compiled.mouse.action(modifiers, button) {
+                    return Some(action);
+                }
+            }
+        }
+        self.mouse_binds.action(modifiers, button)
+    }
+
+    /// The scroll binding for `axis`/`positive`, using the same mode stack.
+    #[must_use]
+    pub(crate) fn axis_bind(
+        &self,
+        modifiers: &ModifiersState,
+        axis: crate::compositor::binds::ScrollAxis,
+        positive: bool,
+    ) -> Option<Action> {
+        for mode in self.mode_stack.iter().skip(1).rev() {
+            if let Some(compiled) = self.mode_binds.get(mode) {
+                if let Some(action) = compiled.axis.action(modifiers, axis, positive) {
+                    return Some(action);
+                }
+            }
+        }
+        self.axis_binds.action(modifiers, axis, positive)
+    }
+
+    /// The gesture binding for a direction and finger count, using the same
+    /// mode stack.
+    #[must_use]
+    pub(crate) fn gesture_bind(
+        &self,
+        modifiers: &ModifiersState,
+        dir: crate::compositor::binds::GestureDir,
+        fingers: u32,
+    ) -> Option<Action> {
+        for mode in self.mode_stack.iter().skip(1).rev() {
+            if let Some(compiled) = self.mode_binds.get(mode) {
+                if let Some(action) = compiled.gestures.action(modifiers, dir, fingers) {
+                    return Some(action);
+                }
+            }
+        }
+        self.gesture_binds.action(modifiers, dir, fingers)
+    }
+
     /// The id of the window whose toplevel is `surface`.
     pub(crate) fn window_id_for(&self, surface: &WlSurface) -> Option<WindowId> {
         self.windows
@@ -2165,80 +2478,161 @@ impl Crab {
         else {
             return false;
         };
-        if self.windows[index].rule_applied {
-            return false;
-        }
+        let was_applied = self.windows[index].rule_applied;
         let app_id = self.windows[index].window.app_id.clone();
         let title = self.windows[index].window.title.clone();
+        let output_name = self
+            .outputs
+            .get(&self.windows[index].window.output)
+            .map(|o| o.model.name.as_str());
+        // X11/Xwayland is not supported yet, so every surface is Wayland. This
+        // is a known value, not a matcher that can still arrive: an `x11 = true`
+        // rule must be skipped rather than stalling the rest of the chain.
+        let x11 = false;
         let floating = self.windows[index].window.floating;
         let fullscreen = self.windows[index].window.fullscreen;
-        let rule = match find_window_rule(
-            &self.config.window_rules,
-            app_id.as_deref(),
-            title.as_deref(),
-            floating,
-            fullscreen,
-        ) {
-            RuleSearch::Pending => return false,
-            RuleSearch::NoMatch => {
-                self.windows[index].rule_applied = true;
+
+        if !was_applied {
+            let rule = match find_window_rule(
+                &self.config.window_rules,
+                app_id.as_deref(),
+                title.as_deref(),
+                output_name,
+                x11,
+                floating,
+                fullscreen,
+            ) {
+                RuleSearch::Pending => return false,
+                RuleSearch::NoMatch => {
+                    self.windows[index].rule_applied = true;
+                    return false;
+                }
+                RuleSearch::Matched(rule) => rule.clone(),
+            };
+            self.windows[index].rule_applied = true;
+
+            let occupied = self.occupied_spaces();
+            let area = self.output().model.usable_area;
+            let window = &mut self.windows[index];
+            window.window.pinned |= rule.pinned;
+            window.window.always_on_top |= rule.always_on_top;
+            window.window.rules.pinned |= rule.pinned;
+            window.window.rules.always_on_top |= rule.always_on_top;
+            window.window.rules.no_focus |= rule.no_focus;
+            if let Some(space) = rule.space {
+                if let Some(mask) = SpaceSet::from_dynamic_index(space, occupied) {
+                    window.window.move_to_space(mask);
+                    window.window.rules.spaces = Some(mask);
+                }
+            }
+
+            if rule.open_floating {
+                window.window.rules.floating = Some(true);
+                let requested = rule
+                    .size
+                    .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
+                let size =
+                    clamp_to_hints(requested, window.window.min_size, window.window.max_size);
+                let rect = rule_rect(&rule, size, area);
+                window.size = size;
+                window.location = (rect.x as i32, rect.y as i32).into();
+                window.float_at(rect);
+                window.snap_visual_to(rect);
+                window.configure_to(size);
+                tracing::debug!(
+                    app_id = app_id.as_deref().unwrap_or(""),
+                    title = title.as_deref().unwrap_or(""),
+                    ?size,
+                    x = window.location.x,
+                    y = window.location.y,
+                    "applied a floating window rule"
+                );
+            } else if rule.space.is_some() {
+                tracing::debug!(
+                    app_id = app_id.as_deref().unwrap_or(""),
+                    title = title.as_deref().unwrap_or(""),
+                    spaces = ?window.window.spaces,
+                    "applied a window rule's initial space"
+                );
+            }
+
+            if self.focus.window() == Some(id) {
+                self.refocus_after_view_change();
+            }
+            true
+        } else {
+            // Re-evaluate dynamic rules when title/app_id change
+            let rule = match find_window_rule(
+                &self.config.window_rules,
+                app_id.as_deref(),
+                title.as_deref(),
+                output_name,
+                x11,
+                floating,
+                fullscreen,
+            ) {
+                RuleSearch::Pending | RuleSearch::NoMatch => return false,
+                RuleSearch::Matched(rule) => rule.clone(),
+            };
+            if !rule.dynamic {
                 return false;
             }
-            RuleSearch::Matched(rule) => rule.clone(),
-        };
-        self.windows[index].rule_applied = true;
-
-        let occupied = self.occupied_spaces();
-        let area = self.output().model.usable_area;
-        let window = &mut self.windows[index];
-        window.window.pinned |= rule.pinned;
-        window.window.always_on_top |= rule.always_on_top;
-        window.window.rules.pinned |= rule.pinned;
-        window.window.rules.always_on_top |= rule.always_on_top;
-        window.window.rules.no_focus |= rule.no_focus;
-        if let Some(space) = rule.space {
-            if let Some(mask) = SpaceSet::from_dynamic_index(space, occupied) {
-                window.window.move_to_space(mask);
-                window.window.rules.spaces = Some(mask);
+            let mut changed = false;
+            let occupied = self.occupied_spaces();
+            let area = self.output().model.usable_area;
+            if let Some(window) = self.windows.get_mut(index) {
+                if rule.pinned != window.window.pinned {
+                    window.window.pinned = rule.pinned;
+                    window.window.rules.pinned = rule.pinned;
+                    changed = true;
+                }
+                if rule.always_on_top != window.window.always_on_top {
+                    window.window.always_on_top = rule.always_on_top;
+                    window.window.rules.always_on_top = rule.always_on_top;
+                    changed = true;
+                }
+                if rule.no_focus != window.window.rules.no_focus {
+                    window.window.rules.no_focus = rule.no_focus;
+                    changed = true;
+                }
+                if let Some(space) = rule.space {
+                    if let Some(mask) = SpaceSet::from_dynamic_index(space, occupied) {
+                        if window.window.rules.spaces != Some(mask) || window.window.spaces != mask
+                        {
+                            window.window.move_to_space(mask);
+                            window.window.rules.spaces = Some(mask);
+                            changed = true;
+                        }
+                    }
+                }
+                if rule.open_floating
+                    && (!window.window.floating || window.window.rules.floating != Some(true))
+                {
+                    window.window.rules.floating = Some(true);
+                    let requested = rule
+                        .size
+                        .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
+                    let size =
+                        clamp_to_hints(requested, window.window.min_size, window.window.max_size);
+                    let rect = rule_rect(&rule, size, area);
+                    window.size = size;
+                    window.location = (rect.x as i32, rect.y as i32).into();
+                    window.float_at(rect);
+                    window.snap_visual_to(rect);
+                    window.configure_to(size);
+                    changed = true;
+                }
             }
+            if changed {
+                self.compact_spaces();
+                self.relayout();
+                tracing::debug!("re-applied dynamic window rule actions");
+            }
+            if self.focus.window() == Some(id) {
+                self.refocus_after_view_change();
+            }
+            changed
         }
-
-        if rule.open_floating {
-            window.window.rules.floating = Some(true);
-            let requested = rule
-                .size
-                .map_or(window.size, |(w, h)| Size::new(w.max(1), h.max(1)));
-            let size = clamp_to_hints(requested, window.window.min_size, window.window.max_size);
-            let rect = rule_rect(&rule, size, area);
-            window.size = size;
-            window.location = (rect.x as i32, rect.y as i32).into();
-            window.float_at(rect);
-            window.snap_visual_to(rect);
-            window.configure_to(size);
-            tracing::debug!(
-                app_id = app_id.as_deref().unwrap_or(""),
-                title = title.as_deref().unwrap_or(""),
-                ?size,
-                x = window.location.x,
-                y = window.location.y,
-                "applied a floating window rule"
-            );
-        } else if rule.space.is_some() {
-            tracing::debug!(
-                app_id = app_id.as_deref().unwrap_or(""),
-                title = title.as_deref().unwrap_or(""),
-                spaces = ?window.window.spaces,
-                "applied a window rule's initial space"
-            );
-        }
-
-        // A late title/app-id can make a rule match after the window was already
-        // focused. If the rule now hides it or excludes it from focus, hand the
-        // keyboard to something else.
-        if self.focus.window() == Some(id) {
-            self.refocus_after_view_change();
-        }
-        true
     }
 
     /// Drops `ids` from the focus stack and per-space history and refocuses.
@@ -2783,6 +3177,27 @@ impl Crab {
         self.relayout();
     }
 
+    /// Sets the current space's layout by mode name.
+    ///
+    /// A family name is accepted as an alias for that family's default mode
+    /// (`LayoutKind::from_name`), which keeps `set-layout` and the `layouts`
+    /// reply aligned with the config.
+    ///
+    /// # Errors
+    /// Returns a reason when the name is unknown or no space is visible.
+    pub(crate) fn set_layout(&mut self, name: &str) -> Result<(), String> {
+        let layout =
+            LayoutKind::from_name(name).ok_or_else(|| format!("unknown layout `{name}`"))?;
+        {
+            let Some(space) = self.output_mut().model.current_space_state_mut() else {
+                return Err("no space is visible on the focused output".to_owned());
+            };
+            space.layout = layout;
+        }
+        self.relayout();
+        Ok(())
+    }
+
     /// Applies a layout command (master ratio/count, column width, centring)
     /// to the current space.
     ///
@@ -3048,6 +3463,14 @@ impl Crab {
         let dy = position.y - interaction.grab.y;
         let mode = interaction.mode;
         let rect = self.clamp_rect(mode.rect_after(interaction.origin, dx, dy));
+        // A move feels magnetic at the usable-area edges; a resize keeps the
+        // exact edge the pointer requested so the size does not jump.
+        let rect = match mode {
+            GrabMode::Move => {
+                snap_move_to_edges(rect, self.output().model.usable_area, SNAP_DISTANCE)
+            }
+            GrabMode::Resize { .. } => rect,
+        };
         let resize = matches!(mode, GrabMode::Resize { .. });
 
         if let Some(window) = self.window_mut(interaction.id) {
@@ -3199,7 +3622,8 @@ fn read_toplevel_info(surface: &ToplevelSurface) -> (Option<String>, Option<Stri
 
 /// The result of scanning the rule list for a window.
 enum RuleSearch<'a> {
-    /// An earlier rule needs a title or app id the client has not sent yet.
+    /// An earlier rule needs a title, app id, or output the client has not
+    /// reported yet.
     Pending,
     /// Every rule was decided and none matched.
     NoMatch,
@@ -3210,11 +3634,14 @@ enum RuleSearch<'a> {
 /// Finds the first rule that matches, waiting for matchers that are still unknown.
 ///
 /// Rules are ordered: a rule whose app id or title has not arrived blocks the
-/// scan, because it might match and would precede anything after it.
+/// scan, because it might match and would precede anything after it. The window
+/// protocol (`x11`) is known when the surface is created, so it never blocks.
 fn find_window_rule<'a>(
     rules: &'a [WindowRule],
     app_id: Option<&str>,
     title: Option<&str>,
+    output: Option<&str>,
+    x11: bool,
     floating: bool,
     fullscreen: bool,
 ) -> RuleSearch<'a> {
@@ -3223,6 +3650,9 @@ fn find_window_rule<'a>(
             return RuleSearch::Pending;
         }
         if !rule.title.is_empty() && title.is_none() {
+            return RuleSearch::Pending;
+        }
+        if !rule.output.is_empty() && output.is_none() {
             return RuleSearch::Pending;
         }
         if rule
@@ -3237,7 +3667,12 @@ fn find_window_rule<'a>(
         {
             continue;
         }
-        if rule_matches(rule, app_id, title) {
+        if let Some(expected) = rule.x11 {
+            if x11 != expected {
+                continue;
+            }
+        }
+        if rule_matches(rule, app_id, title, output) {
             return RuleSearch::Matched(rule);
         }
     }
@@ -3246,9 +3681,14 @@ fn find_window_rule<'a>(
 
 /// Whether a `[window_rule]`'s text matchers apply.
 ///
-/// An empty rule `app_id` or `title` list is a wildcard. app ids match exactly;
-/// title fragments match case-insensitively anywhere in the title.
-fn rule_matches(rule: &WindowRule, app_id: Option<&str>, title: Option<&str>) -> bool {
+/// An empty rule `app_id` or `title` or `output` list is a wildcard. app ids match exactly;
+/// title fragments match case-insensitively anywhere in the title. output matches by connector name exactly.
+fn rule_matches(
+    rule: &WindowRule,
+    app_id: Option<&str>,
+    title: Option<&str>,
+    output: Option<&str>,
+) -> bool {
     let app_matches = rule.app_id.is_empty()
         || app_id.is_some_and(|app_id| rule.app_id.iter().any(|expected| expected == app_id));
     let title_matches = rule.title.is_empty()
@@ -3258,7 +3698,9 @@ fn rule_matches(rule: &WindowRule, app_id: Option<&str>, title: Option<&str>) ->
                 .iter()
                 .any(|fragment| title.contains(&fragment.to_lowercase()))
         });
-    app_matches && title_matches
+    let output_matches =
+        rule.output.is_empty() || output.is_some_and(|out| rule.output.iter().any(|o| o == out));
+    app_matches && title_matches && output_matches
 }
 
 /// Where a rule's floating window goes: centred in the usable area, then moved
@@ -3591,6 +4033,52 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_window_snaps_flush_to_an_output_edge() {
+        let area = rect(0.0, 0.0, 1920.0, 1080.0);
+        let snap = |window| snap_move_to_edges(window, area, SNAP_DISTANCE);
+
+        // Near edge, far edge, top, and bottom all snap flush without resizing.
+        assert_eq!(
+            snap(rect(10.0, 120.0, 400.0, 300.0)),
+            rect(0.0, 120.0, 400.0, 300.0)
+        );
+        assert_eq!(
+            snap(rect(1510.0, 120.0, 400.0, 300.0)),
+            rect(1520.0, 120.0, 400.0, 300.0)
+        );
+        assert_eq!(
+            snap(rect(100.0, 10.0, 400.0, 300.0)),
+            rect(100.0, 0.0, 400.0, 300.0)
+        );
+        assert_eq!(
+            snap(rect(100.0, 770.0, 400.0, 300.0)),
+            rect(100.0, 780.0, 400.0, 300.0)
+        );
+
+        // Just outside the threshold is left alone, and the threshold itself
+        // still snaps.
+        assert_eq!(
+            snap(rect(16.1, 120.0, 400.0, 300.0)),
+            rect(16.1, 120.0, 400.0, 300.0)
+        );
+        assert_eq!(
+            snap(rect(16.0, 120.0, 400.0, 300.0)),
+            rect(0.0, 120.0, 400.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn a_window_wider_than_the_area_snaps_its_nearest_edge() {
+        let area = rect(0.0, 0.0, 100.0, 100.0);
+        // Both edges are in range; the far edge is closer, so it wins and the
+        // near edge moves out of the area rather than the size changing.
+        assert_eq!(
+            snap_move_to_edges(rect(-15.0, 0.0, 120.0, 50.0), area, SNAP_DISTANCE),
+            rect(-20.0, 0.0, 120.0, 50.0)
+        );
+    }
+
+    #[test]
     fn a_resize_pins_the_edges_that_are_not_dragged() {
         let origin = rect(100.0, 100.0, 400.0, 300.0);
         let resize = |edges| GrabMode::Resize { edges };
@@ -3650,12 +4138,12 @@ mod tests {
             app_id: vec!["brave".to_owned(), "obsidian".to_owned()],
             ..WindowRule::default()
         };
-        assert!(rule_matches(&rule, Some("brave"), None));
-        assert!(rule_matches(&rule, Some("obsidian"), None));
-        assert!(!rule_matches(&rule, Some("Nautilus"), None));
+        assert!(rule_matches(&rule, Some("brave"), None, None));
+        assert!(rule_matches(&rule, Some("obsidian"), None, None));
+        assert!(!rule_matches(&rule, Some("Nautilus"), None, None));
         // An empty list is a catch-all rule.
         rule.app_id.clear();
-        assert!(rule_matches(&rule, Some("anything"), None));
+        assert!(rule_matches(&rule, Some("anything"), None, None));
     }
 
     #[test]
@@ -3664,17 +4152,17 @@ mod tests {
             title: vec!["picture".to_owned(), "settings".to_owned()],
             ..WindowRule::default()
         };
-        assert!(rule_matches(&rule, None, Some("Save Picture As…")));
-        assert!(rule_matches(&rule, None, Some("SETTINGS")));
-        assert!(!rule_matches(&rule, None, Some("Terminal")));
+        assert!(rule_matches(&rule, None, Some("Save Picture As…"), None));
+        assert!(rule_matches(&rule, None, Some("SETTINGS"), None));
+        assert!(!rule_matches(&rule, None, Some("Terminal"), None));
         // Both matchers must agree.
         let both = WindowRule {
             app_id: vec!["foot".to_owned()],
             title: vec!["vim".to_owned()],
             ..WindowRule::default()
         };
-        assert!(rule_matches(&both, Some("foot"), Some("nvim")));
-        assert!(!rule_matches(&both, Some("foot"), Some("shell")));
+        assert!(rule_matches(&both, Some("foot"), Some("nvim"), None));
+        assert!(!rule_matches(&both, Some("foot"), Some("shell"), None));
     }
 
     #[test]
@@ -3693,15 +4181,76 @@ mod tests {
         // The first rule could still match, so the catch-all must not jump the
         // queue before the title arrives.
         assert!(matches!(
-            find_window_rule(&rules, Some("app"), None, false, false),
+            find_window_rule(&rules, Some("app"), None, None, false, false, false),
             RuleSearch::Pending
         ));
-        match find_window_rule(&rules, Some("app"), Some("Save As"), false, false) {
+        match find_window_rule(
+            &rules,
+            Some("app"),
+            Some("Save As"),
+            None,
+            false,
+            false,
+            false,
+        ) {
             RuleSearch::Matched(rule) => assert!(rule.no_focus),
             _ => panic!("the title rule should match"),
         }
         assert!(matches!(
-            find_window_rule(&rules, Some("app"), Some("Terminal"), false, false),
+            find_window_rule(
+                &rules,
+                Some("app"),
+                Some("Terminal"),
+                None,
+                false,
+                false,
+                false,
+            ),
+            RuleSearch::Matched(rule) if rule.open_floating
+        ));
+    }
+
+    #[test]
+    fn an_unmatchable_x11_rule_does_not_block_later_rules() {
+        let rules = [
+            WindowRule {
+                x11: Some(true),
+                open_floating: true,
+                ..WindowRule::default()
+            },
+            WindowRule {
+                no_focus: true,
+                ..WindowRule::default()
+            },
+        ];
+        // Wayland windows cannot satisfy `x11 = true`, so that rule is skipped
+        // and the later catch-all still applies.
+        match find_window_rule(
+            &rules,
+            Some("foot"),
+            Some("Terminal"),
+            None,
+            false,
+            false,
+            false,
+        ) {
+            RuleSearch::Matched(rule) => {
+                assert!(rule.no_focus);
+                assert!(!rule.open_floating);
+            }
+            _ => panic!("the catch-all after the x11 rule should match"),
+        }
+        // On an X11 surface the first rule still wins.
+        assert!(matches!(
+            find_window_rule(
+                &rules,
+                Some("foot"),
+                Some("Terminal"),
+                None,
+                true,
+                false,
+                false,
+            ),
             RuleSearch::Matched(rule) if rule.open_floating
         ));
     }
@@ -3714,11 +4263,11 @@ mod tests {
             ..WindowRule::default()
         }];
         assert!(matches!(
-            find_window_rule(&rules, None, None, true, false),
+            find_window_rule(&rules, None, None, None, false, true, false),
             RuleSearch::Matched(_)
         ));
         assert!(matches!(
-            find_window_rule(&rules, None, None, false, false),
+            find_window_rule(&rules, None, None, None, false, false, false),
             RuleSearch::NoMatch
         ));
     }

@@ -9,6 +9,7 @@
 //! Each child is waited for on a short-lived thread; without that, exited
 //! children would stay zombies until crab itself exits.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Splits a command line into an argument vector.
@@ -81,8 +82,10 @@ pub(crate) fn parse_command(line: &str) -> Result<Vec<String>, String> {
 /// Runs `argv` detached, waiting for it in the background.
 ///
 /// `wayland_display` is crab's socket name; it overrides the inherited
-/// `WAYLAND_DISPLAY` so the child talks to this compositor.
-pub(crate) fn spawn(argv: &[String], wayland_display: Option<&str>) {
+/// `WAYLAND_DISPLAY` so the child talks to this compositor. `ipc_socket`, when
+/// present, is exported as `CRAB_SOCKET` so `crab-cli` and bars launched by the
+/// child find the IPC server even when `WAYLAND_DISPLAY` is not reloaded.
+pub(crate) fn spawn(argv: &[String], wayland_display: Option<&str>, ipc_socket: Option<&Path>) {
     let Some((program, args)) = argv.split_first() else {
         return;
     };
@@ -90,6 +93,16 @@ pub(crate) fn spawn(argv: &[String], wayland_display: Option<&str>) {
     command.args(args).stdin(Stdio::null());
     if let Some(name) = wayland_display {
         command.env("WAYLAND_DISPLAY", name);
+    }
+    match ipc_socket {
+        Some(path) => {
+            command.env("CRAB_SOCKET", path);
+        }
+        // Do not let a child inherit a stale socket from the session crab was
+        // launched in: if this compositor has no IPC, the variable must be gone.
+        None => {
+            command.env_remove("CRAB_SOCKET");
+        }
     }
     match command.spawn() {
         Ok(mut child) => {

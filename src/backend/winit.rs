@@ -13,19 +13,26 @@
 //! renderer and the input backend differ.
 
 use std::os::unix::io::AsFd as _;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use crab::config::Config;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
+use smithay::reexports::calloop::channel::{self as calloop_channel};
 use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_server::{Display, ListeningSocket};
 use smithay::utils::Transform;
 
+use crate::compositor::reload;
 use crate::compositor::state::{ClientState, Crab};
 use crate::compositor::{input, render};
+use crate::ipc;
 
 /// Base name for crab's Wayland socket; `bind_auto` appends `-N`.
 const SOCKET_BASENAME: &str = "crab";
@@ -36,6 +43,14 @@ struct LoopData {
     state: Crab,
     backend: WinitGraphicsBackend<GlesRenderer>,
     socket: ListeningSocket,
+    /// `None` when no runtime directory is available; the compositor still runs.
+    ipc: Option<ipc::Server>,
+    #[allow(dead_code)]
+    config_watcher: Option<RecommendedWatcher>,
+    #[allow(dead_code)]
+    reload_generation: u64,
+    #[allow(dead_code)]
+    pending_reload_gen: u64,
 }
 
 /// Requests a frame, asking winit to deliver a `Redraw` only when the output
@@ -50,18 +65,38 @@ fn request_redraw(data: &mut LoopData) {
     }
 }
 
+fn reload_config_now(data: &mut LoopData) {
+    match reload::reload(&mut data.state) {
+        reload::ReloadOutcome::Reloaded { needs_redraw } => {
+            tracing::info!("config reloaded");
+            if needs_redraw {
+                request_redraw(data);
+            }
+        }
+        reload::ReloadOutcome::Failed { message } => {
+            tracing::error!(%message, "config reload failed, keeping previous config");
+            request_redraw(data);
+        }
+        reload::ReloadOutcome::NoPath => {
+            tracing::debug!("config reload requested but no config file is set");
+        }
+        reload::ReloadOutcome::Unchanged => {}
+    }
+}
+
 /// Runs the nested compositor until the window is closed.
 ///
 /// # Errors
 /// Fails if the Wayland display, the socket, the winit backend, or the GLES
 /// renderer cannot be created.
-pub fn run(config: &Config) -> anyhow::Result<()> {
+pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Result<()> {
     let display: Display<Crab> =
         Display::new().map_err(|err| anyhow::anyhow!("create the Wayland display: {err:?}"))?;
     let dh = display.handle();
     // Winit's default GL framebuffer is bottom-up, so the renderer must flip
     // it; this is not the output's Wayland transform, which stays Normal.
     let mut state = Crab::new(&dh, config, Transform::Flipped180);
+    state.set_config_path(config_path.map(|p| p.to_path_buf()));
 
     let socket = ListeningSocket::bind_auto(SOCKET_BASENAME, 0..32)
         .map_err(|err| anyhow::anyhow!("bind a Wayland socket: {err:?}"))?;
@@ -70,6 +105,17 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| SOCKET_BASENAME.to_owned());
     state.set_wayland_display(socket_name.clone());
+
+    let ipc = match ipc::Server::bind(&socket_name) {
+        Ok(server) => server,
+        Err(err) => {
+            tracing::warn!(%err, "IPC server disabled");
+            None
+        }
+    };
+    if let Some(server) = &ipc {
+        state.set_ipc_socket(server.path().to_path_buf());
+    }
 
     let (backend, winit_source) = winit::init::<GlesRenderer>()
         .map_err(|err| anyhow::anyhow!("initialise the winit backend: {err:?}"))?;
@@ -83,7 +129,8 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 
     let mut event_loop: EventLoop<'static, LoopData> =
         EventLoop::try_new().context("create the calloop event loop")?;
-    let signal = event_loop.get_signal();
+    let signal = Rc::new(event_loop.get_signal());
+    let winit_signal = Rc::clone(&signal);
 
     // 1. Window events. winit drives redraws, so rendering happens here.
     event_loop
@@ -126,7 +173,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
                     input::handle(&mut data.state, event);
                     request_redraw(data);
                 }
-                WinitEvent::CloseRequested => signal.stop(),
+                WinitEvent::CloseRequested => winit_signal.stop(),
                 _ => {}
             },
         )
@@ -198,11 +245,113 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         )
         .map_err(|err| anyhow::anyhow!("insert the display source: {err:?}"))?;
 
+    // 4. IPC clients. The listener source accepts connections and inserts a
+    //    per-client read source; writes go through the server's cloned writer.
+    if let Some(server) = &ipc {
+        let listener = server
+            .try_clone_listener()
+            .context("clone the IPC listener")?;
+        let accept_handle = event_loop.handle();
+        let ipc_signal = Rc::clone(&signal);
+        event_loop
+            .handle()
+            .insert_source(
+                Generic::new(listener, Interest::READ, Mode::Level),
+                move |_, _, data: &mut LoopData| {
+                    let Some(ipc) = &mut data.ipc else {
+                        return Ok(PostAction::Continue);
+                    };
+                    for (id, stream) in ipc.accept() {
+                        let handle = accept_handle.clone();
+                        let client_signal = Rc::clone(&ipc_signal);
+                        let inserted = handle.insert_source(
+                            Generic::new(stream, Interest::READ, Mode::Level),
+                            move |_, reader, data: &mut LoopData| {
+                                let LoopData {
+                                    ipc: Some(ipc),
+                                    state,
+                                    backend,
+                                    ..
+                                } = data
+                                else {
+                                    return Ok(PostAction::Remove);
+                                };
+                                let outcome = ipc.client_event(id, reader, state);
+                                if outcome.redraw && state.output_mut().model.queue_redraw() {
+                                    backend.window().request_redraw();
+                                }
+                                if state.quit_requested {
+                                    client_signal.stop();
+                                }
+                                Ok(if outcome.keep {
+                                    PostAction::Continue
+                                } else {
+                                    PostAction::Remove
+                                })
+                            },
+                        );
+                        if let Err(err) = inserted {
+                            tracing::warn!(?err, "failed to insert an IPC client source");
+                        }
+                    }
+                    Ok(PostAction::Continue)
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("insert the IPC listener source: {err:?}"))?;
+    }
+
+    // File watcher for hot reload (best effort).
+    let (config_tx, config_rx) = calloop_channel::channel::<()>();
+    let mut config_watcher: Option<RecommendedWatcher> = None;
+    if let Some(path) = config_path {
+        let watch_path = path.to_path_buf();
+        if let Some(parent) = watch_path.parent().map(|p| p.to_path_buf()) {
+            let tx_clone = config_tx.clone();
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    match ev.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                            // Only trigger for the target config or its parent writes.
+                            let relevant = ev.paths.is_empty()
+                                || ev.paths.iter().any(|p| p == &watch_path)
+                                || ev
+                                    .paths
+                                    .iter()
+                                    .any(|p| p.file_name() == watch_path.file_name());
+                            if relevant {
+                                let _ = tx_clone.send(());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }) {
+                Ok(mut watcher) => {
+                    if let Err(err) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+                        tracing::warn!(%err, path = %parent.display(), "failed to watch config directory");
+                    } else {
+                        config_watcher = Some(watcher);
+                        tracing::info!(path = %parent.display(), "watching config directory for changes");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "failed to create config watcher");
+                }
+            }
+        } else {
+            tracing::warn!("config path has no parent directory; hot reload disabled");
+        }
+    }
+
     let mut data = LoopData {
         display,
         state,
         backend,
         socket,
+        ipc,
+        config_watcher,
+        reload_generation: 0,
+        pending_reload_gen: 0,
     };
     tracing::info!(
         socket = %socket_name,
@@ -211,12 +360,45 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     );
     data.state.run_autostart();
 
+    // Config file change channel (debounced with timer).
+    let debounce_handle = event_loop.handle();
+    event_loop
+        .handle()
+        .insert_source(config_rx, move |event, _, data: &mut LoopData| {
+            let calloop_channel::Event::Msg(()) = event else {
+                return;
+            };
+            data.reload_generation = data.reload_generation.wrapping_add(1);
+            let generation = data.reload_generation;
+            let handle = debounce_handle.clone();
+            let _ = handle.insert_source(
+                Timer::from_duration(Duration::from_millis(250)),
+                move |_, _, data: &mut LoopData| {
+                    if generation == data.reload_generation {
+                        reload_config_now(data);
+                    }
+                    TimeoutAction::Drop
+                },
+            );
+        })
+        .map_err(|err| anyhow::anyhow!("insert config reload channel: {err:?}"))?;
+
+    let run_signal = Rc::clone(&signal);
     event_loop
         .run(None, &mut data, |data| {
             if let Err(err) = data.display.flush_clients() {
                 tracing::error!(?err, "failed to flush Wayland clients");
             }
+            if let Some(ipc) = &mut data.ipc {
+                ipc.sync(&data.state);
+            }
+            if data.state.quit_requested {
+                run_signal.stop();
+            }
         })
         .map_err(|err| anyhow::anyhow!("run the calloop event loop: {err:?}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {}

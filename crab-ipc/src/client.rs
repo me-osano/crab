@@ -22,15 +22,57 @@ pub enum IpcError {
 
 /// Resolves the compositor socket path.
 ///
-/// Prefers `$CRAB_SOCKET`; otherwise derives `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`.
+/// Prefers `$CRAB_SOCKET`; otherwise derives
+/// `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`. Returns `None` when neither
+/// `$CRAB_SOCKET` nor `$XDG_RUNTIME_DIR` is set.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("CRAB_SOCKET") {
         return Some(PathBuf::from(explicit));
     }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_owned());
-    Some(PathBuf::from(runtime).join(format!("crab-{display}.sock")))
+    socket_path_for(&display)
+}
+
+/// Resolves the socket path for a specific compositor display name.
+///
+/// `$CRAB_SOCKET` still wins, so a test harness or a session manager can put
+/// the socket somewhere else. Otherwise the name is sanitized (it may be an
+/// absolute path) and placed under `$XDG_RUNTIME_DIR`.
+#[must_use]
+pub fn socket_path_for(display: &str) -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("CRAB_SOCKET") {
+        return Some(PathBuf::from(explicit));
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    Some(PathBuf::from(runtime).join(format!("crab-{}.sock", sanitize_display(display))))
+}
+
+/// Makes a Wayland display name safe as one path component.
+///
+/// Wayland display names are usually `wayland-0`/`crab-0`, but the protocol
+/// allows an absolute path. Keep only characters that cannot escape the runtime
+/// directory, and never return an empty name.
+fn sanitize_display(display: &str) -> String {
+    let base = display
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("wayland-0");
+    let sanitized: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "wayland-0".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 /// A blocking connection to a running crab instance.
@@ -125,9 +167,11 @@ mod tests {
 
     #[test]
     fn action_round_trips() {
-        let action = super::super::protocol::Action::ViewTag { index: 3 };
+        let action = super::super::protocol::Action::ViewSpace { index: 3 };
         let json = serde_json::to_string(&action).unwrap();
-        assert_eq!(json, r#"{"view-tag":{"index":3}}"#);
+        assert_eq!(json, r#"{"view-space":{"index":3}}"#);
+        let back: super::super::protocol::Action = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, action);
     }
 
     #[test]
@@ -144,5 +188,16 @@ mod tests {
         if let Some(path) = socket_path() {
             assert!(path.to_string_lossy().contains("crab") || path.is_absolute());
         }
+    }
+
+    #[test]
+    fn display_names_are_safe_path_components() {
+        assert_eq!(sanitize_display("wayland-0"), "wayland-0");
+        assert_eq!(sanitize_display("crab_12.3"), "crab_12.3");
+        assert_eq!(sanitize_display("/run/user/1000/wayland-1"), "wayland-1");
+        assert_eq!(sanitize_display("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_display("bad name"), "bad_name");
+        assert_eq!(sanitize_display(""), "wayland-0");
+        assert_eq!(sanitize_display("/"), "wayland-0");
     }
 }

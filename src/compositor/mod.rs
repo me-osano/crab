@@ -17,11 +17,13 @@
 //! Backends (`src/backend/`) sit outside this module: they are the platform
 //! layer that drives it, not part of it.
 
+pub(crate) mod actions;
 pub(crate) mod binds;
 pub(crate) mod fit;
 pub(crate) mod handlers;
 pub(crate) mod input;
 pub(crate) mod layout;
+pub(crate) mod reload;
 pub(crate) mod render;
 pub(crate) mod spawn;
 pub(crate) mod state;

@@ -68,6 +68,13 @@ use crate::compositor::state::{ClosingWindow, Crab, ManagedWindow, WindowLayer};
 /// Background color of the compositor (dark slate).
 const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
 
+use crate::compositor::reload;
+
+const BANNER_BG: Color32F = Color32F::new(0.8, 0.1, 0.1, 0.9);
+const BANNER_FG: Color32F = Color32F::new(1.0, 1.0, 1.0, 1.0);
+const BANNER_PAD_X: i32 = 8;
+const BANNER_PAD_Y: i32 = 6;
+
 /// How far a sliding window falls while it closes, in logical pixels.
 const CLOSE_SLIDE: f64 = 16.0;
 
@@ -274,6 +281,53 @@ pub(crate) fn render_output<B: OutputBackend>(state: &mut Crab, output: OutputId
         }
     }
     drop(layer_map);
+
+    // Config error banner (red bar with error).
+    if let Some(msg) = reload::banner_message(state) {
+        let msg = format!("Config error: {msg}");
+        let glyph_w: i32 = 8;
+        let glyph_h: i32 = 8;
+        let scale: i32 = 1;
+        let text_w = (msg.len() as i32) * glyph_w * scale;
+        let banner_h = glyph_h * scale + BANNER_PAD_Y * 2;
+        let rect = Rectangle::new(
+            Point::from((output_origin.x, output_origin.y)),
+            Size::from((text_w + BANNER_PAD_X * 2, banner_h)),
+        );
+        elements.push(SceneElement::Solid(SolidColorRenderElement::new(
+            Id::new(),
+            rect,
+            CommitCounter::default(),
+            BANNER_BG,
+            Kind::Unspecified,
+        )));
+        // Draw simple text using font8x8 legacy if available.
+        let mut x = output_origin.x + BANNER_PAD_X;
+        let y = output_origin.y + BANNER_PAD_Y;
+        for ch in msg.chars().take(256) {
+            let byte = ch as usize;
+            if byte < 128 {
+                let font = font8x8::legacy::BASIC_LEGACY[byte];
+                for (row, bits) in font.iter().enumerate() {
+                    for col in 0..8 {
+                        if (bits & (1 << col)) != 0 {
+                            elements.push(SceneElement::Solid(SolidColorRenderElement::new(
+                                Id::new(),
+                                Rectangle::new(
+                                    Point::from((x + col * scale, y + (row as i32) * scale)),
+                                    Size::from((scale, scale)),
+                                ),
+                                CommitCounter::default(),
+                                BANNER_FG,
+                                Kind::Unspecified,
+                            )));
+                        }
+                    }
+                }
+            }
+            x += glyph_w * scale;
+        }
+    }
 
     // And the cursor on top of all of it. A client's own cursor surface and the
     // built-in arrow are mutually exclusive; the arrow is made of solid runs so

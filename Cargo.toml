@@ -39,6 +39,8 @@ crab-ipc = { path = "crab-ipc", version = "0.0.0" }
 anyhow = "1"
 bitflags = "2"
 clap = { version = "4", features = ["derive", "env"] }
+font8x8 = { version = "0.3", default-features = false, features = ["std"] }
+notify = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -68,7 +70,11 @@ smithay = { version = "0.7", default-features = false, features = [
 anyhow = { workspace = true }
 bitflags = { workspace = true }
 clap = { workspace = true }
+crab-ipc = { workspace = true }
+font8x8 = { workspace = true }
+notify = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 smithay = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
