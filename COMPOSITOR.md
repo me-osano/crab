@@ -489,6 +489,9 @@ Idle ──queue_redraw──► Queued ──render──► WaitingForVBlank �
 
 ### 8.3 Render element ordering (bottom to top)
 
+> Design decided in **ADR-0008**: crab builds this list itself; Smithay `Space`
+> is not the scene.
+
 1. Background layer-shell surfaces (`Background`)
 2. Bottom layer-shell surfaces (`Bottom`)
 3. Tiled windows (z-hint order) with borders/shadows
@@ -618,6 +621,9 @@ Clients commit new buffers after being configured, not instantly. For smooth vis
 
 ## 10. Visual effects
 
+> Design decided in **ADR-0007**: own GLES passes over the ADR-0008 scene; no
+> scenefx/wlroots renderer dependency.
+
 All effects are optional render passes with a performance budget and a kill switch.
 
 | Effect | Approach | Notes |
@@ -633,7 +639,7 @@ All effects are optional render passes with a performance budget and a kill swit
 
 - **Corner radius first**, then borders, then shadows. Blur last; it is expensive and interacts with damage tracking.
 - Effects must not break direct scanout when no effect applies to the scanned-out window.
-- Provide `effects { enabled false }` globally and per-window rule overrides (`blur false`).
+- Provide `[effects] enabled = false` globally and per-window rule overrides (`blur = false`).
 - Expose a "low power mode" that disables blur and shadows on battery.
 
 ---
@@ -683,7 +689,9 @@ All effects are optional render passes with a performance budget and a kill swit
   never sees its release keeps the titlebar pressed.
 - A resize drags the requested edge(s) and pins the opposite ones, so pulling the left or
   top edge moves the origin too. It stops at one pixel rather than crossing the fixed edge.
-- Snap-to-edges and tile-by-drag-to-edge can come later as stacking-mode polish.
+- A moved window snaps flush to the usable-area edge when either edge is within
+  16 logical px; resizes keep the exact requested edge. Tile-by-drag-to-edge can
+  come later as stacking-mode polish.
 
 ---
 
@@ -913,36 +921,65 @@ also pending.
 
 ## 14. IPC
 
+> Design decided in **ADR-0005**: a fresh, niri-shaped schema (not niri
+> wire-compatible), with `ext-workspace-v1` as the primary bar interface.
+
 ### Transport
 
 - Unix domain socket at `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`; path exported as `CRAB_SOCKET`.
 - Newline-delimited JSON, request/response plus an **event stream** subscription.
-- A `crab-cli` CLI wraps it (`--json` for machine output).
+- A `crab-cli` CLI wraps it (`--raw` for compact machine output).
 
-### Requests (initial set)
+### Requests (implemented set)
 
 ```
 version | outputs | spaces | windows | focused-window | layouts
-action <Action>                  # same actions as keybinds
-set-layout --space N --output X <layout>
-config reload | validate
-event-stream
+dispatch {"action": <Action>}    # same canonical Action as keybinds
+subscribe                        # snapshot, then deltas; event-only connection
 ```
+
+`spaces` lists the spaces that currently exist (occupied or visible), not all 32
+slots. `set-layout` is a `dispatch` action (`{"set-layout":{"name":"monocle"}}`);
+a family name is accepted as an alias for that family's default mode, and
+`layouts` reports both families and modes. A connection is either
+request/response or, after `subscribe`, event-only; a watcher uses a second
+connection to dispatch.
+
+`config reload|validate` remain planned. Until hot reload lands, dispatching
+`reload-config` returns a protocol error and a config bind for it is skipped with
+a startup warning.
 
 ### Events
 
-`WindowOpened/Closed/Changed/Focused`, `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
+`Snapshot` first, then `WindowOpened/Closed/Changed/Focused`,
+`SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `Urgent`,
+`KeyboardLayoutChanged`, and `ConfigReloaded/ConfigError`.
+
+`Snapshot.keyboard_layout` reports the active xkb layout name and
+`SwitchKeyboardLayout { forward }` cycles it; both keybinds
+(`next_keyboard_layout`, `prev_keyboard_layout`) and `dispatch` go through the
+same action. A keymap with a single layout makes the switch a no-op. Hot reload
+applies a changed `input.keyboard.xkb_rules_layout` atomically: the new keymap
+is compiled before the config is swapped, and a bad layout leaves the previous
+one in place.
+
+Unknown event kinds deserialize as `Unknown` so old clients ignore additions.
 
 ### Rules
 
-- **Schema is versioned.** Additive changes only within a major version; include a version request.
+- **Schema is versioned.** Additive changes only within a major version; include a version request. `PROTOCOL_VERSION` is 2.
 - IPC types live in `crab-ipc` so third-party Rust tools can depend on it.
-- Keep action names identical between config binds and IPC (one `Action` enum, serialized both ways).
+- Keep action names identical between config binds and IPC: both produce the same `crab_ipc::Action` enum. The config parser accepts mango spellings as aliases but stores the canonical variant.
+- The server is a nonblocking `calloop` source. Request lines and read buffers are bounded; a client that stops reading its replies is disconnected instead of stalling the compositor.
+- Spawned and autostarted children receive `CRAB_SOCKET` alongside `WAYLAND_DISPLAY` when IPC is enabled; otherwise a stale inherited socket is removed from their environment.
 - Document the protocol so bar authors can integrate (waybar modules, eww, custom scripts).
 
 ---
 
 ## 15. XWayland
+
+> Design decided in **ADR-0006**: `xwayland-satellite` with on-demand
+> `-listenfd` activation; no in-process X11 WM.
 
 Options:
 
@@ -1127,7 +1164,7 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 - [ ] Hot reload with atomic apply and error banner
 - [ ] Keybinds (keyboard, mouse, modes), hotkey overlay
 - [ ] Window rules (app-id/title match, floating, space, size, opacity, focus)
-- [ ] IPC socket, JSON protocol, event stream, `crab-cli`
+- [x] IPC socket, JSON protocol, event stream, `crab-cli` (query/dispatch/watch; config reload pending)
 - [ ] Documentation of config and IPC; default config shipped
 - **Exit criteria:** bars can show spaces/windows via IPC; config edits apply live
 

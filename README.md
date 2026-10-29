@@ -22,7 +22,7 @@ winit window; it does not yet run a real session.
 ```
 src/              the compositor: Smithay glue, backends, handlers, render, input
   lib.rs          library surface: the pure modules below only (reusable, testable)
-  core/           pure data: ids, geometry, colors, tags, window model (no Smithay)
+  core/           pure data: ids, geometry, colors, spaces, window model (no Smithay)
   config/         TOML parsing, validation, defaults (no Smithay)
   layout/         pure layout engine: Layout trait + implementations (no Smithay)
   animation/      pure springs/easing curves + animated scalars (no Smithay)

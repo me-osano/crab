@@ -7,7 +7,11 @@ Index of the project's written material. Start with the roadmap.
 | [`../ROADMAP.md`](../ROADMAP.md) | **What to build and why.** Feature matrix with provenance, protocol matrix, milestones, decisions. |
 | [`../TODO.md`](../TODO.md) | **How to build it.** Granular chronological task list (M0–M11 + HDR). |
 | [`../COMPOSITOR.md`](../COMPOSITOR.md) | Design detail: data model, layout system, render pipeline, protocols. |
+| [`CONFIG.md`](./CONFIG.md) | **Configuration reference.** File locations, all sections, defaults, bind/action syntax, rules, hot reload, and status of applied/pending features. |
+| [`IPC.md`](./IPC.md) | **IPC protocol and bar integration.** Socket, requests/responses/events, actions, bar author guidance with examples, and tips. |
+| [`CLI.md`](./CLI.md) | **crab-cli usage.** Commands for querying state, dispatching actions, watching events, and config validation/reload. |
 | [`decisions/README.md`](./decisions/README.md) | Architecture Decision Records (ADRs). |
+| [`reference/anvil.md`](./reference/anvil.md) | Smithay `anvil` v0.7.0 walkthrough: patterns to borrow, and what crab deliberately does differently. |
 
 ## Architecture at a glance
 

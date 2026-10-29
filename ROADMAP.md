@@ -751,13 +751,15 @@ attribution — including the HDR/colour-management work — while keeping the
   output; multi-space view and multi-space windows) with **layout families + modes**;
   "workspace" is a protocol/IPC projection (`ext-workspace-v1`), not a core type.
   ✅ *decided 2026-10-17*
-- **ADR-0005 — IPC** *(open)*: reuse niri's `niri-ipc` schema shape, or a fresh
-  schema; and whether to expose `ext-workspace` as the primary bar interface
-  (recommended).
-- **ADR-0006 — XWayland** *(open)*: `xwayland-satellite` (recommended) vs in-process
-  (cosmic).
-- **ADR-0007 — Effects** *(open)*: implement on Smithay GLES ourselves vs adopt a
-  scenefx-like crate.
+- **ADR-0005 — IPC:** a **fresh, niri-shaped schema** (not niri wire-compatible);
+  `ext-workspace-v1` is the **primary bar interface**, with IPC for names,
+  urgency, window data, dispatch, and config. ✅ *decided 2026-10-23*
+- **ADR-0006 — XWayland:** **`xwayland-satellite`** with `-listenfd` on-demand
+  activation; no in-process X11 WM. ✅ *decided 2026-10-23*
+- **ADR-0007 — Effects:** implement **our own GLES passes** over the custom scene;
+  no scenefx/wlroots renderer dependency. ✅ *decided 2026-10-23*
+- **ADR-0008 — Client model:** a **custom ordered element list (niri-style)**, not
+  Smithay `Space`/`DynamicScene`/`WindowElement`. ✅ *decided 2026-10-23*
 
 **M0 foundation choices** (recorded in `TODO.md` Phase 0; promote to ADRs if revisited):
 

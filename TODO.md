@@ -14,10 +14,36 @@ from niri/cosmic/mango with attribution (Appendix A). M0 foundation choices
 Phase 0 below.
 
 **Timeline:** part-time solo, **~37–55 weeks** cumulative to `v0.1.0` (M0–M11). Order
-matters more than dates. HDR/colour is a separate post-0.1 track.
+matters more than dates. HDR/colour is a separate post-0.1 track. The niri-borrow
+work in `IMPROV.md` is additional to this estimate and will lengthen the schedule,
+especially M4–M6, rather than fit inside the original ranges.
 
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
+
+**Current state (2026-10-27):** 292 workspace tests pass; `cargo fmt --check`,
+clippy, and `check-boundaries.sh` are clean. Only the winit backend renders
+today: `tty` probes devices and bails, `headless` validates only. The 2026-10
+review, current-state comparison, and full niri borrow backlog live in
+**`IMPROV.md`** (`C1–C6`, `B01–B49`); this file tracks the milestones and only
+cross-references the actionable items.
+
+**Start here (from `IMPROV.md`):**
+1. `C3–C6` plus `B41`/`B43` — fix layer origin, focused-output scoping,
+   rename `primary_output`, and build the two-output/integration/CI harness.
+   This is the correctness gate in §2.9.
+2. `B09`/`B10` and `B12`/`B15`/`B16`/`B17` — a real TTY session, libinput, frame
+   clock, DMA-BUF, presentation-time, and cursor shape. This is what makes crab a
+   daily driver.
+3. `B01`/`B02` — configure transactions and throttling.
+4. `B05` — preserve space identity and layout state across output unplug/replug.
+5. `B18`/`B19`/`B14`/`B20` — `ext-workspace`, foreign-toplevel, session lock, and
+   idle.
+
+**How to read the backlog:** items tagged `[IMPROV Bxx]` are summaries; the design,
+evidence, acceptance criteria, and niri file references are in `IMPROV.md` §4.
+Do not transplant niri's workspace storage, config schema, render tree, or
+XWayland integration (see `IMPROV.md` §7).
 
 ---
 
@@ -39,10 +65,10 @@ locally as the canonical reference.
 - [x] `docs/decisions/0002-renderer-and-hdr.md` — **GLES**, phased HDR.
 - [x] `docs/decisions/0003-config-format.md` — **TOML** (accepted; via `serde` + the `toml` crate, `snake_case` keys).
 - [x] `docs/decisions/0004-space-model.md` — **unified numbered spaces** + **layout families** (accepted 2026-10-17).
-- [ ] `docs/decisions/0005-ipc-schema.md` — niri-`ipc` shape vs fresh; `ext-workspace` as primary bar interface.
-- [ ] `docs/decisions/0006-xwayland.md` — **`xwayland-satellite`** (recommended) vs in-process.
-- [ ] `docs/decisions/0007-effects.md` — own GLES implementation vs a scenefx-like crate.
-- [ ] `docs/decisions/0008-client-model.md` — custom element list (niri-style) vs Smithay `Space` (see Appendix A pitfall).
+- [x] `docs/decisions/0005-ipc-schema.md` — **fresh, niri-shaped schema; `ext-workspace-v1` is the primary bar interface** (accepted 2026-10-23).
+- [x] `docs/decisions/0006-xwayland.md` — **`xwayland-satellite`** with `-listenfd` on-demand activation; no in-process X11 WM (accepted 2026-10-23).
+- [x] `docs/decisions/0007-effects.md` — **own GLES effect passes over the ADR-0008 scene**, no scenefx/wlroots dependency (accepted 2026-10-23).
+- [x] `docs/decisions/0008-client-model.md` — **custom ordered element list (niri-style)**, not Smithay `Space` (accepted 2026-10-23; see Appendix A pitfall).
 
 **Exit criteria:** `docs/decisions/README.md` index current; every framework-level choice has an ADR or a written rationale.
 
@@ -62,15 +88,15 @@ locally as the canonical reference.
 
 ### 0.4 Smithay baseline
 - [x] Smithay pinned to **`0.7.0` (crates.io)** — a deliberate deviation from "a git revision": we need no unreleased patches yet, and a released space is reproducible and matches cosmic-comp. The vendored git revision arrives with HDR (ADR-0002, post-0.1).
-- [ ] Clone and build `anvil` locally; walk its `state.rs`, backend selection, and handler wiring.
+- [x] Clone and build `anvil` locally; walk its `state.rs`, backend selection, and handler wiring. *(v0.7.0: winit build + nested launch pass; the default/udev build is blocked by the host's `libdisplay-info` 0.3 vs v0.7.0's `<0.3` pin. Notes in [`docs/reference/anvil.md`](docs/reference/anvil.md).)*
 - [x] Confirmed the toolchain builds `smithay` + `calloop` + `input` + `drm`/`gbm`/`egl`/`udev`/`libseat` on the target distro: the backends are cargo features (`backend-tty` pulls the DRM/session/input stack) and CI runs `cargo clippy --all-features`, so the whole stack keeps building. `renderer_multi` on (under `backend-tty`), `backend_vulkan` off (ADR-0002), `xwayland` deferred to M9.
 
 ### 0.5 CI, logging, errors
-- [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `scripts/check-boundaries.sh`, `cargo deny check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now.)*
+- [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `scripts/check-boundaries.sh`, `cargo deny check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now. `--all-features`, MSRV 1.85, and a headless smoke test are still open — B43 in §2.9.)*
 - [x] `tracing` + `tracing-subscriber` (env-filter), panic hook writing a backtrace to `$XDG_STATE_HOME/crab/crash.log`.
 - [x] `main.rs`: arg parsing (`--backend {winit,tty,headless}`, `--config`, `--validate`, `--log-filter`), config load, backend select, logging init.
 
-**Exit criteria (phase):** `cargo run -- --backend winit` opens a window with a solid background; empty-but-valid crate graph builds; boundary lint passes. *(All met: the winit backend launches and renders; `tty` fails explicitly until M4; `headless` validates and returns.)*
+**Exit criteria (phase):** `cargo run -- --backend winit` opens a window with a solid background; empty-but-valid crate graph builds; boundary lint passes. *(The winit backend launches and renders; `tty` fails explicitly until M4; `headless` validates and returns. The boundary lint is green — C1 in §2.9 fixed the `x11` config-key false positive.)*
 
 ---
 
@@ -171,7 +197,8 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] `Output` (name, geometry, scale, `usable_area`, `view: SpaceView`, `space_states: [SpaceState; 32]`, `default_space`).
 - [x] `SpaceView { visible, previous }`; `SpaceState { layout, params, scroll, focus_history }`.
 - [x] `SpaceRemap` — dense renumbering used by dynamic spaces (niri-style): see §2.5.
-- [x] `FocusTarget { Window | LayerSurface | LockSurface | None }`; per-output MRU stack + `last_focused_output`.
+- [x] `FocusTarget { Window | LayerSurface | LockSurface | None }`; focus stack with `last_focused_output` and `toggle-back`.
+- [ ] Per-output MRU/focus ring for `focus-previous`/alt-tab and focus restoration, restricted to visible windows on the output. [IMPROV B06] *(niri `ui/mru.rs`, `layout/focus_ring.rs`)*
 - [x] **One** focus function that updates keyboard focus, activation (`xdg_toplevel`), border-color targets, and IPC events.
 - [x] Document the **multi-space-view rule**: combined set uses the lowest-numbered visible space's layout (dwm behavior).
 
@@ -192,15 +219,18 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] Per-window `floating` toggle; un-float re-enters layout after the focused window.
 - [x] Rules force floating (dialogs, fixed min/max size, transient parent) — pure model now, wired to config in §5.
 - [x] Floating windows: **pin** (all spaces) and **always-on-top**.
+- [ ] Extract a pure `FloatingSpace` (cascade placement, z-order, tiled↔floating transition) from the layout bridge. [IMPROV B04] *(niri `layout/floating.rs`)*
 
 ### 2.5 Spaces (`dwm`/mango semantics)
 - [x] `view-space`, `toggle-space-view`, `view-spaces 1+3` (multi-view), `move-to-space`, `toggle-space` (on window).
 - [x] Multiple spaces **per window**; `toggle-back` via `SpaceView.previous`.
 - [x] Per-output space views; moving windows/output focus between spaces.
-- [x] Windows are arranged on their owning output; layout, focus cycling, activation, and dynamic-space compaction are scoped to it.
-- [x] Output registry keyed by `OutputId`; adding an output makes the first one primary, and removing one migrates its windows and layer entries to a fallback output.
+- [x] Windows are arranged on their owning output; the layout pass is per-output.
+- [ ] Space compaction runs for every output, and focus cycling, activation, and rule application use the window's owning output too; today they read the focused output (`C4`).
+- [x] Output registry keyed by `OutputId`; the first output becomes the initial focused output, and removing one migrates its windows and layer entries to a fallback output. *(Migration is lossy: per-space layout, scroll, visibility, and focus history are dropped — see B05.)*
 - [x] Global pointer/input routing: window and layer hit-testing, popup origins, and the software cursor use the output under the pointer; a pointer in a gap snaps to the nearest output, and layer maps translate between output-local and global coordinates.
 - [x] **Dynamic numbering** (niri-style): a space exists while it holds a window or is the empty space past the last occupied one; spaces that are now empty and followed by occupied ones are removed and the survivors compacted from 1, with their layout state following and window membership renumbered through `SpaceRemap` — so there is never an empty space before the focused one, and removing the focused space hands the view to the space that moves up.
+- [ ] **Preserve spaces across output removal/re-add** — move each `SpaceState` with its windows as a unit, keep visible/scroll/layout state, record ordered output candidates, and restore them on replug. [IMPROV B05] *(depends on C5/C6; niri `layout/monitor.rs` — borrow the migration semantics, not its unbounded `Vec<Workspace>` storage.)*
 - [x] `move-to-space` shows the target space, so focus follows the moved window.
 - [x] **No per-space configuration**: every space starts from `[layout]` defaults; cycling the layout changes only the current space at runtime.
 
@@ -221,14 +251,28 @@ and per-space layout memory. Everything here is pure and unit-testable.
   and release report the same surface-local point while the pointer travels (the window
   followed it), no motion is forwarded during the grab, and a left-edge drag configures the
   client to the new width; a forged serial is ignored and motion keeps reaching the client.
-- [ ] Snap-to-edge for floating (basic).
+- [x] Snap-to-edge for floating (basic). *(A move snaps flush when either edge is within 16 logical px of the primary output's usable area; resizes do not snap, and the size never changes. The pure helper is unit-tested; a configurable distance is later.)*
 
 ### 2.8 Tests
 - [x] Unit tests: golden `Placement` lists per layout for 1..12 windows.
 - [x] `proptest` invariants: no overlaps (non-floating), all rects inside area, deterministic.
 - [x] Snapshot-style golden rect tests per layout.
 
-**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crab layout` green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
+### 2.9 Correctness and test gate (2026-10 review)
+Do these before Phase 3/4 work inherits the same assumptions; full evidence and
+acceptance criteria are in `IMPROV.md` §3.
+
+- [x] `C1` — fix the `x11` config-key false positive in `scripts/check-boundaries.sh` / `src/config/mod.rs:439,656,963–964`; CI must be green. *(Replaced the bare `\bx11` needle with `x11rb`/`xcb`/`xwayland`; `check-boundaries.sh`, fmt, clippy, and all tests are green.)*
+- [x] `C2` — an `x11` rule that cannot match skips only itself, not the rest of the chain (`state.rs:2488,3653`); add a two-rule regression test. *(The window protocol is now a known `bool` (`false` until XWayland lands), so `pending` is only used for app-id/title/output; added `an_unmatchable_x11_rule_does_not_block_later_rules`.)*
+- [ ] `C3` — preserve the output origin when a layer commit updates `usable_area` on a secondary output (`state.rs:1617–1622` vs `1722–1727`).
+- [ ] `C4` — run space compaction for every output, and make rule application, focus cycling, and activation use the window's owning output rather than `primary_output` (`state.rs:2016,2316,2455,2651–2688`).
+- [ ] `C5` — rename/refactor `primary_output` → `focused_output` and keep a distinct fallback output; audit every use (`state.rs:1087–1089,2796–2800,2843–2847`).
+- [ ] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output.
+- [ ] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
+- [ ] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green.
+- [ ] `B44`/`B45` — remove per-arrange `ScrollState` cloning (`layout.rs:210–230`) and deep-cloning of the 32-slot state during compaction (`core/output.rs:394–403`) while these paths are open.
+
+**Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crab layout` green; the §2.9 correctness/test gate is green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
 
 ---
 
@@ -270,6 +314,11 @@ are smooth, interruptible, and free of pops.
 - [x] **Stable layout on open** — a new window opens beside the focused column and
   reflows nothing: existing columns keep their width and their place, and the
   focused window does not move even when a column before it closes.
+- [ ] **Column actions** — move column left/right, move window to column,
+  consume/expel, expand, set column width/height, switch preset window height,
+  and focus within a column. Implement pure operations in `src/layout/scroll.rs`,
+  then add `Action` variants, binds, IPC, and property tests. [IMPROV B03]
+  *(niri `layout/scrolling.rs`)*
 
 ### 3.4 Named spaces + overflow
 - [ ] Named spaces / persistent workspaces; survive output unplug (§3A).
@@ -312,6 +361,9 @@ are smooth, interruptible, and free of pops.
   through the window's last fit. `slide` falls and `zoom` shrinks around the window's
   centre while the alpha goes to zero; the client can detach its buffer and destroy
   the surface immediately without the animation losing its pixels.
+- [ ] Extract opening/closing window scenes into lifecycle types outside `state.rs`,
+  preserving the close buffer and ADR-0008 ordering. [IMPROV B07]
+  *(niri `layout/opening_window.rs`, `layout/closing_window.rs`)*
 - [x] Layout switch: per-window rect — windows spring to their new tile.
 - [ ] Space switch: per-output slide of window groups.
 - [ ] Scroll view offset; border/focus-ring color blend. *(A scroll already slides, because
@@ -319,9 +371,23 @@ are smooth, interruptible, and free of pops.
   scroll, gestures, a rubber band at the ends — is what remains.)*
 
 ### 3.6 Gesture plumbing (touchpad gestures land in M6)
-- [ ] Gesture values write directly into animation targets 1:1 while fingers are down; hand velocity to a spring on release (§9).
+- [ ] **Live gesture state machine** — keep begin/update/end state in `Crab` (not
+  thread-locals), feed `ScrollState.offset` and space-switch progress every frame,
+  settle from release velocity, restore the original offset on cancel, and honor
+  `swipe_min_threshold`. [IMPROV B33]
+  *(niri `input/mod.rs`, `input/scroll_swipe_gesture.rs`; depends on B03/B09)*
 
-**Exit criteria (phase):** space/space switches and layout changes are smooth and interruptible with no pops; opening a window in the `scroll` mode does not disturb existing columns.
+### 3.7 Configure synchronization
+- [ ] **Transaction-based configure sync** — before a layout change sizes/moves
+  multiple windows, configure them, block the frame on their commits, and release
+  on all commits or a 300 ms deadline; keep the `Configure`/`WindowFit` path as the
+  fallback. Add a two-fake-client test. [IMPROV B01]
+  *(niri `utils/transaction.rs`; new `src/compositor/transaction.rs`; depends on C6.)*
+- [ ] **Configure throttling** — classify size-only vs position/visibility/state
+  changes, coalesce rapid size changes to one frame, and never delay focus or state
+  changes. [IMPROV B02] *(niri `ConfigureIntent`, `layout/mod.rs`)*
+
+**Exit criteria (phase):** space/space switches and layout changes are smooth and interruptible with no pops; opening a window in the `scroll` mode does not disturb existing columns; multi-window resizes never present a mixed-generation frame.
 
 ---
 
@@ -332,28 +398,33 @@ Goal: boot `crab` from a TTY and use it as the real session on one machine.
 
 ### 4.1 Session & device discovery
 - [x] `libseat` session opening, initial `udev` DRM enumeration, and connector/mode probing.
-- [ ] Session switching, pause/resume, and the udev hotplug event loop.
-- [ ] DRM device selection (primary vs render node) with a clear log line.
-- [ ] logind integration (`zbus`): VT switch, session pause/resume, lid, suspend inhibit.
+- [ ] Session switching, pause/resume, and the udev hotplug event loop. [IMPROV B09/B10] *(niri `backend/tty.rs`)*
+- [ ] DRM device selection (primary vs render node) with a clear log line. [IMPROV B09]
+- [ ] logind integration (`zbus`): VT switch, session pause/resume, lid, suspend inhibit. [IMPROV B10]
 
 ### 4.2 DRM/KMS + GBM + EGL
 - [x] Parse and validate `[output.<name>]` modes (`WxH[@Hz]`) and transforms; apply configured positions when an output is registered.
-- [ ] `DrmDevice` + atomic modesetting; `GbmBufferedSurface` + EGL for rendering.
+- [ ] `DrmDevice` + atomic modesetting; `GbmBufferedSurface` + EGL for rendering. [IMPROV B09]
 - [ ] `DrmCompositor` for planes, reusing the `OutputDamageTracker` that already
-  drives the winit backend.
-- [ ] vblank-driven redraw wired to the Phase-1 state machine (one per output).
-- [ ] Handle connector hotplug (add/remove), mode selection, and window migration off removed outputs.
+  drives the winit backend. [IMPROV B09]
+- [ ] vblank-driven redraw wired to the Phase-1 state machine (one per output), backed
+  by a per-output frame clock. [IMPROV B09/B12] *(niri `frame_clock.rs`, `backend/tty.rs`)*
+- [ ] Handle connector hotplug (add/remove), mode selection, and lossless window/space
+  migration off removed outputs. [IMPROV B09/B13/B05]
 
 ### 4.3 Input devices
-- [ ] `libinput` backend: keyboard, pointer, touchpad, touch, switches.
-- [ ] Per-device config: natural scroll, tap, dwt, accel profile, click method.
-- [ ] XKB layouts per keyboard + **runtime layout switch** (bind + IPC).
+- [ ] `libinput` backend: keyboard, pointer, touchpad, touch, switches. [IMPROV B10] *(niri `backend/tty.rs`, `input/mod.rs`)*
+- [ ] Per-device config: natural scroll, tap, dwt, accel profile, click method. [IMPROV B10]
+- [x] XKB layouts per keyboard + **runtime layout switch** (bind + IPC).
+      One keymap serves the seat; per-device keymaps still need libinput.
 
 ### 4.4 Presentation
-- [ ] Hardware **cursor plane** (fall back to composited cursor).
-- [ ] `linux-dmabuf` (+ feedback), `viewporter`, `presentation-time`, **`fractional-scale`**.
-- [ ] Single logical→physical conversion site with explicit rounding (avoid blurry borders).
-- [ ] Transform (rotation/flip) — affects the coordinate pipeline everywhere, so do it early.
+- [ ] Hardware **cursor plane** (fall back to composited cursor). [IMPROV B09]
+- [x] `viewporter`; the `fractional-scale` global is registered and advertises a preferred scale.
+- [ ] `linux-dmabuf` + feedback, keeping shm as the fallback. [IMPROV B15] *(niri `niri.rs:2565`, dmabuf handlers)*
+- [ ] `wp_presentation`, fed from the per-output vblank/frame clock. [IMPROV B16/B12] *(niri `niri.rs:2594`, `frame_clock.rs`)*
+- [ ] Apply fractional scale consistently in the render/input/coordinate path; use one logical→physical conversion/rounding site (mixed-DPI exit criterion).
+- [ ] Transform (rotation/flip) — affects the coordinate pipeline everywhere, so do it early. [IMPROV B09/B13]
 
 ### 4.5 10-bit SDR scanout (ADR-0002)
 - [ ] Offer `RGB10A2` scanout formats + set `max_bpc=10` where supported.
@@ -361,7 +432,7 @@ Goal: boot `crab` from a TTY and use it as the real session on one machine.
 
 ### 4.6 Session integration (basic)
 - [ ] `.desktop` entry + session wrapper: set `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE=wayland`, `dbus-update-activation-environment`.
-- [ ] `spawn-at-startup` entries in config (`[autostart] exec_once` parses; the spawner is open).
+- [x] `spawn-at-startup` entries in config (`[autostart] exec_once`; spawned children get `WAYLAND_DISPLAY` and `CRAB_SOCKET`).
 
 **Exit criteria (phase):** log in from a display manager / boot from a TTY, run a full app set, switch VT and resume cleanly; mixed-DPI outputs are crisp.
 
@@ -386,10 +457,17 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] Validation with **good error spans** for semantic errors (range/choice
       failures name the key but carry no span yet).
 - [ ] File includes (`include = [...]`, with optional entries); user variables.
+- [ ] Explicit parse → merge → validate → apply for layered config (defaults + user
+      + runtime overrides), with path-qualified errors. [IMPROV B39]
+      *(niri-config patterns, not its schema)*
+- [ ] Audit parsed-only fields (`client_side_decorations`, `next_space_direction`,
+      `always_center_single_column`, touchpad/mouse/keyboard fields,
+      `swipe_min_threshold`, per-rule `x11`): wire them or reject them explicitly,
+      and make `pending_sections()` cover them. [IMPROV B40]
 
 ### 5.2 Hot reload
-- [ ] `notify` file watcher with debounce; **atomic apply** — parse+validate into a new `Config`, swap only if valid.
-- [ ] On error: keep last good config, show an **on-screen error banner** + log; never crash or lose state.
+- [x] `notify` file watcher with debounce; **atomic apply** — parse+validate into a new `Config`, swap only if valid. *(Winit wires the watcher and a 250 ms debounce; the tty backend reuses it when B09 lands.)*
+- [x] On error: keep last good config, show an **on-screen error banner** + log; never crash or lose state. *(The banner is still built from many solid elements — B46 is the follow-up.)*
 
 ### 5.3 Binds & input config
 - [x] Parse `[binds.default]`/`[binds.locked]` (and the mouse/gesture/axis tables)
@@ -402,11 +480,19 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [x] Mouse binds (`[mousebinds]`, compiled over the built-in Super+drag
       chords; bare left/right `moveresize` is refused) and axis binds
       (`[axisbinds]`, with `viewtoleft/right_have_client` skipping empty spaces).
-- [ ] `Mod` remap; gesture binds; switch (lid) binds.
-- [ ] Bind flags: `repeat`, `allow-when-locked`, `allow-inhibiting`, release, pass-through.
-- [ ] **Key modes / submaps** (resize, passthrough).
+- [x] Gesture binds (`[gesturebinds]`): swipe direction, finger count, and
+      modifiers are compiled and fired when the swipe ends past a 30px threshold.
+- [x] Bind flags: `release` and `pass-through` are enforced; `repeat` re-fires
+      backend repeat presses, and the lock/inhibitor flags are parsed and reserved.
+- [x] **Key modes / submaps** (`[modes.<name>]`) with binds, mousebinds,
+      axisbinds, and gesturebinds; `enter_mode`/`leave_mode`/`pop_mode` actions
+      and mode-aware lookup over the default tables.
+- [ ] Key-repeat synthesis timer (clients and `repeat` binds); switch (lid)
+      binds; `Mod` remap.
 - [ ] Per-device `device_rule` (by name/type); xkb/input blocks from §5.1.
 - [ ] **Hotkey overlay** listing active binds.
+- [ ] Clear `bound_keys`/`bound_buttons` on focus change, grab begin/end, output
+      focus change, and session pause; cancel interrupted release binds. [IMPROV B35]
 
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
 - [x] Parse `[window_rule]` / `[[window_rule]]`: `app_id`, `open_floating`, `width`,
@@ -416,24 +502,50 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       rule's offset. Rules can match `app_id` exactly, title fragments
       case-insensitively, and the current floating/fullscreen state.
 - [x] Actions: initial dynamic space, `no-focus`, `pinned` and `always-on-top`.
-- [ ] Window rules: match `output` and X11-vs-Wayland.
+- [x] Window rules: match `output`.
+- [ ] Window rules: X11-vs-Wayland matching that does not block later rules. [IMPROV C2/B40]
 - [ ] Actions: opacity, blur/shadow/corner overrides, `block-out-from`, default column width.
 - [x] Apply `[layer_rule]` open animations by layer namespace.
 - [ ] Space rules, monitor rules (name/make/model/serial regex), device rules.
 - [ ] Re-evaluate rules on title/app-id change for rules marked `dynamic`.
 
 ### 5.5 `crab-ipc` + socket (`COMPOSITOR.md` §14)
-- [ ] Unix socket at `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`; export `CRAB_SOCKET`.
-- [ ] Newline-delimited JSON; request/response + `version` handshake; **versioned schema, additive-only**.
-- [ ] Requests: `version`, `outputs`, `spaces`, `windows`, `focused-window`, `layouts`, `action <A>`, `set-layout`, `config reload|validate`, `event-stream`.
-- [ ] `set-layout` takes a **mode** name; a **family** name is accepted as an alias for the family's default mode (ADR-0004). `layouts` reports both families and modes.
-- [ ] **`ext-workspace-v1` projects spaces as "workspaces"**; the socket and protocol never expose `SpaceSet` directly (ADR-0004).
-- [ ] **One `Action` enum** shared by binds and IPC (serialized both ways).
-- [ ] Event stream: `WindowOpened/Closed/Changed/Focused`, `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`, `Urgent`.
-- [ ] Robust parsing: unknown event names/fields are skipped, never fatal.
+- [x] Unix socket at `$XDG_RUNTIME_DIR/crab-$WAYLAND_DISPLAY.sock`; exported to
+      spawned/autostarted children as `CRAB_SOCKET`.
+- [x] Newline-delimited JSON; request/response + `version` handshake; **versioned
+      schema, additive-only** (`PROTOCOL_VERSION` 2). Nonblocking calloop source
+      with bounded request lines.
+- [x] Requests: `version`, `outputs`, `spaces`, `windows`, `focused-window`,
+      `layouts`, `dispatch` (canonical action), `subscribe` (snapshot + deltas).
+- [x] `config reload` / `config validate` requests and `crab-cli config-reload` /
+      `config-validate` subcommands; validation reuses the pure `--validate` path.
+- [ ] Convenience query/action aliases beyond `dispatch` (defer until bar demand).
+- [x] `set-layout` takes a **mode** name; a **family** name is accepted as an
+      alias for the family's default mode (ADR-0004). `layouts` reports both
+      families and modes.
+- [ ] **`ext-workspace-v1` projects spaces as "workspaces"**; the socket and
+      protocol never expose `SpaceSet` directly (ADR-0004). [IMPROV B18]
+- [x] **One `Action` enum** shared by binds and IPC (serialized both ways):
+      config parsing produces `crab_ipc::Action`, and dispatch runs the same enum.
+- [x] Event stream: `Snapshot`, `WindowOpened/Closed/Changed/Focused`,
+      `SpaceViewChanged`, `LayoutChanged`, `OutputAdded/Removed/Changed`, `Urgent`.
+- [x] Event stream: `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`.
+- [x] Robust parsing: malformed requests, unknown fields, and unknown event
+      names never crash the compositor or the CLI.
+- [ ] Bounded per-client event queues and per-domain snapshot state; disconnect a
+      slow reader only at a whole-event boundary, never mid-line. [IMPROV B36]
+      *(niri `ipc/server.rs`, `EventStreamState`)*
+- [ ] Richer queries: `Layers`, `KeyboardLayouts`, `FocusedOutput`;
+      `PickWindow`/`PickColor` deferred until an interaction mode exists. [IMPROV B37]
+- [ ] Runtime output configuration over IPC (`Output { output, action }`),
+      validated against `OutputPreference` before applying. [IMPROV B38/B13]
 
 ### 5.6 `crab-cli`
-- [ ] `get <query>`, `watch <event-stream>`, `dispatch <action>`, `validate`; `--json` machine output.
+- [x] Query subcommands (`version`/`outputs`/`spaces`/`windows`/
+      `focused-window`/`layouts`), `watch`, `dispatch`, `config-reload`,
+      `config-validate`, and `--raw` machine output.
+- [ ] Generic `get <query>`; optional top-level `validate` alias (`crab --validate`
+      covers it); decide whether `--raw` should also be named `--json`.
 
 ### 5.7 Animation config surface
 - [ ] Per-event curves/durations (open, close, move/resize, space switch, layout switch, overview, focus ring).
@@ -454,27 +566,31 @@ protocol with real clients. (Matrix: `ROADMAP.md` §4, `COMPOSITOR.md` §12.)
 ### 6.1 Shell & decoration
 - [x] `wlr-layer-shell` with **exclusive zones → `usable_area`**; anchor, margin, layer, namespace, keyboard-interactivity.
 - [x] `xdg-decoration` (+ KDE variant) — prefers client-side until crab draws a titlebar; `fractional-scale` sends a preferred scale; `viewporter` hardening.
-- [ ] `cursor-shape` — needs icon-theme loading; not advertised until every shape renders (clients keep using `wl_pointer.set_cursor`).
+- [ ] `cursor-shape` — needs icon-theme loading; not advertised until every shape renders (clients keep using `wl_pointer.set_cursor`). [IMPROV B17] *(niri `niri.rs:2681`, `cursor.rs`)*
 
 ### 6.2 Activation & selection
-- [ ] `xdg-activation` (+ `activation_bypass`); `primary-selection`; `data-control` (`ext` + `wlr`).
+- [ ] `xdg-activation`: finish `activation_bypass` (basic activation is present).
+- [ ] `primary-selection` + `wlr`/`ext` data-control. [IMPROV B21]
 
 ### 6.3 Idle, lock, inhibit
-- [ ] `idle-notify`, `idle-inhibit`; `ext-session-lock`; `keyboard-shortcuts-inhibit`.
+- [ ] `idle-notify`, `idle-inhibit`; `ext-session-lock`; `keyboard-shortcuts-inhibit`. [IMPROV B14/B20/B24]
 
 ### 6.4 Outputs
 - [x] `xdg-output` (names and logical geometry for bars).
-- [ ] `wlr-output-management`, `wlr-output-power-management` (DPMS).
+- [ ] `wlr-output-management`, `wlr-output-power-management` (DPMS), plus gamma control. [IMPROV B25/B13]
+- [ ] Runtime output changes over IPC after output hotplug. [IMPROV B38]
 - [ ] **Mirroring / clone** (explicitly chosen over upstream niri).
 
 ### 6.5 Window/space visibility to bars
-- [ ] `ext-foreign-toplevel-list` / `wlr-foreign-toplevel-management`; `ext-workspace`.
+- [ ] `ext-foreign-toplevel-list` / `wlr-foreign-toplevel-management`; `ext-workspace`. [IMPROV B18/B19]
 
 ### 6.6 Games & IME
-- [ ] `pointer-constraints`, `relative-pointer`; `text-input-v3` / `input-method-v2`.
+- [ ] `pointer-constraints`, `relative-pointer`, pointer gestures. [IMPROV B22]
+- [ ] `text-input-v3` / `input-method-v2`. [IMPROV B23]
+- [ ] `tablet-v2` + touch input mapping. [IMPROV B28/B34]
 
 ### 6.7 Touchpad gestures
-- [ ] 3-finger horizontal → space/space switch; 4-finger → overview; **live preview** driven by the animation targets from Phase 3.
+- [ ] 3-finger horizontal → space/space switch; 4-finger → overview; **live preview** driven by the B33 gesture state machine from Phase 3.6.
 
 ### 6.8 Ecosystem verification
 - [ ] waybar, fuzzel, swaybg, swaylock/gtklock, swayidle, wl-clipboard, a Qt app, an Electron app.
@@ -500,6 +616,7 @@ Modes slot into the M2 families (ADR-0004), not a flat list.
 
 ### 7.3 Groups & stacks (cosmic)
 - [ ] Window groups + **tabbed/stacked containers**; auto tab bar; orientation, per-child size fractions, swap.
+- [ ] Drag insertion hints and tab indicators. [IMPROV B08] *(niri `layout/insert_hint_element.rs`, `layout/tab_indicator.rs`)*
 
 ### 7.4 Scratchpads
 - [ ] Named scratchpads + standard scratchpad; minimize/restore.
@@ -515,7 +632,7 @@ Modes slot into the M2 families (ADR-0004), not a flat list.
 
 ---
 
-## Phase 8 — Effects (M8) *(~3–5 weeks)* — *"mango/scenefx quality on GLES"*
+## Phase 8 — Effects (M8) *(~3–5 weeks)* — *"mango/scenefx quality on GLES"* (ADR-0007)
 
 Goal: effects on by default in a polished config **without** regressing the perf targets
 (`COMPOSITOR.md` §20). Corner radius → borders → shadows → blur (order matters, §10).
@@ -530,11 +647,12 @@ Goal: effects on by default in a polished config **without** regressing the perf
 
 ### 8.3 Blur
 - [ ] Dual-Kawase blur of content **behind** a window; **backdrop cache**; update only on damage.
-- [ ] `ext-background-effect` (client-requested blur) when negotiated.
+- [ ] `ext-background-effect` (client-requested blur) when negotiated. [IMPROV B31]
 - [ ] Interaction with damage tracking + direct scanout handled explicitly.
+- [ ] `wp_content_type` and opaque-region correctness with dmabuf/direct scanout. [IMPROV B49]
 
 ### 8.4 Controls & safety
-- [ ] Per-rule overrides (`blur false`, `no_shadow`, …) + global `effects { enabled false }` kill switch.
+- [ ] Per-rule overrides (`blur = false`, `shadow = false`, …) + global `[effects] enabled = false` kill switch.
 - [ ] **Low-power mode**: disable blur + shadows on battery.
 - [ ] Custom-shader open/close/resize animations (niri); cursor shake-to-find; debug HUD.
 
@@ -555,30 +673,30 @@ Goal: screen sharing, screenshots, and a Steam game under XWayland all work.
 
 ### 9.2 Screenshots
 - [ ] Built-in UI (region/window/output) → clipboard + file.
-- [ ] `ext-image-copy-capture` (+ source) **and** legacy `wlr-screencopy` (so `grim`/`slurp` work).
+- [ ] `ext-image-copy-capture` (+ source) **and** legacy `wlr-screencopy` (so `grim`/`slurp` work). [IMPROV B26] *(niri `protocols/screencopy.rs`, `handlers/image_copy_capture.rs`)*
 - [ ] **Capture colour path**: once HDR exists, convert HDR→SDR for capture (otherwise washed out).
 
 ### 9.3 Screencast
-- [ ] PipeWire stream (monitor first, then window) fed by dma-buf (shm fallback); own thread + channels.
+- [ ] PipeWire stream (monitor first, then window) fed by dma-buf (shm fallback); own thread + channels. *(Do not port niri's `screencasting/` wholesale; it is a separate ~2.8k-LOC project — `IMPROV.md` §7.)*
 - [ ] `xdg-desktop-portal` backend: `resources/crab-portals.conf`; permission flow.
 - [ ] `block-out-from "screencast"` privacy rules.
 
 ### 9.4 XWayland
-- [ ] `xwayland-satellite` (per ADR-0006): config hook `xwayland { satellite-path }`, spawn on demand, set `DISPLAY`, restart.
+- [ ] `xwayland-satellite` (per ADR-0006): config hook `xwayland { satellite-path }`, spawn on demand, set `DISPLAY`, restart. [IMPROV B27] *(follow ADR-0006, not niri's in-process X11)*
 - [ ] Verify: X11 apps map as normal toplevels; Steam game works.
 
 **Exit criteria (phase):** Firefox/Chromium screen share, OBS capture, screenshots, and a Steam game under XWayland all work.
 
 ---
 
-## Phase 10 — crawl-desktop integration (M10) *(~2–3 weeks; can overlap M6+)*
+## Phase 10 — crawl-shell integration (M10) *(~2–3 weeks; can overlap M6+)*
 
-Goal: `crawl-desktop` runs on `crab` through the **same standard protocols** and the
+Goal: `crawl-shell` runs on `crab` through the **same standard protocols** and the
 same `Compositor` trait — no crawl-specific API. (Crosswalk: `ROADMAP.md` §7.)
 
-- [ ] Add a **`crab` backend** to `crawl-desktop`'s `crates/crawl-compositor`:
+- [ ] Add a **`crab` backend** to `crawl-shell`'s `crates/crawl-daemon`:
   - [ ] `detect()` gains an arm on `CRAB_SOCKET` (before niri).
-  - [ ] `Capability` coverage: `Workspaces` (`ext-workspace` + IPC), `WindowList`/`FocusWindow` (`ext-foreign-toplevel-list` + IPC `dispatch focus-window`), `OutputManagement` (`wlr-output-management` + `xdg-output`), `Screenshots` (`ext-image-copy-capture`/`wlr-screencopy`), `Overview` (`dispatch overview`), `Launch` (`dispatch spawn`).
+  - [ ] `Capability` coverage: `Workspaces` (`ext-workspace` + IPC), `WindowList`/`FocusWindow` (`ext-foreign-toplevel-list` + IPC `dispatch focus-window`), `OutputManagement` (`wlr-output-management` + `xdg-output`), `Screenshots` (`ext-image-copy-capture`/`wlr-screencopy`), `Overview` (`dispatch overview`), `Launch` (`dispatch spawn`). *(Requires B18/B19/B25/B26.)*
   - [ ] `Event` mapping → `WorkspacesChanged`/`ActiveWorkspaceChanged`/`WindowsChanged`/`ActiveWindowChanged`/`OutputsChanged`.
 - [ ] Run `crawl-shell` (panel/launcher/notifd/osd/lock) **unmodified** on `crab`.
 - [ ] Align `crab-ipc` `Action` names with `crawl-desktop`’s action vocabulary (one keybind table where possible).
@@ -592,12 +710,14 @@ same `Compositor` trait — no crawl-specific API. (Crosswalk: `ROADMAP.md` §7.
 ## Phase 11 — Hardening & `v0.1.0` (M11) *(~3–4 weeks)*
 
 - [ ] Protocol conformance pass; fix client-compat bugs from the full test-app matrix (`COMPOSITOR.md` §19).
-- [ ] Multi-monitor + **mixed-DPI** + rotated outputs.
-- [ ] **Direct scanout** for fullscreen; overlay-plane experiments (cursor first).
+- [ ] Multi-monitor + **mixed-DPI** + rotated outputs; verify the C4/C6 invariants on real hardware. [IMPROV B13]
+- [ ] **Direct scanout** for fullscreen; overlay-plane experiments (cursor first); keep content-type/opaque regions correct. [IMPROV B49]
 - [ ] Crash handling: panic → log + backtrace; optional supervisor restart (session does not drop to DM).
 - [ ] Packaging: `.desktop`, systemd user units + target, portals config, distro packaging (AUR/Nix/Fedora/Arch).
 - [ ] Docs site: getting started, config reference, IPC reference, keybind reference, FAQ.
+- [ ] Visual/snapshot regression harness for layout, animation, and effects (geometry snapshots first, pixels later). [IMPROV B42] *(niri-visual-tests)*
 - [ ] Benchmarks + regression tracking in CI.
+- [ ] Internal performance: index windows per output, avoid full-snapshot allocation per IPC event, and rasterize the config banner once. [IMPROV B46/B47/B48]
 - [ ] Issue templates, contribution guide, `CHANGELOG.md` (0.x: breaking changes documented).
 
 **Exit criteria (phase):** tagged **`v0.1.0`**, announced, installable on at least two distros.
@@ -622,11 +742,11 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 
 ## Phase 13 — Maturity & extensions *(aspirational)*
 
-- [ ] Multi-GPU (render on primary, copy to secondary outputs); tablet + touchscreen gestures.
-- [ ] `security-context`, `xdg-foreign`, `xdg-dialog`, `xdg-toplevel-drag`; `drm-lease` (VR); virtual/headless outputs; tearing control / `syncobj`.
+- [ ] Multi-GPU (render on primary, copy to secondary outputs); tablet + touchscreen gestures. [IMPROV B11/B28/B34]
+- [ ] `security-context`, `xdg-foreign`, `xdg-dialog`, `xdg-toplevel-drag`; `drm-lease` (VR); virtual/headless outputs; tearing control / `syncobj`. [IMPROV B29/B30/B32]
 - [ ] Accessibility: AccessKit/Orca bridge, zoom, colour filters, high-contrast borders, magnifier.
 - [ ] Session persistence (restore windows to spaces where clients allow); scripting layer (Rhai/Lua) over IPC.
-- [ ] Embedded XWayland WM if `xwayland-satellite` proves insufficient; plugin API for custom layouts once `Layout` is stable (WASM or dylib).
+- [ ] Embedded XWayland WM only if `xwayland-satellite` proves insufficient (ADR-0006); plugin API for custom layouts once `Layout` is stable (WASM or dylib).
 
 **Exit criteria:** extensions remain opt-in; accessibility bridge works on core flows without regressing perf.
 
@@ -634,17 +754,18 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 
 ## Definition of Done (Global)
 - [ ] Every phase ends with something **runnable** (nested at first; on bare metal from M4).
-- [ ] `cargo fmt --check`, `cargo clippy -D warnings`, `cargo nextest run`, `cargo deny check` pass in CI.
-- [ ] **Boundary lint** holds: `-core`/`-layout`/`-anim`/`-config` have no Smithay/Wayland deps; `-ipc` is a leaf; no cycles; only the binary touches Smithay.
+- [ ] `cargo fmt --check`, `cargo clippy --all-features -D warnings`, `cargo test --workspace --all-features`, and `cargo deny check` pass in CI; MSRV 1.85 is checked. [B43]
+- [x] **Boundary lint** holds: `-core`/`-layout`/`-anim`/`-config` have no Smithay/Wayland deps; `-ipc` is a leaf; no cycles; only the binary touches Smithay. [C1]
 - [ ] Layouts are pure and property-tested; single logical→physical rounding site.
+- [ ] Multi-output invariants are covered by a headless two-output harness (background close, layer zones, rules, output remove/re-add). [C4/C6/B41]
 - [ ] Config is validated and never trusted: bad reload keeps last good config + visible error.
-- [ ] One focus function updates keyboard focus, activation, borders, and IPC together.
+- [ ] One focus function updates keyboard focus, activation, borders, and IPC together; `focused_output` is distinct from the fallback output. [C5]
 - [ ] Effects are modular, feature-gated, per-rule overridable, and never break direct scanout.
 - [ ] Protocol handlers degrade gracefully; malformed client input never panics.
-- [ ] IPC schema is versioned and additive-only within a major; `Action` names identical between binds and IPC.
+- [ ] IPC schema is versioned and additive-only within a major; `Action` names identical between binds and IPC; slow subscribers are disconnected only at whole-event boundaries. [B36]
 - [ ] Perf targets in `COMPOSITOR.md` §20 / `ROADMAP.md` §9 hold; regressions block merges once benchmarks exist.
-- [ ] Docs current: ADRs, config/IPC references, protocol table, `crawl-desktop` integration matrix.
-- [ ] Adapted code carries attribution headers (GPL-3.0).
+- [ ] Docs current: ADRs, config/IPC references, protocol table, `crawl-shell` integration matrix.
+- [ ] Borrowed niri code is tracked in `IMPROV.md`, attributed per file, and checked against Smithay `0.7.0` (no git-only APIs).
 
 ---
 
@@ -652,31 +773,40 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 
 Read these before the matching phase. Because `crab` is **GPL-3.0-or-later**, you may
 **copy and adapt** GPL-3.0 sources with attribution — not just reimplement ideas.
+The niri references below use the `9d8f4f8` snapshot from `IMPROV.md`; check every
+API against crab's Smithay 0.7.0.
 
 | Concern | Source | What to take / watch |
 |---|---|---|
 | Canonical Smithay wiring | `smithay/anvil` (MIT) | state, backend selection, `DrmCompositor`, handler ergonomics |
 | State / event model | **niri** `src/niri.rs` (GPL-3.0+) | single-owner `State`, per-output redraw machine |
-| Scrollable layout | **niri** `src/layout/` | scroller column model, `neighbor()`, stable-on-open |
-| Animation | **niri** `src/animation.rs` | spring/clock, interruptible retarget, synced clock |
+| Configure transactions | **niri** `src/utils/transaction.rs` | commit blockers + 300 ms deadline; keep `WindowFit` as the fallback |
+| Space migration | **niri** `src/layout/monitor.rs`, `workspace.rs` | output candidates and migration semantics; adapt to the 32-slot model |
+| Scrollable layout | **niri** `src/layout/scrolling.rs`, `floating.rs` | columns, widths/heights, floating space, `neighbor()`, stable-on-open |
+| Window lifecycle | **niri** `src/layout/opening_window.rs`, `closing_window.rs` | first-class opening/closing scenes |
+| Animation | **niri** `src/animation.rs`, `src/frame_clock.rs` | spring/clock, interruptible retarget, presentation-timed frames |
 | Render elements | **niri** `src/render_helpers/`, `src/backend/` | element ordering, damage, custom shaders |
-| IPC | **niri** `niri-ipc/` (GPL-3.0+) | typed request/event schema, event stream |
-| Config | **niri** `src/config/` | validation, `validate`, error spans |
-| Overview / screencast / gestures | **niri** | zoom grid, PipeWire path, gesture→animation |
+| Backend / session / input | **niri** `src/backend/tty.rs`, `src/input/mod.rs` | KMS/GBM/libseat, libinput, gestures, session lifecycle |
+| IPC | **niri** `niri-ipc/`, `src/ipc/server.rs` | typed request/event schema, bounded event stream |
+| Protocol breadth | **niri** `src/protocols/` (`ext_workspace`, `foreign_toplevel`, `output_management`, `screencopy`), `src/handlers/image_copy_capture.rs` | globals + handlers; do not port `screencasting/` wholesale |
+| Config | **niri** `niri-config` | validation/merge patterns, error spans; not niri's schema |
+| Overview / gestures | **niri** `src/ui/`, `src/input/scroll_swipe_gesture.rs` | zoom grid, live swipe state; PipeWire is separate |
 | Mixed tiling/floating + groups | **cosmic-comp** `src/shell/`, `src/state.rs` | id-tree, groups/stacks, orientation, edge-snap |
 | XWayland knobs | **cosmic-comp** | descaling, eavesdropping |
 | Spaces + layout families + per-space params | **mango** (C) | **port the algorithms** (Pertag, special workspace, `mmsg`/`get`/`watch`/`dispatch`) |
 | Effects feature set + wallpaper-cached blur | **mango** / `scenefx` (C) | reimplement ideas on GLES |
 | HDR | `franzjeger/cosmic-hdr-reference` (glue MIT; cosmic GPL, smithay MIT) + niri HDR forks (`dividebysandwich`, `losnoco`, GPL-3.0) | atomic KMS colour state, F16 compositing, format-aware 10-bit probe |
 | Space semantics | **dwl/dwm** (GPL/MIT) | view/toggle/multi-space rules |
+| Tests | **niri** `src/layout/tests.rs`, `src/tests/`, `niri-visual-tests` | scenario shape, not niri types |
 | Layout-as-process | **river** (GPL) | only if you ever want out-of-process layouts |
 
 **Pitfalls to avoid**
-- **Smithay API churn**: pin a git rev; keep every Smithay touch inside `handlers/` + `backend/`.
-- **Client model**: `COMPOSITOR.md` §8.3 specifies explicit element ordering → prefer a **custom element list (niri-style)** over Smithay `Space` (cosmic-style). Decide in ADR-0008 and do not mix.
+- **Smithay API churn**: stay on `0.7.0` crates.io; check niri examples against it, and vendor a git rev only for a deliberate, documented fix (HDR). Keep every Smithay touch inside `handlers/` + `backend/`.
+- **niri is not a drop-in**: do not transplant its `Vec<Workspace>` storage, config schema, render tree, or in-process XWayland. ADR-0004/0003/0008/0006 remain authoritative; borrow semantics/patterns (`IMPROV.md` §7).
+- **Client model**: `COMPOSITOR.md` §8.3 specifies explicit element ordering → the **custom element list (niri-style)** is decided in ADR-0008; do not introduce Smithay `Space`/`DynamicScene`/`WindowElement` as the scene, and keep the boundary lint enforcing it.
 - **Don't hold locks across frames**: never hold a Smithay surface-state lock or your own registry lock across `arrange`/draw.
 - **Never block `calloop`**: no sync IO / D-Bus in handlers; use channels + worker threads.
-- **Animation clock**: vblank/`wp_presentation`, not `Instant::now()`, or motion stutters.
+- **Animation clock**: per-output vblank/`wp_presentation` (B12), not `Instant::now()` or the winit loop clock, or motion stutters.
 - **Fractional scale**: one rounding site; integer logical coords are a trap.
 - **Direct scanout vs effects**: an effect touching the scanned-out window must disable it.
 - **10-bit probing**: test each DRM format individually.
