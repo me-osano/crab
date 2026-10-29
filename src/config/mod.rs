@@ -90,11 +90,29 @@ pub struct Config {
     /// Pointer-button binds (`[mousebinds]`), compiled at startup over the
     /// built-in Super+drag chords.
     pub mouse_binds: BTreeMap<String, String>,
-    /// Swipe/pinch binds (`[gesturebinds]`), kept as action strings. Parsed,
-    /// not applied yet (M6.7).
+    /// Swipe binds (`[gesturebinds]`), compiled at startup and fired when a
+    /// libinput swipe ends.
     pub gesture_binds: BTreeMap<String, String>,
     /// Axis (scroll) binds (`[axisbinds]`), compiled at startup.
     pub axis_binds: BTreeMap<String, String>,
+    /// Key modes/submaps (`[modes.<name>]`), each with its own bind tables.
+    ///
+    /// A mode's binds are layered over the default tables while it is the
+    /// active mode; leaving the mode returns to the stack below it.
+    pub modes: BTreeMap<String, KeyMode>,
+}
+
+/// One `[modes.<name>]` table: binds that only apply in that mode.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyMode {
+    /// Keyboard chords active in this mode (`[modes.<name>.binds]`).
+    pub binds: BTreeMap<String, String>,
+    /// Pointer-button binds active in this mode (`[modes.<name>.mousebinds]`).
+    pub mouse_binds: BTreeMap<String, String>,
+    /// Scroll binds active in this mode (`[modes.<name>.axisbinds]`).
+    pub axis_binds: BTreeMap<String, String>,
+    /// Gesture binds active in this mode (`[modes.<name>.gesturebinds]`).
+    pub gesture_binds: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -121,6 +139,7 @@ impl Default for Config {
             mouse_binds: BTreeMap::new(),
             gesture_binds: BTreeMap::new(),
             axis_binds: BTreeMap::new(),
+            modes: BTreeMap::new(),
         }
     }
 }
@@ -142,9 +161,6 @@ impl Config {
             output.mode.is_some() || output.scale.is_some() || output.transform.is_some()
         }) {
             pending.push("output");
-        }
-        if !self.gesture_binds.is_empty() {
-            pending.push("gesturebinds");
         }
         if self.client_side_decorations != defaults.client_side_decorations {
             pending.push("layout.client_side_decorations");
@@ -411,12 +427,16 @@ pub struct WindowRule {
     /// A title matches when it contains one of these fragments, ignoring case.
     /// Titles are human text and often carry a document or status suffix.
     pub title: Vec<String>,
+    /// Output connector names to match (`output`, one or many).
+    pub output: Vec<String>,
     /// Require the window to be floating when the rule is matched
     /// (`is_floating`).
     pub is_floating: Option<bool>,
     /// Require the window to be fullscreen when the rule is matched
     /// (`is_fullscreen`).
     pub is_fullscreen: Option<bool>,
+    /// Require the window to be X11 (`x11 = true`) or Wayland (`x11 = false`).
+    pub x11: Option<bool>,
     /// Open the window floating (`open_floating`).
     pub open_floating: bool,
     /// Initial size in logical pixels (`size = [width, height]`).
@@ -433,6 +453,8 @@ pub struct WindowRule {
     pub always_on_top: bool,
     /// Exclude the window from keyboard focus (`no_focus`).
     pub no_focus: bool,
+    /// Re-evaluate the rule when app_id/title change.
+    pub dynamic: bool,
 }
 
 /// One `[layer_rule]` entry, matched against layer-shell surfaces.
@@ -489,6 +511,17 @@ struct RawConfig {
     window_rule: Option<OneOrMany<RawWindowRule>>,
     layer_rule: Option<OneOrMany<RawLayerRule>>,
     binds: RawBinds,
+    mousebinds: BTreeMap<String, String>,
+    gesturebinds: BTreeMap<String, String>,
+    axisbinds: BTreeMap<String, String>,
+    modes: BTreeMap<String, RawMode>,
+}
+
+/// One `[modes.<name>]` table.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RawMode {
+    binds: BTreeMap<String, String>,
     mousebinds: BTreeMap<String, String>,
     gesturebinds: BTreeMap<String, String>,
     axisbinds: BTreeMap<String, String>,
@@ -617,8 +650,10 @@ struct RawAutostart {
 struct RawWindowRule {
     app_id: Option<OneOrMany<String>>,
     title: Option<OneOrMany<String>>,
+    output: Option<OneOrMany<String>>,
     is_floating: Option<RawFlag>,
     is_fullscreen: Option<RawFlag>,
+    x11: Option<RawFlag>,
     open_floating: Option<RawFlag>,
     size: Option<[i64; 2]>,
     offset_x: Option<i64>,
@@ -627,6 +662,7 @@ struct RawWindowRule {
     pinned: Option<RawFlag>,
     always_on_top: Option<RawFlag>,
     no_focus: Option<RawFlag>,
+    dynamic: Option<RawFlag>,
 }
 
 /// One `[layer_rule]` entry.
@@ -915,12 +951,17 @@ impl RawWindowRule {
         Ok(WindowRule {
             app_id: self.app_id.map(OneOrMany::into_vec).unwrap_or_default(),
             title: self.title.map(OneOrMany::into_vec).unwrap_or_default(),
+            output: self.output.map(OneOrMany::into_vec).unwrap_or_default(),
             is_floating: match self.is_floating {
                 Some(flag) => Some(flag.to_bool(&key("is_floating"))?),
                 None => None,
             },
             is_fullscreen: match self.is_fullscreen {
                 Some(flag) => Some(flag.to_bool(&key("is_fullscreen"))?),
+                None => None,
+            },
+            x11: match self.x11 {
+                Some(flag) => Some(flag.to_bool(&key("x11"))?),
                 None => None,
             },
             open_floating: flag(self.open_floating, "open_floating")?,
@@ -937,6 +978,7 @@ impl RawWindowRule {
             pinned: flag(self.pinned, "pinned")?,
             always_on_top: flag(self.always_on_top, "always_on_top")?,
             no_focus: flag(self.no_focus, "no_focus")?,
+            dynamic: flag(self.dynamic, "dynamic")?,
         })
     }
 }
@@ -991,6 +1033,21 @@ impl RawConfig {
         config.mouse_binds = self.mousebinds;
         config.gesture_binds = self.gesturebinds;
         config.axis_binds = self.axisbinds;
+        config.modes = self
+            .modes
+            .into_iter()
+            .map(|(name, mode)| {
+                (
+                    name,
+                    KeyMode {
+                        binds: mode.binds,
+                        mouse_binds: mode.mousebinds,
+                        axis_binds: mode.axisbinds,
+                        gesture_binds: mode.gesturebinds,
+                    },
+                )
+            })
+            .collect();
 
         Ok(config)
     }
@@ -1147,6 +1204,33 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
                 return Err(ConfigError::Invalid(format!(
                     "`[{section}]` has a bind with an empty chord or action"
                 )));
+            }
+        }
+    }
+    for (name, mode) in &config.modes {
+        if name.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "`[modes]` has an unnamed mode".to_owned(),
+            ));
+        }
+        if name == "default" {
+            return Err(ConfigError::Invalid(
+                "`modes.default` is reserved; put default-mode binds under `[binds.default]`"
+                    .to_owned(),
+            ));
+        }
+        for (section, binds) in [
+            ("binds", &mode.binds),
+            ("mousebinds", &mode.mouse_binds),
+            ("gesturebinds", &mode.gesture_binds),
+            ("axisbinds", &mode.axis_binds),
+        ] {
+            for (chord, action) in binds {
+                if chord.trim().is_empty() || action.trim().is_empty() {
+                    return Err(ConfigError::Invalid(format!(
+                        "`[modes.{name}.{section}]` has a bind with an empty chord or action"
+                    )));
+                }
             }
         }
     }
@@ -1515,6 +1599,32 @@ mod tests {
     }
 
     #[test]
+    fn modes_parse_and_layer_their_tables() {
+        let cfg = parse(
+            "[modes.resize.binds]\n\"h\" = \"master_ratio-\"\n[modes.resize.mousebinds]\n\"SUPER+btn_left\" = \"toggle_floating\"\n[modes.resize.axisbinds]\n\"SUPER+UP\" = \"viewprev\"\n[modes.resize.gesturebinds]\n\"left+3\" = \"focusdir:left\"\n",
+        )
+        .unwrap();
+        validate(&cfg).unwrap();
+        let mode = &cfg.modes["resize"];
+        assert_eq!(mode.binds["h"], "master_ratio-");
+        assert_eq!(mode.mouse_binds["SUPER+btn_left"], "toggle_floating");
+        assert_eq!(mode.axis_binds["SUPER+UP"], "viewprev");
+        assert_eq!(mode.gesture_binds["left+3"], "focusdir:left");
+    }
+
+    #[test]
+    fn reserved_default_mode_is_rejected() {
+        let cfg = parse("[modes.default.binds]\n\"h\" = \"master_ratio-\"\n").unwrap();
+        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn empty_mode_bind_is_rejected() {
+        let cfg = parse("[modes.resize.binds]\n\"h\" = \"\"\n").unwrap();
+        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
     fn partial_config_inherits_defaults() {
         let cfg = parse("[layout]\ngaps = 2\n").unwrap();
         assert_eq!(cfg.gaps, 2);
@@ -1589,12 +1699,12 @@ mod tests {
 
         let cfg = parse(include_str!("../../resources/default-config.toml")).unwrap();
         let pending = cfg.pending_sections();
-        for section in ["output", "gesturebinds"] {
-            assert!(pending.contains(&section), "missing {section}: {pending:?}");
-        }
+        assert!(pending.contains(&"output"), "missing output: {pending:?}");
         assert!(!pending.contains(&"layer_rule"));
         assert!(!pending.contains(&"mousebinds"));
         assert!(!pending.contains(&"axisbinds"));
+        assert!(!pending.contains(&"gesturebinds"));
+        assert!(!pending.contains(&"modes"));
         // The example's `[input]` matches the built-in defaults, so nothing is
         // lost by not applying it; `[layout]` is applied.
         assert!(!pending.contains(&"input"));

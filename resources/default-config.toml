@@ -137,6 +137,11 @@ layer_name = ["rofi", "alacritty"]
 "ALT+SHIFT+w" = "restore_minimized"
 "ALT+z" = "toggle_scratchpad"
 
+# Bind flags are appended after a colon: `release`, `pass-through`, `repeat`.
+# Example: "SUPER+x:pass-through" = "spawn:notify-send hi" (runs and forwards the key)
+# Enter the resize submap below; Escape leaves it (see [modes.resize.binds]).
+"SUPER+ALT+r" = "enter_mode:resize"
+
 # Works even when screen is locked
 [binds.locked]
 # Volume & Brightness Bindings
@@ -170,5 +175,14 @@ layer_name = ["rofi", "alacritty"]
 # Axis Bindings
 "SUPER+UP" = "viewtoleft_have_client"
 "SUPER+DOWN" = "viewtoright_have_client"
+
+[modes.resize.binds]
+# A key mode (submap): active only after `enter_mode:resize`.
+# Binds here are checked before the default tables; unbound keys still work.
+"h" = "master_ratio-"
+"l" = "master_ratio+"
+"j" = "master_count+"
+"k" = "master_count-"
+"Escape" = "leave_mode"
 
 
