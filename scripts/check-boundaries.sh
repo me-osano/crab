@@ -5,7 +5,9 @@
 #     must not mention Smithay/Wayland/system code — checked by scanning their
 #     sources, since cargo metadata cannot isolate modules of one package;
 #   * those pure modules may only depend *downward* (core → nothing;
-#     config/layout/animation → core), and src/lib.rs may expose only them.
+#     config/layout/animation → core), and src/lib.rs may expose only them;
+#   * src/compositor keeps crab's custom ordered scene (ADR-0008) and never
+#     adopts Smithay `Space`/`DynamicScene`/`WindowElement`.
 #
 # Run locally with `./scripts/check-boundaries.sh`; also run in CI.
 set -euo pipefail
@@ -47,7 +49,10 @@ PURE_MODULES = {"core", "config", "layout", "animation"}
 # like `input`/`LayoutInput` do not false-positive.
 FORBIDDEN_CODE = [
     r"\bsmithay", r"\bwayland", r"\bcalloop", r"\bwinit", r"\blibinput",
-    r"\blibseat", r"\bgbm", r"\bdrm", r"\budev", r"\bpixman", r"\bx11",
+    r"\blibseat", r"\bgbm", r"\bdrm", r"\budev", r"\bpixman",
+    # `x11` alone is a legitimate window-rule key (`x11 = true|false`), so only
+    # match tokens that imply actual X11/Xwayland linkage.
+    r"\bx11rb\b", r"\bxcb\b", r"\bxwayland",
     r"\begl\b", r"\bgles\b", r"\bglow\b",
 ]
 
@@ -117,6 +122,25 @@ for module_dir, allowed in LAYERS.items():
                         f"only depend downward ({'/'.join(sorted(allowed))})"
                     )
 
+# ADR-0008: the compositor builds its own ordered element list. Smithay's
+# `Space`/`DynamicScene`/`WindowElement` would become a second scene authority,
+# so reject them here rather than relying on review. Comments are dropped first,
+# so the ADR discussion in docs and doc comments is unaffected.
+SCENE_DIR = pathlib.Path("src/compositor")
+SCENE_FORBIDDEN = [r"\bSpace\b", r"\bDynamicScene\b", r"\bWindowElement\b"]
+if SCENE_DIR.is_dir():
+    for source in sorted(SCENE_DIR.rglob("*.rs")):
+        for lineno, line in enumerate(source.read_text().splitlines(), start=1):
+            code = line.split("//", 1)[0]
+            for needle in SCENE_FORBIDDEN:
+                if re.search(needle, code):
+                    errors.append(
+                        f"{source}:{lineno}: `{needle}` — src/compositor keeps the "
+                        f"custom ordered scene (ADR-0008); use lower-level Smithay "
+                        f"helpers instead"
+                    )
+                    break
+
 if errors:
     print("boundary violations:", file=sys.stderr)
     for error in errors:
@@ -125,6 +149,7 @@ if errors:
 
 print(
     "boundaries OK: src/{core,config,layout,animation} are Smithay-free and "
-    "depend downward only, src/lib.rs exposes just them, crab-ipc is a leaf"
+    "depend downward only, src/lib.rs exposes just them, src/compositor keeps "
+    "the ADR-0008 scene, crab-ipc is a leaf"
 )
 PY
