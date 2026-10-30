@@ -766,7 +766,10 @@ plus the event stream.
   section whose feature is still missing parses and validates, so a config can be
   written once; unknown keys are ignored and a present-but-wrongly-typed key is an
   error. The pre-`[layout]` flat form is rejected with a message rather than silently reset.
-- `include = ["other.toml"]` support for splitting configs.
+- `include = ["other.toml", "?local.toml"]` splits a config across files: paths
+  are relative to the including file, `?` marks an optional entry, includes are
+  recursive with cycle detection, and the including file overrides what it
+  includes (tables merge recursively, arrays concatenate).
 - Provide `crab-cli config schema` or documented defaults so editors can offer completion later.
 
 ### 13.3 Example

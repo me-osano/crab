@@ -9,6 +9,21 @@ crab uses TOML configuration with mango-style sections. The shipped example is [
 - **Hot reload**: if `notify` watches the config's parent directory, changes are debounced (~250ms). Parsed and validated atomically; on failure the last good config remains, a banner is shown, and `ConfigError`/`config-error` is emitted over IPC. Use `crab-cli config-reload` or bind `reload-config`/`Config::ReloadConfig`.
 - **Unknown keys** are ignored. A key that is **present but wrong type** is an error. A pre-`[layout]` flat form (`gaps`, `border_width`, ...) is rejected with a pointer to move keys under `[layout]`.
 
+### Includes
+
+A config may pull in other files:
+
+```toml
+include = ["base.toml", "theme.toml", "?local.toml"]
+```
+
+- Paths are relative to the **including file**; absolute paths are accepted.
+- A leading `?` marks an optional entry: a missing file is skipped instead of failing the load.
+- Includes are resolved depth-first in order, and included files may include others. Cycles are rejected.
+- Merging is per key: tables merge recursively, arrays concatenate, and a later value overrides an earlier one. The including file therefore overrides its includes, and later entries override earlier ones.
+- Each included file's syntax errors name that file. `parse()` (text-only) rejects `include`; use `load()` / `--config` so the base directory is known.
+- Hot reload watches the **main** config's directory. Files included from other directories are re-read on reload but editing them alone does not trigger it.
+
 ## Conventions
 
 - **Booleans/flags**: accept `true`/`false` or `0`/`1` (mango style). Other values are errors.
@@ -163,11 +178,11 @@ Matched by namespace when a layer-shell surface maps. **First matching rule wins
 
 ```toml
 [binds.default]
-"SUPER+ALT+r" = "enter_mode:resize"
+"SUPER+ALT+s" = "enter_mode:scroll"
 
-[modes.resize.binds]
-"h" = "preset_width"
-"l" = "center_column"
+[modes.scroll.binds]
+"r" = "preset_width"
+"c" = "center_column"
 "Escape" = "leave_mode"     # back to default
 ```
 
@@ -281,7 +296,7 @@ From `Config::default()` / shipped `resources/default-config.toml`:
 - Overrides `SUPER+space` to spawn `rofi` (replaces built-in cycle layout); built-in layout cycling remains on `SUPER+CTRL+space`/`SUPER+space` family depending on built-ins? Built-ins: `SUPER+CTRL+space` = cycle_layout_family, `SUPER+space` = cycle_layout_mode. Config overriding `SUPER+space` to spawn rofi takes precedence. Keyboard layout switching is still available via built-ins `SUPER+ALT+space` / `SUPER+ALT+SHIFT+space`.
 - Includes window rule examples (floating with size/offset for Nautilus/Brave/Obsidian), a layer rule for rofi/alacritty zoom, autostart waybar, mouse/axis/gesture binds (all applied).
 - Uses action aliases like `killclient`, `focusdir`, `move_client`, `view_space_left`, `toggle_window_floating`, `toggle_maximize_window` — all accepted.
-- Shows bind flags and a `[modes.resize.binds]` submap; `SUPER+ALT+r` enters it and `Escape` leaves it.
+- Shows bind flags and a `[modes.scroll.binds]` submap; `SUPER+ALT+s` enters it and `Escape` leaves it.
 - Validate it: `cargo run --quiet -- --validate --config resources/default-config.toml` (should report "config valid").
 
 To use: copy to `~/.config/crab/config.toml` and edit for your setup.

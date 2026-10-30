@@ -6,7 +6,9 @@
 //! `[window_rule]`, `[layer_rule]`, `[binds.default]`, `[binds.locked]`,
 //! `[mousebinds]`, `[gesturebinds]` and `[axisbinds]`. The shipped example is
 //! `resources/default-config.toml`; without `--config`, crab reads
-//! [`default_path`] when that file exists.
+//! [`default_path`] when that file exists. [`load`] resolves an `include` list
+//! relative to the including file before parsing, while [`parse`] handles a
+//! single already-merged document.
 //!
 //! Unknown keys are ignored, so a config keeps working across versions; a key
 //! that is *present* but has the wrong type is an error, so a typo is reported
@@ -482,6 +484,14 @@ pub enum ConfigError {
     /// The TOML could not be parsed, or a value had the wrong type.
     #[error("failed to parse config: {0}")]
     Parse(String),
+    /// A specific file could not be parsed (used when resolving `include`).
+    #[error("failed to parse config {path}: {message}")]
+    ParseFile {
+        /// The file that failed.
+        path: PathBuf,
+        /// The parser's message, including its line/column.
+        message: String,
+    },
     /// The config parsed but is semantically invalid.
     #[error("invalid config: {0}")]
     Invalid(String),
@@ -1052,6 +1062,9 @@ const LEGACY_TOP_LEVEL: [&str; 5] = [
 
 /// Parses a configuration from TOML text (does not validate).
 ///
+/// `include` is resolved only by [`load`], which knows the file's directory;
+/// text passed here must already be fully merged.
+///
 /// # Errors
 /// Returns [`ConfigError::Parse`] on malformed TOML or wrongly-typed values, and
 /// [`ConfigError::Invalid`] for a value that parsed but is not a valid choice
@@ -1061,6 +1074,11 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     // message instead of "invalid type" for the `layout` key.
     if let Ok(document) = toml::from_str::<toml::Value>(text) {
         if let Some(table) = document.as_table() {
+            if table.contains_key("include") {
+                return Err(ConfigError::Invalid(
+                    "`include` is resolved only when loading from a file; use `load`".to_owned(),
+                ));
+            }
             if let Some(key) = LEGACY_TOP_LEVEL
                 .iter()
                 .find(|key| table.get(**key).is_some_and(|value| !value.is_table()))
@@ -1075,18 +1093,137 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     raw.into_config()
 }
 
-/// Loads and validates a configuration from `path`.
+/// Loads and validates a configuration from `path`, resolving `include`.
+///
+/// `include` entries are paths relative to the including file (absolute paths
+/// are accepted too). An entry prefixed with `?` is optional: a missing file is
+/// skipped instead of failing the load. Includes are resolved depth-first, in
+/// order, and a file may include others; cycles are rejected. Tables merge
+/// recursively, arrays concatenate, and a later value wins over an earlier one,
+/// so the including file overrides what it includes.
 ///
 /// # Errors
-/// Returns a [`ConfigError`] if the file cannot be read, parsed, or validated.
+/// Returns a [`ConfigError`] if a file cannot be read, parsed, or validated, if
+/// an include names a missing required file, or if includes form a cycle.
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut stack = Vec::new();
+    let document = load_document(path, &mut stack)?;
+    let text = toml::to_string(&document).map_err(|err| ConfigError::Parse(err.to_string()))?;
     let config = parse(&text)?;
     validate(&config)?;
     Ok(config)
+}
+
+/// One entry of an `include` list.
+struct Include {
+    path: PathBuf,
+    optional: bool,
+}
+
+/// Reads `path` and recursively merges the files it includes.
+fn load_document(path: &Path, stack: &mut Vec<PathBuf>) -> Result<toml::Value, ConfigError> {
+    let canonical = std::fs::canonicalize(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if stack.contains(&canonical) {
+        let chain: Vec<String> = stack
+            .iter()
+            .chain(std::iter::once(&canonical))
+            .map(|path| path.display().to_string())
+            .collect();
+        return Err(ConfigError::Invalid(format!(
+            "config include cycle: {}",
+            chain.join(" -> ")
+        )));
+    }
+    let text = std::fs::read_to_string(&canonical).map_err(|source| ConfigError::Io {
+        path: canonical.clone(),
+        source,
+    })?;
+    let mut document: toml::Value =
+        toml::from_str(&text).map_err(|err| ConfigError::ParseFile {
+            path: canonical.clone(),
+            message: err.to_string(),
+        })?;
+    let includes = take_includes(&mut document, &canonical)?;
+
+    stack.push(canonical);
+    let mut merged = toml::Value::Table(toml::Table::new());
+    for include in includes {
+        if include.optional && !include.path.exists() {
+            continue;
+        }
+        let included = load_document(&include.path, stack)?;
+        merge_values(&mut merged, included);
+    }
+    stack.pop();
+
+    merge_values(&mut merged, document);
+    Ok(merged)
+}
+
+/// Removes the `include` key from `document` and resolves its entries.
+fn take_includes(document: &mut toml::Value, path: &Path) -> Result<Vec<Include>, ConfigError> {
+    let Some(table) = document.as_table_mut() else {
+        return Ok(Vec::new());
+    };
+    let Some(raw) = table.remove("include") else {
+        return Ok(Vec::new());
+    };
+    let entries = match raw {
+        toml::Value::String(value) => vec![value],
+        toml::Value::Array(values) => values
+            .into_iter()
+            .map(|value| match value {
+                toml::Value::String(value) => Ok(value),
+                other => Err(invalid_include(path, &other)),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        other => return Err(invalid_include(path, &other)),
+    };
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let (entry, optional) = match entry.strip_prefix('?') {
+                Some(rest) => (rest, true),
+                None => (entry.as_str(), false),
+            };
+            Include {
+                path: base.join(entry),
+                optional,
+            }
+        })
+        .collect())
+}
+
+/// The error for an `include` value that is not a string or array of strings.
+fn invalid_include(path: &Path, value: &toml::Value) -> ConfigError {
+    ConfigError::Invalid(format!(
+        "`include` in {} must be a string or an array of strings, not {}",
+        path.display(),
+        value.type_str()
+    ))
+}
+
+/// Merges `overlay` into `base`: tables recursively, arrays by appending, and
+/// every other value by replacement (so the overlay wins).
+fn merge_values(base: &mut toml::Value, overlay: toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base), toml::Value::Table(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_values(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (toml::Value::Array(base), toml::Value::Array(mut overlay)) => base.append(&mut overlay),
+        (base, overlay) => *base = overlay,
+    }
 }
 
 /// The config file crab reads when `--config` is not given.
@@ -1735,5 +1872,131 @@ mod tests {
         );
         assert_eq!(config.gesture_binds["right+4"], "viewprev_have_client");
         assert_eq!(config.axis_binds["SUPER+UP"], "viewtoleft_have_client");
+    }
+
+    /// A scratch directory that removes itself at the end of a test.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("crab-config-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, name: &str, text: &str) -> PathBuf {
+            let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, text).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn includes_merge_in_order_and_the_main_file_wins() {
+        let dir = TempDir::new("merge");
+        dir.write(
+            "base.toml",
+            "[layout]\ngaps = 12\nborder_width = 1\n[autostart]\nexec_once = [\"base\"]\n",
+        );
+        dir.write(
+            "theme.toml",
+            "[layout]\nborder_width = 3\n[autostart]\nexec_once = [\"theme\"]\n",
+        );
+        let main = dir.write(
+            "config.toml",
+            "include = [\"base.toml\", \"theme.toml\"]\n[layout]\ngaps = 4\n",
+        );
+
+        let config = load(&main).unwrap();
+        assert_eq!(config.gaps, 4, "the including file overrides an include");
+        assert_eq!(
+            config.border_width, 3,
+            "later includes override earlier ones"
+        );
+        assert_eq!(
+            config.autostart.exec_once,
+            ["base", "theme"],
+            "arrays concatenate"
+        );
+    }
+
+    #[test]
+    fn a_single_include_string_is_accepted() {
+        let dir = TempDir::new("single");
+        dir.write("base.toml", "[layout]\ngaps = 5\n");
+        let main = dir.write("config.toml", "include = \"base.toml\"\n");
+        assert_eq!(load(&main).unwrap().gaps, 5);
+    }
+
+    #[test]
+    fn includes_are_relative_to_the_including_file() {
+        let dir = TempDir::new("nested");
+        dir.write("sub/deeper.toml", "[layout]\nborder_width = 7\n");
+        dir.write("sub/nested.toml", "include = [\"deeper.toml\"]\n");
+        let main = dir.write("config.toml", "include = [\"sub/nested.toml\"]\n");
+        assert_eq!(load(&main).unwrap().border_width, 7);
+    }
+
+    #[test]
+    fn optional_includes_may_be_missing() {
+        let dir = TempDir::new("optional");
+        let main = dir.write(
+            "config.toml",
+            "include = [\"?missing.toml\"]\n[layout]\ngaps = 6\n",
+        );
+        assert_eq!(load(&main).unwrap().gaps, 6);
+    }
+
+    #[test]
+    fn a_missing_required_include_fails() {
+        let dir = TempDir::new("missing");
+        let main = dir.write("config.toml", "include = [\"missing.toml\"]\n");
+        let err = load(&main).unwrap_err();
+        assert!(matches!(err, ConfigError::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn include_cycles_are_rejected() {
+        let dir = TempDir::new("cycle");
+        dir.write("a.toml", "include = [\"b.toml\"]\n");
+        let a = dir.write("b.toml", "include = [\"a.toml\"]\n");
+        let err = load(&a).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn a_syntax_error_in_an_include_names_its_file() {
+        let dir = TempDir::new("bad");
+        dir.write("bad.toml", "[layout\ngaps = 1\n");
+        let main = dir.write("config.toml", "include = [\"bad.toml\"]\n");
+        let err = load(&main).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("bad.toml"), "{message}");
+        assert!(message.contains("failed to parse config"), "{message}");
+    }
+
+    #[test]
+    fn parse_rejects_include_because_it_has_no_base_directory() {
+        let err = parse("include = [\"base.toml\"]\n").unwrap_err();
+        assert!(err.to_string().contains("include"), "{err}");
+    }
+
+    #[test]
+    fn include_must_be_a_string_or_an_array_of_strings() {
+        let dir = TempDir::new("shape");
+        let main = dir.write("config.toml", "include = 3\n");
+        let err = load(&main).unwrap_err();
+        assert!(err.to_string().contains("include"), "{err}");
     }
 }

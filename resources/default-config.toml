@@ -135,8 +135,8 @@ layer_name = ["rofi", "alacritty"]
 
 # Bind flags are appended after a colon: `release`, `pass-through`, `repeat`.
 # Example: "SUPER+x:pass-through" = "spawn:notify-send hi" (runs and forwards the key)
-# Enter the resize submap below; Escape leaves it (see [modes.resize.binds]).
-"SUPER+ALT+r" = "enter_mode:resize"
+# Enter the scroll submap below; Escape leaves it (see [modes.scroll.binds]).
+"SUPER+ALT+s" = "enter_mode:scroll"
 
 # Works even when screen is locked
 [binds.locked]
@@ -172,13 +172,11 @@ layer_name = ["rofi", "alacritty"]
 "SUPER+UP" = "viewtoleft_have_client"
 "SUPER+DOWN" = "viewtoright_have_client"
 
-[modes.resize.binds]
-# A key mode (submap): active only after `enter_mode:resize`.
+[modes.scroll.binds]
+# A key mode (submap): active only after `enter_mode:scroll`.
 # Binds here are checked before the default tables; unbound keys still work.
-"h" = "preset_width"
-"l" = "preset_width"
-"j" = "center_column"
-"k" = "center_column"
+"r" = "preset_width"
+"c" = "center_column"
 "Escape" = "leave_mode"
 
 

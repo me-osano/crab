@@ -458,9 +458,13 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       `toml` crate's line/column).
 - [ ] Validation with **good error spans** for semantic errors (range/choice
       failures name the key but carry no span yet).
-- [ ] File includes (`include = [...]`, with optional entries); user variables.
+- [x] File includes (`include = [...]`): relative/absolute paths, optional `?path`
+      entries, recursive resolution with cycle detection, and per-key merge
+      (tables recursive, arrays concatenated, later wins). Syntax errors in an
+      include name that file.
+- [ ] User variables (definitions and substitution across included files).
 - [ ] Explicit parse → merge → validate → apply for layered config (defaults + user
-      + runtime overrides), with path-qualified errors. [IMPROV B39]
+      + runtime overrides), with path-qualified semantic errors. [IMPROV B39]
       *(niri-config patterns, not its schema)*
 - [ ] Audit parsed-only fields (`client_side_decorations`, `next_space_direction`,
       `always_center_single_column`, touchpad/mouse/keyboard fields,

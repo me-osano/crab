@@ -120,10 +120,9 @@ fn record_failure(state: &mut Crab, message: &str) {
 
 /// Validates a config at `path` without applying it.
 pub(crate) fn validate_path(path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let config = config::parse(&text).map_err(|err| err.to_string())?;
-    config::validate(&config).map_err(|err| err.to_string())?;
-    Ok(())
+    config::load(path)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
 }
 
 /// Sets the banner message.
