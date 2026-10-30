@@ -13,9 +13,9 @@
 //! principle) and closing a column to the left of the focused one not drag the
 //! focused window sideways (its second).
 //!
-//! `scroll` and `vertical-scroll` are this one implementation seen from two
-//! sides: everything below is expressed in terms of the **main** axis (the one
-//! the strip grows along) and the **cross** axis (along a column), and
+//! The exposed `scroll` mode runs horizontally, but the implementation is
+//! axis-generic: everything below is expressed in terms of the **main** axis
+//! (the one the strip grows along) and the **cross** axis (along a column), and
 //! [`ScrollAxis`] turns those into ordinary coordinates.
 
 use super::placement::{
@@ -45,7 +45,7 @@ impl Scroll {
 
 impl Layout for Scroll {
     fn kind(&self) -> LayoutKind {
-        self.axis.kind()
+        LayoutKind::Scroll
     }
 
     fn arrange(&self, mut input: LayoutInput<'_>) -> Vec<Placement> {
@@ -73,7 +73,6 @@ impl Layout for Scroll {
                 }
             }
             LayoutCommand::CenterColumn => scroll.center_request = true,
-            _ => {}
         }
     }
 }

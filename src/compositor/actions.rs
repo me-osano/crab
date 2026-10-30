@@ -61,16 +61,6 @@ pub(crate) fn apply(state: &mut Crab, action: Action) -> Result<(), String> {
         Action::ToggleFloating => state.toggle_floating(),
         Action::ToggleFullscreen => state.toggle_fullscreen(),
         Action::ToggleMaximized => state.toggle_maximized(),
-        Action::MasterRatio { grow } => state.layout_command(if grow {
-            LayoutCommand::IncMasterRatio
-        } else {
-            LayoutCommand::DecMasterRatio
-        }),
-        Action::MasterCount { add } => state.layout_command(if add {
-            LayoutCommand::IncMasterCount
-        } else {
-            LayoutCommand::DecMasterCount
-        }),
         Action::PresetWidth => state.layout_command(LayoutCommand::SwitchPresetWidth),
         Action::CenterColumn => state.layout_command(LayoutCommand::CenterColumn),
         Action::ReloadConfig => match reload::reload(state) {

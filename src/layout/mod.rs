@@ -8,60 +8,27 @@
 //! drawn above tiled windows by the compositor, so layouts never need to know
 //! about them (`COMPOSITOR.md` §7.1).
 //!
-//! M2 ships [`Tile`], [`Monocle`], and [`Floating`]; M3 adds the scroller,
-//! [`Scroll`], which is `scroll` and `vertical-scroll` on one axis-generic
-//! implementation. The compositor picks one through [`LayoutKind`] with
-//! [`arrange`] / [`neighbor`] / [`apply_command`] rather than holding a trait
-//! object per space.
+//! Crab ships exactly three modes: [`Fair`] (`tile(fair)`), [`Floating`]
+//! (`stack(floating)`), and [`Scroll`] (`scroll(scroll)`). The compositor picks
+//! one through [`LayoutKind`] with [`arrange`] / [`neighbor`] /
+//! [`apply_command`] rather than holding a trait object per space.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod fair;
 mod placement;
 mod scroll;
-mod tile;
 
+pub use fair::Fair;
 pub use placement::{
     Layout, LayoutInput, LayoutWindow, Placement, apply_hints, directional_neighbor,
 };
 pub use scroll::Scroll;
-pub use tile::Tile;
 
 use crate::core::{
     Direction, LayoutCommand, LayoutKind, LayoutParams, Point, Rect, ScrollAxis, ScrollState, Size,
 };
-
-/// Shows only the focused window, filling the area (others are hidden).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Monocle;
-
-impl Layout for Monocle {
-    fn kind(&self) -> LayoutKind {
-        LayoutKind::Monocle
-    }
-
-    fn arrange(&self, input: LayoutInput<'_>) -> Vec<Placement> {
-        let area = input.usable_area();
-        let focus = input.focused.or(if input.windows.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
-        input
-            .windows
-            .iter()
-            .enumerate()
-            .map(|(index, window)| Placement {
-                window: window.id,
-                // Every window keeps the same rect so switching back to the
-                // focused window is instant; only visibility differs.
-                rect: apply_hints(area, window),
-                visible: Some(index) == focus,
-                z_hint: i32::from(Some(index) == focus),
-            })
-            .collect()
-    }
-}
 
 /// Places nothing automatically; windows keep their own floating geometry.
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,11 +48,9 @@ impl Layout for Floating {
 #[must_use]
 pub fn layout_for(kind: LayoutKind) -> Box<dyn Layout> {
     match kind {
-        LayoutKind::Tile => Box::new(Tile),
-        LayoutKind::Monocle => Box::new(Monocle),
+        LayoutKind::Fair => Box::new(Fair),
         LayoutKind::Floating => Box::new(Floating),
         LayoutKind::Scroll => Box::new(Scroll::new(ScrollAxis::Horizontal)),
-        LayoutKind::VerticalScroll => Box::new(Scroll::new(ScrollAxis::Vertical)),
     }
 }
 
@@ -184,33 +149,6 @@ mod tests {
     }
 
     #[test]
-    fn monocle_shows_only_the_focused_window() {
-        let windows = sample();
-        let params = LayoutParams {
-            gaps: 10.0,
-            ..Default::default()
-        };
-        let mut scroll = ScrollState::default();
-        let placements = Monocle.arrange(input(&windows, Some(1), &params, &mut scroll));
-        let visible: Vec<_> = placements.iter().filter(|p| p.visible).collect();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].window, WindowId::new(2));
-        assert_eq!(visible[0].rect, Rect::new(10.0, 10.0, 980.0, 980.0));
-    }
-
-    #[test]
-    fn monocle_is_deterministic() {
-        let windows = sample();
-        let params = LayoutParams::default();
-        let mut a = ScrollState::default();
-        let mut b = ScrollState::default();
-        assert_eq!(
-            Monocle.arrange(input(&windows, Some(2), &params, &mut a)),
-            Monocle.arrange(input(&windows, Some(2), &params, &mut b))
-        );
-    }
-
-    #[test]
     fn floating_places_nothing() {
         let windows = sample();
         let params = LayoutParams::default();
@@ -224,14 +162,13 @@ mod tests {
 
     #[test]
     fn by_name_round_trips() {
-        assert_eq!(by_name("tile").unwrap().kind(), LayoutKind::Tile);
-        assert_eq!(by_name("monocle").unwrap().kind(), LayoutKind::Monocle);
+        assert_eq!(by_name("fair").unwrap().kind(), LayoutKind::Fair);
+        assert_eq!(by_name("tile").unwrap().kind(), LayoutKind::Fair);
         assert_eq!(by_name("floating").unwrap().kind(), LayoutKind::Floating);
+        assert_eq!(by_name("stack").unwrap().kind(), LayoutKind::Floating);
         assert_eq!(by_name("scroll").unwrap().kind(), LayoutKind::Scroll);
-        assert_eq!(
-            by_name("vertical-scroll").unwrap().kind(),
-            LayoutKind::VerticalScroll
-        );
+        assert!(by_name("monocle").is_none());
+        assert!(by_name("vertical-scroll").is_none());
         assert!(by_name("nope").is_none());
     }
 
@@ -244,18 +181,8 @@ mod tests {
 
     #[test]
     fn apply_command_reaches_the_layout_that_owns_it() {
-        // The shared commands land in the parameters…
         let mut params = LayoutParams::default();
         let mut scroll = ScrollState::default();
-        apply_command(
-            LayoutKind::Tile,
-            LayoutCommand::IncMasterCount,
-            &mut params,
-            &mut scroll,
-        );
-        assert_eq!(params.master_count, 2);
-
-        // …and the scroller's land in its state, which only it can reach.
         apply_command(
             LayoutKind::Scroll,
             LayoutCommand::CenterColumn,
@@ -266,7 +193,16 @@ mod tests {
             scroll.center_request,
             "the scroller handled its own command"
         );
-        assert_eq!(params.master_count, 2, "and left the parameters alone");
+
+        // The tiling layout has no persistent state of its own to touch.
+        let before = params;
+        apply_command(
+            LayoutKind::Fair,
+            LayoutCommand::CenterColumn,
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(params, before);
     }
 
     #[test]

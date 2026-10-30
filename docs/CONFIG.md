@@ -74,8 +74,6 @@ One table per connector (e.g. `[output.eDP-1]`, `[output.DP-1]`). `<connector>` 
 #### `[layout.tile]`
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `master_count` | int | `1` | Windows in master area. Must be >= 0. |
-| `master_ratio` | float | `0.6` | Master area fraction. Must be in `LayoutParams::MIN_RATIO..=MAX_RATIO`. |
 | `next_space_direction` | `horizontal` \| `vertical` | `horizontal` | Parsed, not applied yet. |
 
 #### `[layout.scroll]`
@@ -88,8 +86,8 @@ One table per connector (e.g. `[output.eDP-1]`, `[output.DP-1]`). `<connector>` 
 
 **Layout kinds/modes/families** (from core):
 - Families (cycle order): `stack`, `tile`, `scroll`
-- Modes (all): `tile`, `monocle`, `floating`, `scroll`, `vertical-scroll`
-- Config/IPC accept mode names or family names; a family name is an alias for that family's default mode. `free` may be accepted in some places as alias for floating. `LayoutKind::from_name` validates `default_layout` and `set-layout`.
+- Modes (all): `fair` (`tile`), `floating` (`stack`), `scroll` (`scroll`)
+- Config/IPC accept mode names or family names; a family name is an alias for that family's default mode (`stack` → `floating`, `tile` → `fair`, `scroll` → `scroll`). `free` may be accepted in some places as alias for floating. `LayoutKind::from_name` validates `default_layout` and `set-layout`. The removed modes `monocle` and `vertical-scroll` are rejected.
 
 ### `[animations]`
 | Key | Type | Default | Notes |
@@ -168,8 +166,8 @@ Matched by namespace when a layer-shell surface maps. **First matching rule wins
 "SUPER+ALT+r" = "enter_mode:resize"
 
 [modes.resize.binds]
-"h" = "master_ratio-"
-"l" = "master_ratio+"
+"h" = "preset_width"
+"l" = "center_column"
 "Escape" = "leave_mode"     # back to default
 ```
 
@@ -200,8 +198,6 @@ Actions: `enter_mode:<name>` (aliases `enter-mode:`, `mode:`), `leave_mode`/`exi
 | `SUPER+ALT+space` | `next_keyboard_layout` | Switch keyboard layout forward |
 | `SUPER+ALT+SHIFT+space` | `prev_keyboard_layout` | Switch keyboard layout backward |
 | `SUPER+f` | `toggle_fullscreen` | Toggle fullscreen |
-| `SUPER+SHIFT+h/l` | `dec_master_count` / `inc_master_count` | Tile master count |
-| `SUPER+h/l` | `dec_master_ratio` / `inc_master_ratio` | Tile master ratio |
 | `SUPER+r` | `preset_width` | Cycle scroll column width preset |
 | `SUPER+c` | `center_column` | Center focused scroll column |
 | `SUPER+q` | `killclient` / `close-window` | Close focused window |
@@ -235,8 +231,6 @@ Canonical actions match [`crab_ipc::Action`](../crab-ipc/src/protocol.rs). Confi
 | `toggle-floating` | `toogle_window_floating`, `toggle_window_floating`, `toggle_floating`, `togglefloating`, `toggle-floating` | - | Toggle floating |
 | `toggle-fullscreen` | `toggle_fullscreen`, `togglefullscreen`, `toggle-fullscreen` | - | Toggle fullscreen |
 | `toggle-maximized` | `toggle_maximize_window`, `toggle_maximized`, `togglemaximizescreen`, `toggle-maximized` | - | Toggle maximized |
-| `master-ratio` | `inc_master_ratio`/`master_ratio+` (+), `dec_master_ratio`/`master_ratio-` (-) | `grow: bool` | Grow/shrink master area |
-| `master-count` | `inc_master_count`/`master_count+` (+), `dec_master_count`/`master_count-` (-) | `add: bool` | Add/remove master slot |
 | `preset-width` | `preset_width`, `switch_preset_width`, `preset-width` | - | Cycle scroll column width preset |
 | `center-column` | `center_column`, `center-column` | - | Center focused scroll column |
 | `reload-config` | `reload_config`, `reload-config` | - | Reload config file (hot reload) |
@@ -264,7 +258,7 @@ Canonical actions match [`crab_ipc::Action`](../crab-ipc/src/protocol.rs). Confi
 
 ## Status (what's applied vs parsed)
 
-**Applied**: `[layout]` (gaps/borders/colors/`focus_follows_cursor`/`default_layout`/tile/stack/scroll params), `[animations]` (enabled/open/close), `[binds.*]` (including bind flags), `[modes.*]`, `[mousebinds]`, `[axisbinds]`, `[gesturebinds]`, `[autostart] exec_once`, `[[window_rule]]` matching/apply (app_id/title/is_floating/is_fullscreen + floating/size/offset/space/pinned/always_on_top/no_focus, plus dynamic re-evaluation of those state fields for rules with `dynamic`), `[layer_rule]` open animation by namespace, keyboard repeat/layout, output position/scale where applicable.
+**Applied**: `[layout]` (gaps/borders/colors/`focus_follows_cursor`/`default_layout`/stack/tile/scroll params), `[animations]` (enabled/open/close), `[binds.*]` (including bind flags), `[modes.*]`, `[mousebinds]`, `[axisbinds]`, `[gesturebinds]`, `[autostart] exec_once`, `[[window_rule]]` matching/apply (app_id/title/is_floating/is_fullscreen + floating/size/offset/space/pinned/always_on_top/no_focus, plus dynamic re-evaluation of those state fields for rules with `dynamic`), `[layer_rule]` open animation by namespace, keyboard repeat/layout, output position/scale where applicable.
 
 **Parsed/validated but not yet applied**: `[input.touchpad]`/`[input.mouse]` details (M4), `[output.*]` mode/transform in full (M4), `[layout] client_side_decorations`, `space_directions` (`*_next_space_direction`), `scroll.always_center_single_column`, some advanced rule fields (`opacity`, `blur`, `shadow`, `corner_radius`, `block_out_from`, `default_column_width`, etc.), the `x11` rule matcher (no separate X11 surface tracking yet), the lock/inhibitor bind flags, `numlock_on`.
 
@@ -272,7 +266,7 @@ Canonical actions match [`crab_ipc::Action`](../crab-ipc/src/protocol.rs). Confi
 
 From `Config::default()` / shipped `resources/default-config.toml`:
 - Gaps 8, borders 2 (#7aa2f7 focused, #3b4261 unfocused)
-- Layout tile, master_count 1, master_ratio 0.6
+- Layout tile (`fair` balanced grid)
 - Animations enabled, slide/slide
 - Focus follows cursor true, client side decorations false
 - Scroll: center_focused_column never, always_center_single_column true, default_column_ratio 0.5; scroll family extends vertically by default

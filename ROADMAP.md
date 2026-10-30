@@ -150,7 +150,7 @@ provenance, priority, target milestone, and how to verify it. Priority:
 
 | Feature | Best source | Prio | MS | Verify |
 |---|---|---|---|---|
-| Tiling windows, master/stack | mango/dwm | P0 | M2 | N windows tile without overlap |
+| Tiling windows, balanced grid | mango | P0 | M2 | N windows tile without overlap |
 | Per-window floating toggle; mixed tiled+floating on one space | mango + cosmic | P0 | M2 | Dialog floats over tiled windows |
 | Spaces: per-output, multi-space **view**, multiple spaces per window | mango | P0 | M2 | `view 1+3`, `space` a window onto 2 spaces |
 | Named spaces / persistent workspaces | niri | P1 | M3 | Named space survives output unplug |
@@ -174,15 +174,12 @@ strategy; mode = concrete arrangement. Two cycle actions address the two axes
 | Family | Mode | Source | Prio | MS |
 |---|---|---|---|---|
 | `Stack` | `floating` (cascade, mixed) | classic | P0 | M2 |
-| `Stack` | `monocle` | dwm/mango | P0 | M2 |
-| `Tile` | `tile` (master/stack, ratio+count, left/right/top/bottom) | mango/dwm | P0 | M2 |
+| `Tile` | `fair` (balanced grid, `tile` alias) | mango | P0 | M2 |
 | `Scroll` | `scroll` (infinite columns, focus/center/overspread, presets) | niri + mango | P0 | M3 |
 | `Tile` | `grid` | mango | P1 | M7 |
 | `Tile` | `deck` (master + top-of-stack) | mango/dwl | P1 | M7 |
 | `Tile` | `dwindle` (smart split, preserve, manual split) | mango/Hypr | P1 | M7 |
-| `Tile` | `fair`, `vertical-fair` | mango | P1 | M7 |
 | `Tile` | `center-tile`, `vertical-tile`, `right-tile` | mango | P2 | M7 |
-| `Scroll` | `vertical-scroll` | mango/niri | P2 | M3 |
 | `Stack` | `tabbed` (grouped slots) | cosmic | P1 | M7 |
 | Per-space layout memory + params restore | mango (`Pertag`) | P0 | M2/M3 |
 | Per-layout directional `neighbor()` | niri | P1 | M2 |
@@ -472,11 +469,11 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [x] `src/core`: `WindowId`, `OutputId`, `SpaceSet`, `Rect`, `Window`, `Output`,
       `SpaceView`, `FocusTarget`.
 - [x] `src/layout`: `Layout` trait, `LayoutInput`, `Placement`, `LayoutParams`.
-- [x] Layout families: `Stack` (`floating`, `monocle`) + `Tile` (`tile`). Mixed
+- [x] Layout families: `Stack` (`floating`) + `Tile` (`fair`). Mixed
       tiled+floating on one space.
 - [x] Spaces: `view`, `move-to-space`, `toggle-space`, **multi-space view**, multi-space windows.
 - [x] **Per-space layout memory + params** (`Pertag` equivalent).
-- [x] Cycle layout **family** and **mode** (two actions); master ratio/count; gaps/borders.
+- [x] Cycle layout **family** and **mode** (two actions); gaps/borders.
 - [x] Interactive move/resize for floating; float-tiled conversion.
 - [x] Unit + `proptest` invariants (no overlaps, in-area, deterministic).
 - [ ] **Exit:** a full day of tiling + floating dialogs works nested, with per-space
@@ -486,7 +483,7 @@ supersede `COMPOSITOR.md` §22 where they differ.
 ### M3 — Scroller + animation engine *(4–6 weeks)* — *the "best of niri+mango" phase*
 - [x] `src/animation`: spring + easing + bezier; **one synced clock per kind**;
       interruptible retargeting; `is_animating()`.
-- [x] `Scroll` family: `scroll` **and** `vertical-scroll` modes — the column model lives
+- [x] `Scroll` family: the `scroll` mode — the column model lives
       in `ScrollState`, opening a window never reflows an existing column, and the view
       follows the focused one under `center = never | always | on-overflow`, with
       `overspread` deciding what a column wider than the view does. Per-column width
@@ -546,8 +543,9 @@ supersede `COMPOSITOR.md` §22 where they differ.
 - [ ] **Exit:** replace your current compositor for a **full week** without fallback.
 
 ### M7 — Layout variety, grouping, window states *(4–6 weeks)* — *"all of mango + cosmic"*
-- [ ] Layouts: `Grid`, `Deck`, `Dwindle`, `Fair`, `VerticalFair`, `CenterTile`,
+- [ ] Layouts: `Grid`, `Deck`, `Dwindle`, `VerticalFair`, `CenterTile`,
       `VerticalTile`, `RightTile`, `Vertical*`; per-layout params + presets.
+      *(`Fair` shipped early as the sole `Tile` mode.)*
 - [ ] **Special workspace** overlay with dim + per-app auto-assign.
 - [ ] **Groups + tabbed/stacked** containers (cosmic); auto tab bar.
 - [ ] Named scratchpads + standard scratchpad + minimize/restore.

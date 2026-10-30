@@ -30,8 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::core::{
-    Color, LayoutKind, LayoutParams, OutputMode, OutputPreference, OutputSpecError,
-    OutputTransform, ScrollCenter,
+    Color, LayoutKind, OutputMode, OutputPreference, OutputSpecError, OutputTransform, ScrollCenter,
 };
 use serde::Deserialize;
 
@@ -47,12 +46,7 @@ pub struct Config {
     pub border_color: Color,
     /// Border color of unfocused windows (`[layout] unfocused_border_color`).
     pub unfocused_border_color: Color,
-    /// Default number of windows in the master area (`[layout] tile_master_count`).
-    pub master_count: i32,
-    /// Default master-area fraction (`[layout] tile_master_ratio`), within
-    /// `LayoutParams::MIN_RATIO..=LayoutParams::MAX_RATIO`.
-    pub master_ratio: f64,
-    /// Default layout name for new spaces (`[layout] layout`).
+    /// Default layout name for new spaces (`[layout] default_layout`).
     pub layout: String,
     /// Animation defaults (`[animations]`).
     pub animations: Animations,
@@ -122,8 +116,6 @@ impl Default for Config {
             border_width: 2,
             border_color: Color::from_hex("#7aa2f7").expect("static color is valid"),
             unfocused_border_color: Color::from_hex("#3b4261").expect("static color is valid"),
-            master_count: 1,
-            master_ratio: 0.6,
             layout: "tile".to_owned(),
             animations: Animations::default(),
             client_side_decorations: false,
@@ -556,8 +548,6 @@ struct RawStackLayout {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct RawTileLayout {
-    master_count: Option<i64>,
-    master_ratio: Option<RawNumber>,
     next_space_direction: Option<String>,
 }
 
@@ -783,12 +773,6 @@ impl RawStackLayout {
 
 impl RawTileLayout {
     fn apply(self, config: &mut Config) -> Result<(), ConfigError> {
-        if let Some(value) = self.master_count {
-            config.master_count = checked_i32(value, "layout.tile.master_count")?;
-        }
-        if let Some(value) = self.master_ratio {
-            config.master_ratio = value.get();
-        }
         if let Some(value) = self.next_space_direction {
             config.space_directions.tile = Flow::parse(&value, "layout.tile.next_space_direction")?;
         }
@@ -1058,13 +1042,11 @@ impl RawConfig {
 ///
 /// Unknown keys are ignored, so without this check an old config would lose
 /// these settings silently; a clear error is better than a silent reset.
-const LEGACY_TOP_LEVEL: [&str; 7] = [
+const LEGACY_TOP_LEVEL: [&str; 5] = [
     "gaps",
     "border_width",
     "border_color",
     "unfocused_border_color",
-    "master_count",
-    "master_ratio",
     "layout",
 ];
 
@@ -1135,18 +1117,6 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid(
             "`layout.border_width` must be >= 0".to_owned(),
         ));
-    }
-    if config.master_count < 0 {
-        return Err(ConfigError::Invalid(
-            "`layout.tile.master_count` must be >= 0".to_owned(),
-        ));
-    }
-    if !(LayoutParams::MIN_RATIO..=LayoutParams::MAX_RATIO).contains(&config.master_ratio) {
-        return Err(ConfigError::Invalid(format!(
-            "`layout.tile.master_ratio` must be within {}..={}",
-            LayoutParams::MIN_RATIO,
-            LayoutParams::MAX_RATIO
-        )));
     }
     if LayoutKind::from_name(&config.layout).is_none() {
         return Err(ConfigError::Invalid(one_of(
@@ -1275,8 +1245,6 @@ mod tests {
             next_space_direction = "vertical"
 
             [layout.tile]
-            master_count = 2
-            master_ratio = 0.4
             next_space_direction = "horizontal"
 
             [layout.scroll]
@@ -1298,8 +1266,6 @@ mod tests {
         assert_eq!(cfg.space_directions.stack, Flow::Vertical);
         assert_eq!(cfg.space_directions.tile, Flow::Horizontal);
         assert_eq!(cfg.space_directions.scroll, Flow::Horizontal);
-        assert_eq!(cfg.master_count, 2);
-        assert!((cfg.master_ratio - 0.4).abs() < 1e-9);
         assert_eq!(cfg.scroll.center_focused_column, ScrollCenter::Always);
         assert!(!cfg.scroll.always_center_single_column);
         assert!((cfg.scroll.default_column_ratio - 0.7).abs() < 1e-9);
@@ -1601,12 +1567,12 @@ mod tests {
     #[test]
     fn modes_parse_and_layer_their_tables() {
         let cfg = parse(
-            "[modes.resize.binds]\n\"h\" = \"master_ratio-\"\n[modes.resize.mousebinds]\n\"SUPER+btn_left\" = \"toggle_floating\"\n[modes.resize.axisbinds]\n\"SUPER+UP\" = \"viewprev\"\n[modes.resize.gesturebinds]\n\"left+3\" = \"focusdir:left\"\n",
+            "[modes.resize.binds]\n\"h\" = \"preset_width\"\n[modes.resize.mousebinds]\n\"SUPER+btn_left\" = \"toggle_floating\"\n[modes.resize.axisbinds]\n\"SUPER+UP\" = \"viewprev\"\n[modes.resize.gesturebinds]\n\"left+3\" = \"focusdir:left\"\n",
         )
         .unwrap();
         validate(&cfg).unwrap();
         let mode = &cfg.modes["resize"];
-        assert_eq!(mode.binds["h"], "master_ratio-");
+        assert_eq!(mode.binds["h"], "preset_width");
         assert_eq!(mode.mouse_binds["SUPER+btn_left"], "toggle_floating");
         assert_eq!(mode.axis_binds["SUPER+UP"], "viewprev");
         assert_eq!(mode.gesture_binds["left+3"], "focusdir:left");
@@ -1614,7 +1580,7 @@ mod tests {
 
     #[test]
     fn reserved_default_mode_is_rejected() {
-        let cfg = parse("[modes.default.binds]\n\"h\" = \"master_ratio-\"\n").unwrap();
+        let cfg = parse("[modes.default.binds]\n\"h\" = \"preset_width\"\n").unwrap();
         assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
     }
 
@@ -1676,15 +1642,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_out_of_range_ratio() {
-        let cfg = parse("[layout.tile]\nmaster_ratio = 1.5").unwrap();
-        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn rejects_negative_master_count() {
-        let cfg = parse("[layout.tile]\nmaster_count = -1").unwrap();
-        assert!(matches!(validate(&cfg), Err(ConfigError::Invalid(_))));
+    fn rejects_removed_layout_modes() {
+        for name in ["monocle", "vertical-scroll"] {
+            let cfg = parse(&format!("[layout]\ndefault_layout = \"{name}\"")).unwrap();
+            assert!(
+                matches!(validate(&cfg), Err(ConfigError::Invalid(_))),
+                "{name} should no longer be a valid layout"
+            );
+        }
     }
 
     #[test]
@@ -1735,8 +1700,6 @@ mod tests {
         assert_eq!(config.space_directions.stack, Flow::Horizontal);
         assert_eq!(config.space_directions.tile, Flow::Horizontal);
         assert_eq!(config.space_directions.scroll, Flow::Vertical);
-        assert_eq!(config.master_count, 1);
-        assert!((config.master_ratio - 0.6).abs() < 1e-9);
         assert_eq!(config.scroll.center_focused_column, ScrollCenter::Never);
         assert!(config.scroll.always_center_single_column);
         assert!((config.scroll.default_column_ratio - 0.5).abs() < 1e-9);

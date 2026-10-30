@@ -43,18 +43,14 @@ unfocused_border_color = "#3b4261"
 client_side_decorations = 0
 focus_follows_cursor = 1
 
-# Layout used for new spaces: `tile`, `monocle`, `floating`, `scroll` or
-# `vertical-scroll`, or a family name (`stack`, `tile`, `scroll`) as an alias
-# for that family's default mode.
+# Layout used for new spaces: `fair`, `floating` or `scroll`, or a family name
+# (`stack`, `tile`, `scroll`) as an alias for that family's default mode.
 default_layout = "tile"
 
 [layout.stack]
 next_space_direction = "horizontal"
 
 [layout.tile]
-# Master area: How many windows sit in it, and its size as a fraction of the usable area.
-master_count = 1
-master_ratio = 0.6
 next_space_direction = "horizontal"
 
 [layout.scroll]
@@ -179,10 +175,10 @@ layer_name = ["rofi", "alacritty"]
 [modes.resize.binds]
 # A key mode (submap): active only after `enter_mode:resize`.
 # Binds here are checked before the default tables; unbound keys still work.
-"h" = "master_ratio-"
-"l" = "master_ratio+"
-"j" = "master_count+"
-"k" = "master_count-"
+"h" = "preset_width"
+"l" = "preset_width"
+"j" = "center_column"
+"k" = "center_column"
 "Escape" = "leave_mode"
 
 

@@ -889,7 +889,7 @@ mod tests {
     #[test]
     fn output_and_space_view_changes_are_reported() {
         let previous = snapshot(vec![output(1, &[1], "tile")], vec![], None);
-        let next = snapshot(vec![output(1, &[1, 3], "monocle")], vec![], None);
+        let next = snapshot(vec![output(1, &[1, 3], "fair")], vec![], None);
         assert_eq!(
             diff(&previous, &next),
             vec![
@@ -899,7 +899,7 @@ mod tests {
                 },
                 Event::LayoutChanged {
                     output: 1,
-                    layout: "monocle".to_owned()
+                    layout: "fair".to_owned()
                 },
             ]
         );

@@ -942,10 +942,6 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         "switch_keyboard_layout_prev" | "prev_keyboard_layout" | "switch-keyboard-layout-prev" => {
             Ok(Action::SwitchKeyboardLayout { forward: false })
         }
-        "inc_master_ratio" | "master_ratio+" => Ok(Action::MasterRatio { grow: true }),
-        "dec_master_ratio" | "master_ratio-" => Ok(Action::MasterRatio { grow: false }),
-        "inc_master_count" | "master_count+" => Ok(Action::MasterCount { add: true }),
-        "dec_master_count" | "master_count-" => Ok(Action::MasterCount { add: false }),
         "leave_mode" | "leave-mode" | "exit_mode" | "exit-mode" => Ok(Action::LeaveMode),
         "pop_mode" | "pop-mode" => Ok(Action::PopMode),
         "preset_width" | "switch_preset_width" | "preset-width" => Ok(Action::PresetWidth),
@@ -1035,10 +1031,6 @@ fn builtins() -> Vec<(String, String)> {
         ("SUPER+ALT+space", "next_keyboard_layout"),
         ("SUPER+ALT+SHIFT+space", "prev_keyboard_layout"),
         ("SUPER+f", "toggle_fullscreen"),
-        ("SUPER+SHIFT+h", "dec_master_count"),
-        ("SUPER+SHIFT+l", "inc_master_count"),
-        ("SUPER+h", "dec_master_ratio"),
-        ("SUPER+l", "inc_master_ratio"),
         ("SUPER+r", "preset_width"),
         ("SUPER+c", "center_column"),
         ("SUPER+q", "killclient"),
@@ -1189,9 +1181,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_action("set-layout:monocle").unwrap(),
+            parse_action("set-layout:fair").unwrap(),
             Action::SetLayout {
-                name: "monocle".to_owned()
+                name: "fair".to_owned()
             }
         );
         assert_eq!(
@@ -1239,7 +1231,7 @@ mod tests {
     fn builtins_are_all_valid() {
         let (table, issues) = BindTable::compile(&BTreeMap::new(), &BTreeMap::new());
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(table.len(), 36 + 20);
+        assert_eq!(table.len(), 36 + 16);
     }
 
     fn mouse_table(entries: &[(&str, &str)]) -> MouseBindTable {
@@ -1482,7 +1474,7 @@ mod tests {
         config.modes.insert(
             "resize".to_owned(),
             KeyMode {
-                binds: BTreeMap::from([("h".to_owned(), "master_ratio-".to_owned())]),
+                binds: BTreeMap::from([("h".to_owned(), "preset_width".to_owned())]),
                 ..KeyMode::default()
             },
         );

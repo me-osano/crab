@@ -38,7 +38,7 @@ crab-cli focused-window
 crab-cli layouts
 
 # Dispatch actions
-crab-cli dispatch '{"set-layout":{"name":"monocle"}}'
+crab-cli dispatch '{"set-layout":{"name":"fair"}}'
 crab-cli dispatch '{"view-space":{"index":2}}'
 crab-cli dispatch '{"switch-keyboard-layout":{"forward":true}}'
 crab-cli dispatch '{"spawn":{"command":["alacritty"]}}'

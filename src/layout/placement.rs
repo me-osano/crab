@@ -78,7 +78,7 @@ pub struct Placement {
     pub window: WindowId,
     /// The target rectangle in logical coordinates.
     pub rect: Rect,
-    /// Whether the window should be shown; layouts such as `Monocle` hide all
+    /// Whether the window should be shown; layouts such as `Scroll` hide all
     /// but one while keeping a rect for animation continuity.
     pub visible: bool,
     /// Relative stacking order within the layout; lower draws first.
@@ -126,19 +126,17 @@ pub trait Layout: core::fmt::Debug + Send + Sync {
         directional_neighbor(&placements, from, dir)
     }
 
-    /// A layout-specific command; the default applies the shared master
-    /// ratio/count commands.
+    /// A layout-specific command; the default ignores it.
     ///
-    /// Commands a family owns itself get the layout's own persistent state —
-    /// which is where the scroller keeps its columns — while the rest edit
-    /// [`LayoutParams`] (`COMPOSITOR.md` §7.1).
+    /// Commands that need persistent layout state — the scroller's column
+    /// widths and centring — are handled by the layout that owns it, which is
+    /// where the scroller keeps its columns (`COMPOSITOR.md` §7.1).
     fn command(
         &self,
-        command: LayoutCommand,
-        params: &mut LayoutParams,
+        _command: LayoutCommand,
+        _params: &mut LayoutParams,
         _scroll: &mut ScrollState,
     ) {
-        command.apply(params);
     }
 }
 
@@ -146,8 +144,8 @@ pub trait Layout: core::fmt::Debug + Send + Sync {
 ///
 /// "Nearest" prefers windows roughly along the axis of travel: the perpendicular
 /// distance is weighted more heavily than the distance travelled, so moving
-/// right from the top of a master column lands on the row beside it rather than
-/// the nearest corner. Returns `None` when `from` names no visible window or
+/// right from the top of a column lands on the row beside it rather than the
+/// nearest corner. Returns `None` when `from` names no visible window or
 /// nothing lies in `dir`.
 #[must_use]
 pub fn directional_neighbor(

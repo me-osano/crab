@@ -39,7 +39,7 @@
 
 A compositor that treats **layout as a swappable strategy**, not an identity. Users should be able to:
 
-- Tile or stack (master/stack, grid, deck, monocle) on one space.
+- Tile in a balanced grid on one space.
 - Scroll (niri-style infinite strip) on another.
 - Float freely on a third, or **mix floating and tiled windows on the same space**.
 - Switch layout per space at runtime with a keybind or IPC call, with smooth animation between states.
@@ -282,18 +282,17 @@ pub struct SpaceView {
 
 pub struct SpaceState {
     pub layout: LayoutKind,       // a family + a mode (see §7.2)
-    pub params: LayoutParams,     // master ratio, master count, gaps, etc.
+    pub params: LayoutParams,     // gaps, borders, scroll column defaults
     pub scroll: ScrollState,      // for scroller: its columns and the view offset
     pub focus_history: Vec<WindowId>,
 }
 ```
 
-A space's layout is a **mode inside a family** (ADR-0004): `Stack` (`floating`,
-`monocle`, later `tabbed`), `Tile` (M2 `tile`; later `grid`, `deck`, `dwindle`,
-…), and `Scroll` (M3 `scroll`, `vertical-scroll`). Two cycle actions address the two axes:
-`cycle-layout-mode` (within the family) and `cycle-layout-family` (to the next
-family's default mode). Config and IPC name a mode; a family name is an alias for
-that family's default mode.
+A space's layout is a **mode inside a family** (ADR-0004): `Stack` (`floating`),
+`Tile` (`fair`), and `Scroll` (`scroll`). Each family has exactly one mode today.
+Two cycle actions address the two axes: `cycle-layout-mode` (within the family)
+and `cycle-layout-family` (to the next family's default mode). Config and IPC name
+a mode; a family name is an alias for that family's default mode.
 
 Rule for **multi-space view**: when several spaces are visible, the layout of the *lowest-numbered visible space* is used for the combined window set (dwm behavior). Document this clearly; it is the one place where space models confuse people.
 
@@ -343,7 +342,7 @@ pub struct LayoutInput<'a> {
 pub struct Placement {
     pub window: WindowId,
     pub rect: Rect,
-    pub visible: bool,                    // monocle/deck hide non-top windows
+    pub visible: bool,                    // scrollers hide off-view windows
     pub z_hint: i32,
 }
 
@@ -369,18 +368,15 @@ Layouts are grouped into **families**, and each family has **modes** (ADR-0004).
 The family is the broad strategy; the mode is a concrete arrangement. A family's
 first mode is its default, and the family name is accepted as an alias for it.
 
-| Family | Mode | Description | Source | MS |
-|---|---|---|---|---|
-| `Stack` | `floating` | No automatic placement; cascading initial position | classic stacking | M2 |
-| `Stack` | `monocle` | One window fills the area; others hidden | dwm | M2 |
-| `Stack` | `tabbed` | Grouped windows share a rect with a tab bar | COSMIC/i3 | M7 |
-| `Tile` | `tile` | Master/stack, master count+ratio, left/right/top/bottom | dwm/mango | M2 |
-| `Tile` | `grid` | Even grid | mango | M7 |
-| `Tile` | `deck` | Master + stack where only the top of the stack is visible | mango/dwl | M7 |
-| `Tile` | `dwindle` | Recursive splits (smart/manual), with preserve | bspwm/Hyprland | M7 |
-| `Tile` | `fair`, `vertical-*` | Fair splits and vertical variants | mango | M7 |
-| `Scroll` | `scroll` | Infinite horizontal strip of columns | niri | M3 |
-| `Scroll` | `vertical-scroll` | Same strip, run down the vertical axis | niri/mango | M3 |
+| Family | Mode | Description | Source |
+|---|---|---|---|
+| `Stack` | `floating` | No automatic placement; cascading initial position | classic stacking |
+| `Tile` | `fair` | Balanced grid of `ceil(sqrt(n))` equal-width columns | mango |
+| `Scroll` | `scroll` | Infinite horizontal strip of columns | niri |
+
+The family layer remains so a family can gain modes later without redefining the
+config or IPC vocabulary. `monocle`, the old master/stack `tile`, and
+`vertical-scroll` were removed; `tile` is now an alias for `fair`.
 
 ### 7.3 Mixing tiling and floating
 
@@ -458,9 +454,10 @@ windows it is handed.
 - Off-screen columns are still given an explicit rectangle and drawn (clipped by
   the output); culling them from the render pass is a damage-tracking concern.
 
-`scroll` and `vertical-scroll` are one implementation on two axes: every
-computation is expressed in terms of the *main* axis (which the strip grows
-along) and the *cross* axis, and `ScrollAxis` turns those into coordinates.
+The exposed `scroll` mode runs horizontally, but the implementation is
+axis-generic: every computation is expressed in terms of the *main* axis (which
+the strip grows along) and the *cross* axis, and `ScrollAxis` turns those into
+coordinates.
 
 ---
 
@@ -791,8 +788,6 @@ default_layout = "tile"
 next_space_direction = "horizontal"
 
 [layout.tile]
-master_count = 1
-master_ratio = 0.6
 next_space_direction = "horizontal"
 
 [layout.scroll]
@@ -939,7 +934,7 @@ subscribe                        # snapshot, then deltas; event-only connection
 ```
 
 `spaces` lists the spaces that currently exist (occupied or visible), not all 32
-slots. `set-layout` is a `dispatch` action (`{"set-layout":{"name":"monocle"}}`);
+slots. `set-layout` is a `dispatch` action (`{"set-layout":{"name":"fair"}}`);
 a family name is accepted as an alias for that family's default mode, and
 `layouts` reports both families and modes. A connection is either
 request/response or, after `subscribe`, event-only; a watcher uses a second
@@ -1124,10 +1119,10 @@ Each milestone ends with something **runnable and demoable**. Checkboxes are the
 ### Milestone 2: Spaces & layout core (3-4 weeks)
 
 - [ ] `Layout` trait, `Placement`, pure `src/layout` module
-- [ ] Layout families `Stack` (`floating`, `monocle`) + `Tile` (`tile`)
+- [ ] Layout families `Stack` (`floating`) + `Tile` (`fair`)
 - [ ] Per-window `floating` flag; mixed tiled+floating on one space
 - [ ] Spaces: `SpaceSet`, view space, move-to-space, toggle-space
-- [ ] Layout params: master ratio/count, gaps; `cycle-layout-mode` / `cycle-layout-family`
+- [ ] Layout params: gaps, borders; `cycle-layout-mode` / `cycle-layout-family`
 - [ ] Interactive move/resize for floating windows
 - [ ] Unit + property tests for layouts
 - **Exit criteria:** daily workflow of tiling plus floating dialogs works nested

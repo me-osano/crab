@@ -55,7 +55,7 @@ Legend: **yes** = working; **partial** = implemented but limited/untested;
 | Per-output workspaces/spaces | partial | yes | crab's focused-output assumptions are buggy |
 | Space/workspace migration on unplug | lossy (`remove_output` dumps windows) | yes, identity-preserving | see B05 |
 | Scrollable tiling | yes, pure | yes | crab's is much smaller |
-| Stack/tile/monocle layouts | yes | no (scroll + floating) | crab is richer here by design |
+| Stack/tile layouts | yes | no (scroll + floating + fair) | crab is richer here by design |
 | Tags / multi-space view | yes | no | deliberate mango divergence |
 | First-class columns + column actions | partial (columns exist, few operations) | yes | see B03 |
 | Floating layout | yes, per-space + per-window | yes, separate `FloatingSpace` | see B04 |
@@ -104,7 +104,7 @@ These are worth keeping while borrowing:
    not erase that when porting.
 6. **Test density per line.** 293 tests over 20k LOC is high; keep that ratio
    when adding niri-scale features instead of letting integration debt grow.
-7. **Layout family breadth.** Stack/tile/monocle/floating/scroll and 32-slot
+7. **Layout family breadth.** Stack/tile/fair/floating/scroll and 32-slot
    tag semantics are a deliberate superset of niri's model.
 
 ### 1.4 Where niri is ahead

@@ -33,7 +33,7 @@ pub use output_plan::{
 };
 pub use params::{
     Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutFamily, LayoutKind,
-    LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, TilePosition, WidthPresets,
+    LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets,
 };
 pub use rules::WindowRule;
 pub use spaces::{SpaceRemap, SpaceSet, SpaceView};

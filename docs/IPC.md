@@ -48,7 +48,7 @@ Actions use kebab-case and match [`crab_ipc::Action`](../crab-ipc/src/protocol.r
 - `{"toggle-back":{}}`
 - `{"cycle-layout":{}}`
 - `{"cycle-layout-family":{}}`
-- `{"set-layout":{"name":"monocle"}}` (mode or family name)
+- `{"set-layout":{"name":"fair"}}` (mode or family name)
 - `{"toggle-floating":{}}`
 - `{"toggle-fullscreen":{}}`
 - `{"toggle-maximized":{}}`
@@ -137,7 +137,7 @@ After `subscribe` you receive:
 - Use canonical action names from `crab_ipc::Action` (kebab-case). Config aliases are not required on the wire.
 - Spaces use **1-based dynamic indices**. `spaces` only lists existing spaces (occupied or visible). To show a space, dispatch `{"view-space":{"index":n}}`.
 - Move window: `{"move-to-space":{"index":n}}`. Toggle floating/fullscreen/maximized/close as needed.
-- Layout: `{"cycle-layout":{}}`, `{"cycle-layout-family":{}}`, or `{"set-layout":{"name":"monocle"}}` (mode or family name).
+- Layout: `{"cycle-layout":{}}`, `{"cycle-layout-family":{}}`, or `{"set-layout":{"name":"fair"}}` (mode or family name).
 - Keyboard layout: `{"switch-keyboard-layout":{"forward":true}}`.
 - Reload config: `{"reload-config":{}}` (or `crab-cli config-reload`).
 

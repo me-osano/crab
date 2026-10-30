@@ -22,7 +22,7 @@ use crab::config::{AnimationStyle, Config, WindowRule};
 use crab::core::{
     ColumnWidth, Direction, FocusStack, FocusTarget, LayerId, LayoutCommand, LayoutKind,
     LayoutParams, Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState,
-    TilePosition, Window, WindowId,
+    Window, WindowId,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::utils::{Buffer, with_renderer_surface_state};
@@ -1340,11 +1340,8 @@ impl Crab {
     /// remembers its own as the user cycles it (per-space layout memory).
     fn initial_space_state(config: &Config) -> SpaceState {
         let params = LayoutParams {
-            master_count: u32::try_from(config.master_count.max(0)).unwrap_or(0),
-            master_ratio: config.master_ratio,
             gaps: f64::from(config.gaps),
             border_width: f64::from(config.border_width),
-            position: TilePosition::Left,
             column_width: ColumnWidth::Proportion(config.scroll.default_column_ratio),
             center: config.scroll.center_focused_column,
             ..LayoutParams::default()

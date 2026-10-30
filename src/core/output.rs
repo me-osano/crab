@@ -282,7 +282,7 @@ pub struct Output {
 impl Output {
     /// Creates an output whose first space is visible.
     ///
-    /// `default` seeds every space's state, so `master_ratio`/`gaps` follow the
+    /// `default` seeds every space's state, so `gaps` and the layout follow the
     /// config until a space remembers its own.
     #[must_use]
     pub fn new(
@@ -556,16 +556,16 @@ mod tests {
     #[test]
     fn per_space_state_is_remembered() {
         let mut out = output();
-        out.space_states[0].layout = LayoutKind::Monocle;
-        out.space_states[0].params.master_ratio = 0.25;
+        out.space_states[0].layout = LayoutKind::Floating;
+        out.space_states[0].params.gaps = 25.0;
         out.view_space(SpaceSet::SPACE_2);
-        out.space_states[1].layout = LayoutKind::Tile;
+        out.space_states[1].layout = LayoutKind::Fair;
         out.view_space(SpaceSet::SPACE_1);
         assert_eq!(
             out.current_space_state().unwrap().layout,
-            LayoutKind::Monocle
+            LayoutKind::Floating
         );
-        assert!((out.current_space_state().unwrap().params.master_ratio - 0.25).abs() < 1e-9);
+        assert!((out.current_space_state().unwrap().params.gaps - 25.0).abs() < 1e-9);
     }
 
     #[test]
@@ -597,14 +597,11 @@ mod tests {
     #[test]
     fn compact_hands_an_emptied_focused_space_to_the_next_one() {
         let mut out = output();
-        out.space_states[2].layout = LayoutKind::Monocle;
+        out.space_states[2].layout = LayoutKind::Fair;
         out.view_space(SpaceSet::SPACE_2);
         let _ = out.compact(SpaceSet::SPACE_1 | SpaceSet::SPACE_3);
         assert_eq!(out.view.visible, SpaceSet::SPACE_2);
-        assert_eq!(
-            out.current_space_state().unwrap().layout,
-            LayoutKind::Monocle
-        );
+        assert_eq!(out.current_space_state().unwrap().layout, LayoutKind::Fair);
     }
 
     #[test]

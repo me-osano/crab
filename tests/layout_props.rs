@@ -8,9 +8,9 @@
 
 use crab::core::{
     Column, ColumnDisplay, ColumnWidth, Direction, LayoutKind, LayoutParams, Rect, ScrollAxis,
-    ScrollCenter, ScrollState, TilePosition, WindowId,
+    ScrollCenter, ScrollState, WindowId,
 };
-use crab::layout::{LayoutInput, LayoutWindow, Placement, arrange};
+use crab::layout::{Layout as _, LayoutInput, LayoutWindow, Placement, Scroll, arrange};
 use proptest::prelude::*;
 
 const AREA: Rect = Rect::new(0.0, 0.0, 1280.0, 720.0);
@@ -43,28 +43,22 @@ fn scroll_arrange(
     params: &LayoutParams,
     scroll: &mut ScrollState,
 ) -> Vec<Placement> {
-    arrange(
-        axis.kind(),
-        LayoutInput {
-            area: AREA,
-            windows,
-            focused,
-            params,
-            scroll,
-        },
-    )
+    // Exercise the axis-generic engine directly; the exposed `scroll` mode is
+    // always horizontal.
+    Scroll::new(axis).arrange(LayoutInput {
+        area: AREA,
+        windows,
+        focused,
+        params,
+        scroll,
+    })
 }
 
-fn params(master_count: u32, master_ratio: f64, gaps: f64, position: TilePosition) -> LayoutParams {
-    let mut params = LayoutParams {
-        master_count,
-        master_ratio,
+fn params(gaps: f64) -> LayoutParams {
+    LayoutParams {
         gaps,
-        position,
         ..LayoutParams::default()
-    };
-    params.clamp_ratio();
-    params
+    }
 }
 
 fn arrange_kind(
@@ -98,15 +92,11 @@ proptest! {
     #[test]
     fn placements_are_complete_and_contained(
         count in 0usize..24,
-        master_count in 0u32..6,
-        ratio in 0.1f64..0.9,
         gaps in 0.0f64..24.0,
-        position in prop::sample::select(TilePosition::ALL.to_vec()),
     ) {
-        let params = params(master_count, ratio, gaps, position);
-        let placements = arrange_kind(LayoutKind::Tile, count, &params, Some(0));
+        let params = params(gaps);
+        let placements = arrange_kind(LayoutKind::Fair, count, &params, Some(0));
         prop_assert_eq!(placements.len(), count);
-        let usable = AREA.deflated(params.gaps);
         for placement in &placements {
             prop_assert!(placement.visible);
             prop_assert!(
@@ -115,21 +105,17 @@ proptest! {
                 placement.rect,
                 AREA
             );
-            let _ = usable;
         }
     }
 
     /// Tiled windows never overlap each other.
     #[test]
-    fn tile_placements_are_disjoint(
+    fn fair_placements_are_disjoint(
         count in 1usize..24,
-        master_count in 0u32..6,
-        ratio in 0.1f64..0.9,
         gaps in 0.0f64..24.0,
-        position in prop::sample::select(TilePosition::ALL.to_vec()),
     ) {
-        let params = params(master_count, ratio, gaps, position);
-        let placements = arrange_kind(LayoutKind::Tile, count, &params, Some(0));
+        let params = params(gaps);
+        let placements = arrange_kind(LayoutKind::Fair, count, &params, Some(0));
         for (i, a) in placements.iter().enumerate() {
             for b in &placements[i + 1..] {
                 prop_assert!(
@@ -147,31 +133,20 @@ proptest! {
     fn arrange_is_deterministic(
         kind in prop::sample::select(LayoutKind::ALL.to_vec()),
         count in 0usize..12,
-        master_count in 0u32..4,
-        ratio in 0.1f64..0.9,
         gaps in 0.0f64..16.0,
         focused in prop::option::of(0usize..12),
     ) {
-        let params = params(master_count, ratio, gaps, TilePosition::Left);
+        let params = params(gaps);
         let focused = focused.filter(|index| *index < count);
         let a = arrange_kind(kind, count, &params, focused);
         let b = arrange_kind(kind, count, &params, focused);
         prop_assert_eq!(a, b);
     }
 
-    /// Monocle shows at most one window.
-    #[test]
-    fn monocle_shows_at_most_one(count in 0usize..16, gaps in 0.0f64..16.0) {
-        let params = params(1, 0.6, gaps, TilePosition::Left);
-        let placements = arrange_kind(LayoutKind::Monocle, count, &params, Some(0));
-        let visible = placements.iter().filter(|p| p.visible).count();
-        prop_assert!(visible <= 1);
-    }
-
     /// Floating arranges nothing; the compositor owns those rectangles.
     #[test]
     fn floating_places_nothing(count in 0usize..16) {
-        let params = params(1, 0.6, 0.0, TilePosition::Left);
+        let params = params(0.0);
         let placements = arrange_kind(LayoutKind::Floating, count, &params, Some(0));
         prop_assert!(placements.is_empty());
     }
@@ -189,7 +164,7 @@ proptest! {
         ]),
     ) {
         let from = from % count;
-        let params = params(1, 0.6, 8.0, TilePosition::Left);
+        let params = params(8.0);
         let windows: Vec<LayoutWindow> = (0..count)
             .map(|i| LayoutWindow::new(WindowId::new(i as u64 + 1)))
             .collect();
@@ -202,7 +177,7 @@ proptest! {
             scroll: &mut scroll,
         };
         // The default trait method arranges internally; use the dispatch.
-        if let Some(next) = crab::layout::neighbor(LayoutKind::Tile, &input, from, direction) {
+        if let Some(next) = crab::layout::neighbor(LayoutKind::Fair, &input, from, direction) {
             prop_assert!(next < count);
             prop_assert_ne!(next, from);
         }

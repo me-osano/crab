@@ -139,16 +139,6 @@ pub enum Action {
     ToggleFullscreen,
     /// Toggle maximized for the focused window.
     ToggleMaximized,
-    /// Grow (`true`) or shrink the master area.
-    MasterRatio {
-        /// Whether to grow the master area.
-        grow: bool,
-    },
-    /// Add (`true`) or remove a master slot.
-    MasterCount {
-        /// Whether to add a master slot.
-        add: bool,
-    },
     /// Cycle the focused scroll column's width through the presets.
     PresetWidth,
     /// Scroll the focused scroll column to the middle of the view.
@@ -429,13 +419,11 @@ mod tests {
             Action::CycleLayout,
             Action::CycleLayoutFamily,
             Action::SetLayout {
-                name: "monocle".to_owned(),
+                name: "fair".to_owned(),
             },
             Action::ToggleFloating,
             Action::ToggleFullscreen,
             Action::ToggleMaximized,
-            Action::MasterRatio { grow: true },
-            Action::MasterCount { add: false },
             Action::PresetWidth,
             Action::CenterColumn,
             Action::ReloadConfig,

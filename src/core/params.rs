@@ -9,9 +9,9 @@ use crate::core::{Rect, Size, WindowId};
 
 /// A layout **family**: the broad strategy for arranging a space (ADR-0004).
 ///
-/// Families group the concrete [`LayoutKind`]s so the set can grow (M7 adds many
-/// tiling modes) without becoming an undifferentiated list. M2 ships the `Stack`
-/// and `Tile` families; `Scroll` (niri's scroller) joins in M3.
+/// Families group the concrete [`LayoutKind`]s. Crab ships exactly one mode per
+/// family today; the family layer stays so a mode can be added without
+/// redefining the config or IPC vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LayoutFamily {
     /// Windows keep their own geometry, stacked as the compositor chooses.
@@ -45,42 +45,31 @@ impl LayoutFamily {
 
 /// Which arrangement strategy a space uses: a family plus a mode.
 ///
-/// M2 ships the `Stack` family's [`LayoutKind::Floating`] and
-/// [`LayoutKind::Monocle`] modes and the `Tile` family's [`LayoutKind::Tile`]
-/// mode; M3 adds the `Scroll` family. Cycling has two actions, one per axis:
-/// see [`LayoutKind::next_mode`] and [`LayoutKind::next_family`].
+/// The supported set is deliberately small: `stack(floating)`, `tile(fair)`,
+/// and `scroll(scroll)`. Cycling has two actions, one per axis: see
+/// [`LayoutKind::next_mode`] and [`LayoutKind::next_family`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
-    /// `Tile` family: master/stack tiling (`COMPOSITOR.md` §7.2).
+    /// `Tile` family: a balanced grid of equal-width columns (`COMPOSITOR.md` §7.2).
     #[default]
-    Tile,
-    /// `Stack` family: one window fills the area; the rest are hidden.
-    Monocle,
+    Fair,
     /// `Stack` family: no automatic placement; windows keep their geometry.
     Floating,
     /// `Scroll` family: an unbounded strip of columns, scrolled horizontally.
     Scroll,
-    /// `Scroll` family: the same strip on the vertical axis.
-    VerticalScroll,
 }
 
 impl LayoutKind {
     /// Every mode implemented today, in a stable order.
-    pub const ALL: [Self; 5] = [
-        Self::Tile,
-        Self::Monocle,
-        Self::Floating,
-        Self::Scroll,
-        Self::VerticalScroll,
-    ];
+    pub const ALL: [Self; 3] = [Self::Fair, Self::Floating, Self::Scroll];
 
     /// The family this mode belongs to.
     #[must_use]
     pub const fn family(self) -> LayoutFamily {
         match self {
-            Self::Tile => LayoutFamily::Tile,
-            Self::Monocle | Self::Floating => LayoutFamily::Stack,
-            Self::Scroll | Self::VerticalScroll => LayoutFamily::Scroll,
+            Self::Fair => LayoutFamily::Tile,
+            Self::Floating => LayoutFamily::Stack,
+            Self::Scroll => LayoutFamily::Scroll,
         }
     }
 
@@ -88,9 +77,9 @@ impl LayoutKind {
     #[must_use]
     pub const fn modes_in(family: LayoutFamily) -> &'static [Self] {
         match family {
-            LayoutFamily::Stack => &[Self::Floating, Self::Monocle],
-            LayoutFamily::Tile => &[Self::Tile],
-            LayoutFamily::Scroll => &[Self::Scroll, Self::VerticalScroll],
+            LayoutFamily::Stack => &[Self::Floating],
+            LayoutFamily::Tile => &[Self::Fair],
+            LayoutFamily::Scroll => &[Self::Scroll],
         }
     }
 
@@ -107,16 +96,14 @@ impl LayoutKind {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Tile => "tile",
-            Self::Monocle => "monocle",
+            Self::Fair => "fair",
             Self::Floating => "floating",
             Self::Scroll => "scroll",
-            Self::VerticalScroll => "vertical-scroll",
         }
     }
 
     /// Parses a mode name, accepting the family names as aliases for the
-    /// family's default mode (`stack` → `floating`, `tile` → `tile`), and
+    /// family's default mode (`stack` → `floating`, `tile` → `fair`), and
     /// `free` as an alias for `floating`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
@@ -131,8 +118,7 @@ impl LayoutKind {
 
     /// The next mode within the current family (the `cycle-layout-mode` action).
     ///
-    /// A family with a single mode is a no-op, so pressing the bind on `tile`
-    /// changes nothing until M7 adds `grid`/`deck`.
+    /// Each family has a single mode, so this is currently a no-op.
     #[must_use]
     pub fn next_mode(self) -> Self {
         let modes = Self::modes_in(self.family());
@@ -152,54 +138,12 @@ impl LayoutKind {
     }
 }
 
-/// Which edge of the area the master column/row occupies in [`LayoutKind::Tile`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum TilePosition {
-    /// Master occupies the left side.
-    #[default]
-    Left,
-    /// Master occupies the right side.
-    Right,
-    /// Master occupies the top.
-    Top,
-    /// Master occupies the bottom.
-    Bottom,
-}
-
-impl TilePosition {
-    /// Every variant, in a sensible order for cycling.
-    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
-
-    /// A stable, lowercase identifier (used by config and IPC).
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Left => "left",
-            Self::Right => "right",
-            Self::Top => "top",
-            Self::Bottom => "bottom",
-        }
-    }
-
-    /// Parses the identifier produced by [`TilePosition::name`].
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|pos| pos.name() == name)
-    }
-
-    /// Whether the master/stack split is horizontal (`Left`/`Right`).
-    #[must_use]
-    pub const fn is_vertical_split(self) -> bool {
-        matches!(self, Self::Left | Self::Right)
-    }
-}
-
 /// The axis a scrolling layout runs along (`COMPOSITOR.md` §7.7).
 ///
-/// `scroll` and `vertical-scroll` are one implementation seen from two sides:
-/// everything below reads a rectangle or a direction in terms of the *main*
-/// axis (the one the strip grows along) and the *cross* axis, so the vertical
-/// variant is the same code with the two swapped.
+/// The exposed `scroll` mode always runs horizontally, but the engine is
+/// axis-generic: everything below reads a rectangle or a direction in terms of
+/// the *main* axis (the one the strip grows along) and the *cross* axis, so the
+/// same code can be exercised on either axis.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ScrollAxis {
     /// Columns run left to right and the view scrolls horizontally.
@@ -226,15 +170,6 @@ impl ScrollAxis {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|axis| axis.name() == name)
-    }
-
-    /// The [`LayoutKind`] mode that scrolls along this axis.
-    #[must_use]
-    pub const fn kind(self) -> LayoutKind {
-        match self {
-            Self::Horizontal => LayoutKind::Scroll,
-            Self::Vertical => LayoutKind::VerticalScroll,
-        }
     }
 
     /// The main-axis extent of `rect` (its width when horizontal).
@@ -576,19 +511,14 @@ pub struct ScrollState {
 /// Tunables a layout reads. Some commands edit them in place.
 ///
 /// Every space owns one of these, which is what makes per-space layout memory
-/// (`Pertag`) work: switching layouts never resets `master_ratio`, `gaps`, etc.
+/// (`Pertag`) work: switching layouts never resets `gaps`, the scroll column
+/// defaults, etc.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutParams {
-    /// Number of windows in the master area (`0` sends everything to the stack).
-    pub master_count: u32,
-    /// Fraction of the area the master column/row takes, in `MIN_RATIO..=MAX_RATIO`.
-    pub master_ratio: f64,
     /// Outer/inner gap in logical pixels.
     pub gaps: f64,
     /// Window border width in logical pixels (`0` disables borders).
     pub border_width: f64,
-    /// Which edge the master area occupies (tile layout only).
-    pub position: TilePosition,
     /// The width a newly created scroll column gets.
     pub column_width: ColumnWidth,
     /// The widths `switch-preset-width` cycles through.
@@ -603,16 +533,8 @@ pub struct LayoutParams {
 }
 
 impl LayoutParams {
-    /// Smallest allowed master ratio.
-    pub const MIN_RATIO: f64 = 0.1;
-    /// Largest allowed master ratio.
-    pub const MAX_RATIO: f64 = 0.9;
-    /// How much one master-ratio command changes the ratio.
-    pub const RATIO_STEP: f64 = 0.05;
-
-    /// Clamps `master_ratio` and non-negative sizes into range.
-    pub fn clamp_ratio(&mut self) {
-        self.master_ratio = self.master_ratio.clamp(Self::MIN_RATIO, Self::MAX_RATIO);
+    /// Clamps non-negative sizes into range.
+    pub fn clamp(&mut self) {
         self.gaps = self.gaps.max(0.0);
         self.border_width = self.border_width.max(0.0);
         self.column_width = match self.column_width {
@@ -625,11 +547,8 @@ impl LayoutParams {
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
-            master_count: 1,
-            master_ratio: 0.6,
             gaps: 8.0,
             border_width: 2.0,
-            position: TilePosition::Left,
             column_width: ColumnWidth::DEFAULT,
             preset_widths: WidthPresets::default(),
             center: ScrollCenter::Never,
@@ -655,14 +574,6 @@ pub enum Direction {
 /// A layout-specific command issued by a bind or IPC (`COMPOSITOR.md` §7.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LayoutCommand {
-    /// Add one window to the master area (tiling layouts).
-    IncMasterCount,
-    /// Remove one window from the master area (tiling layouts).
-    DecMasterCount,
-    /// Grow the master area (tiling layouts).
-    IncMasterRatio,
-    /// Shrink the master area (tiling layouts).
-    DecMasterRatio,
     /// Cycle the focused column's width through the presets (scrolling layouts).
     SwitchPresetWidth,
     /// Scroll the focused column to the middle of the view (scrolling layouts).
@@ -671,23 +582,12 @@ pub enum LayoutCommand {
 
 impl LayoutCommand {
     /// Every command, for binds and IPC tables.
-    pub const ALL: [Self; 6] = [
-        Self::IncMasterCount,
-        Self::DecMasterCount,
-        Self::IncMasterRatio,
-        Self::DecMasterRatio,
-        Self::SwitchPresetWidth,
-        Self::CenterColumn,
-    ];
+    pub const ALL: [Self; 2] = [Self::SwitchPresetWidth, Self::CenterColumn];
 
     /// A stable, kebab-case identifier (used by config and IPC).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::IncMasterCount => "inc-master-count",
-            Self::DecMasterCount => "dec-master-count",
-            Self::IncMasterRatio => "inc-master-ratio",
-            Self::DecMasterRatio => "dec-master-ratio",
             Self::SwitchPresetWidth => "switch-preset-width",
             Self::CenterColumn => "center-column",
         }
@@ -697,22 +597,6 @@ impl LayoutCommand {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|cmd| cmd.name() == name)
-    }
-
-    /// Applies the **shared** commands to `params` (clamping afterwards).
-    ///
-    /// The commands a family owns itself — the scroller's width and centring —
-    /// need that family's persistent state, so they are handled by the layout
-    /// ([`crate::layout::apply_command`]) and do nothing here.
-    pub fn apply(self, params: &mut LayoutParams) {
-        match self {
-            Self::IncMasterCount => params.master_count = params.master_count.saturating_add(1),
-            Self::DecMasterCount => params.master_count = params.master_count.saturating_sub(1),
-            Self::IncMasterRatio => params.master_ratio += LayoutParams::RATIO_STEP,
-            Self::DecMasterRatio => params.master_ratio -= LayoutParams::RATIO_STEP,
-            Self::SwitchPresetWidth | Self::CenterColumn => return,
-        }
-        params.clamp_ratio();
     }
 }
 
@@ -727,87 +611,39 @@ mod tests {
         }
         // Family and `free` aliases resolve to the family's default mode.
         assert_eq!(LayoutKind::from_name("stack"), Some(LayoutKind::Floating));
-        assert_eq!(LayoutKind::from_name("tile"), Some(LayoutKind::Tile));
+        assert_eq!(LayoutKind::from_name("tile"), Some(LayoutKind::Fair));
         assert_eq!(LayoutKind::from_name("free"), Some(LayoutKind::Floating));
         assert_eq!(LayoutKind::from_name("nope"), None);
+        // The removed modes are gone rather than silently aliased.
+        assert_eq!(LayoutKind::from_name("monocle"), None);
+        assert_eq!(LayoutKind::from_name("vertical-scroll"), None);
 
-        // Cycling the *mode* stays inside a family; cycling the *family*
-        // crosses families and lands on the next family's default mode.
-        assert_eq!(LayoutKind::Floating.next_mode(), LayoutKind::Monocle);
-        assert_eq!(LayoutKind::Monocle.next_mode(), LayoutKind::Floating);
-        assert_eq!(
-            LayoutKind::Tile.next_mode(),
-            LayoutKind::Tile,
-            "single mode"
-        );
-        assert_eq!(LayoutKind::Scroll.next_mode(), LayoutKind::VerticalScroll);
-        assert_eq!(LayoutKind::VerticalScroll.next_mode(), LayoutKind::Scroll);
-        assert_eq!(LayoutKind::Tile.next_family(), LayoutKind::Scroll);
-        assert_eq!(LayoutKind::Monocle.next_family(), LayoutKind::Tile);
+        // Every family has one mode, so cycling the mode is a no-op; cycling
+        // the family crosses families and lands on the next default.
+        assert_eq!(LayoutKind::Fair.next_mode(), LayoutKind::Fair);
+        assert_eq!(LayoutKind::Floating.next_mode(), LayoutKind::Floating);
+        assert_eq!(LayoutKind::Scroll.next_mode(), LayoutKind::Scroll);
+        assert_eq!(LayoutKind::Fair.next_family(), LayoutKind::Scroll);
+        assert_eq!(LayoutKind::Floating.next_family(), LayoutKind::Fair);
         assert_eq!(LayoutKind::Scroll.next_family(), LayoutKind::Floating);
-        assert_eq!(
-            LayoutKind::VerticalScroll.next_family(),
-            LayoutKind::Floating
-        );
     }
 
     #[test]
     fn families_group_their_modes() {
-        assert_eq!(LayoutKind::Tile.family(), LayoutFamily::Tile);
-        assert_eq!(LayoutKind::Monocle.family(), LayoutFamily::Stack);
+        assert_eq!(LayoutKind::Fair.family(), LayoutFamily::Tile);
         assert_eq!(LayoutKind::Floating.family(), LayoutFamily::Stack);
+        assert_eq!(LayoutKind::Scroll.family(), LayoutFamily::Scroll);
         assert!(LayoutKind::Floating.is_free());
-        assert!(!LayoutKind::Tile.is_free());
+        assert!(!LayoutKind::Fair.is_free());
+        assert!(!LayoutKind::Scroll.is_free());
         for family in LayoutFamily::ALL {
             assert_eq!(LayoutFamily::from_name(family.name()), Some(family));
-            assert!(!LayoutKind::modes_in(family).is_empty());
+            assert_eq!(LayoutKind::modes_in(family).len(), 1);
         }
-    }
-
-    #[test]
-    fn tile_positions_round_trip() {
-        for pos in TilePosition::ALL {
-            assert_eq!(TilePosition::from_name(pos.name()), Some(pos));
-        }
-        assert!(TilePosition::Left.is_vertical_split());
-        assert!(!TilePosition::Top.is_vertical_split());
-    }
-
-    #[test]
-    fn ratio_commands_clamp() {
-        let mut params = LayoutParams::default();
-        for _ in 0..100 {
-            LayoutCommand::IncMasterRatio.apply(&mut params);
-        }
-        assert!((params.master_ratio - LayoutParams::MAX_RATIO).abs() < 1e-9);
-        for _ in 0..100 {
-            LayoutCommand::DecMasterRatio.apply(&mut params);
-        }
-        assert!((params.master_ratio - LayoutParams::MIN_RATIO).abs() < 1e-9);
-    }
-
-    #[test]
-    fn master_count_is_saturating() {
-        let mut params = LayoutParams::default();
-        LayoutCommand::DecMasterCount.apply(&mut params);
-        assert_eq!(params.master_count, 0);
-        assert!(LayoutCommand::from_name("inc-master-count").is_some());
-    }
-
-    #[test]
-    fn scroll_kinds_belong_to_the_scroll_family() {
-        assert_eq!(LayoutKind::Scroll.family(), LayoutFamily::Scroll);
-        assert_eq!(LayoutKind::VerticalScroll.family(), LayoutFamily::Scroll);
-        assert!(!LayoutKind::Scroll.is_free());
         assert_eq!(
-            LayoutKind::modes_in(LayoutFamily::Scroll),
-            &[LayoutKind::Scroll, LayoutKind::VerticalScroll]
+            LayoutKind::modes_in(LayoutFamily::Tile),
+            &[LayoutKind::Fair]
         );
-        for kind in [LayoutKind::Scroll, LayoutKind::VerticalScroll] {
-            assert_eq!(LayoutKind::from_name(kind.name()), Some(kind));
-        }
-        // The family name is an alias for its default mode.
-        assert_eq!(LayoutKind::from_name("scroll"), Some(LayoutKind::Scroll));
     }
 
     #[test]
@@ -815,8 +651,6 @@ mod tests {
         for axis in ScrollAxis::ALL {
             assert_eq!(ScrollAxis::from_name(axis.name()), Some(axis));
         }
-        assert_eq!(ScrollAxis::Horizontal.kind(), LayoutKind::Scroll);
-        assert_eq!(ScrollAxis::Vertical.kind(), LayoutKind::VerticalScroll);
 
         // The main axis of a horizontal scroller is x; `Right` walks it forward
         // and `Down` walks the cross axis.
@@ -961,11 +795,10 @@ mod tests {
             LayoutCommand::from_name("center-column"),
             Some(LayoutCommand::CenterColumn)
         );
-        // The shared commands still work, and the scroller's do not touch params.
-        let mut params = LayoutParams::default();
-        let before = params;
-        LayoutCommand::SwitchPresetWidth.apply(&mut params);
-        LayoutCommand::CenterColumn.apply(&mut params);
-        assert_eq!(params, before);
+        assert_eq!(
+            LayoutCommand::from_name("inc-master-ratio"),
+            None,
+            "master commands were removed with the master/stack layout"
+        );
     }
 }

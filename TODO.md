@@ -76,7 +76,7 @@ locally as the canonical reference.
 
 ### 0.3 Workspace & crate skeleton (per `ROADMAP.md` §5)
 - [x] `src/core/` — pure data: ids, logical geometry, colors, spaces (no Smithay; folded in from the former `crab-core` crate).
-- [x] `src/layout/` — `Layout` trait + `Monocle`/`Floating` impls (pure; folded in from the former `crab-layout` crate).
+- [x] `src/layout/` — `Layout` trait + `Fair`/`Floating` impls (pure; folded in from the former `crab-layout` crate).
 - [x] `src/animation/` — spring/easing curves + `Animated` scalar (pure; folded in from the former `crab-anim` crate).
 - [x] `src/config/` — TOML parse/validate/defaults (pure; folded in from the former `crab-config` crate).
 - [x] `crab-ipc/` — IPC types + blocking client (leaf; no other `crab-*` deps).
@@ -212,8 +212,7 @@ and per-space layout memory. Everything here is pure and unit-testable.
 
 ### 2.3 Layout families (ADR-0004)
 - [x] `LayoutFamily` (`Stack`, `Tile`) + `LayoutKind` modes; `family()`, `modes_in()`, `is_free()`.
-- [x] `Tile` — master/stack, `master_count`, `master_ratio`, left/right/top/bottom variants.
-- [x] `Monocle` — focused fills area; others `visible=false`.
+- [x] `Fair` — balanced grid of `ceil(sqrt(n))` equal-width columns; `tile` is its alias.
 - [x] `Floating` — no automatic placement; a `floating`-mode space floats every window.
 - [x] `neighbor()` directional focus for each.
 
@@ -311,8 +310,9 @@ are smooth, interruptible, and free of pops.
   column display `normal | tabbed`. *(The `preset-column-widths` /
   `default-column-display` config keys ride with M5's schema; the `tabbed` tab bar
   itself is M7.)*
-- [x] Vertical variant (`vertical-scroll`, the same code on the other axis);
-  `switch-preset-width` / `center-column` commands; `neighbor()` for left/right/up/down.
+- [x] Axis-generic implementation (exercised on both axes, only the horizontal
+  `scroll` mode exposed); `switch-preset-width` / `center-column` commands;
+  `neighbor()` for left/right/up/down.
 - [x] **Stable layout on open** — a new window opens beside the focused column and
   reflows nothing: existing columns keep their width and their place, and the
   focused window does not move even when a column before it closes.
@@ -608,8 +608,8 @@ Goal: every layout in `ROADMAP.md` §3B works; grouping and scratchpads feel nat
 
 ### 7.1 More layout modes
 Modes slot into the M2 families (ADR-0004), not a flat list.
-- [ ] `Tile` family: `Grid`, `Deck`, `Dwindle`/spiral (smart split, preserve, manual split), `Fair` + `VerticalFair`, `CenterTile`, `VerticalTile`, `RightTile`.
-- [ ] `Scroll` family: `VerticalGrid`, `VerticalDeck`. *(`VerticalScroller` shipped with `scroll`/`vertical-scroll` in M3.)*
+- [ ] `Tile` family: `Grid`, `Deck`, `Dwindle`/spiral (smart split, preserve, manual split), `VerticalFair`, `CenterTile`, `VerticalTile`, `RightTile`. *(`Fair` shipped as the sole `Tile` mode.)*
+- [ ] `Scroll` family: `VerticalGrid`, `VerticalDeck`. *(The scroller shipped axis-generic with `scroll` in M3.)*
 - [ ] `Stack` family: `Tabbed`.
 - [ ] Per-mode params + presets; per-space memory for every mode.
 

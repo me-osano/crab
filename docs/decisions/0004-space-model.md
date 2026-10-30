@@ -67,13 +67,17 @@ naming + persistence layer over numbered spaces, not a dynamic workspace manager
 
 ### 3. Layouts are grouped into **families** with per-family **modes**
 
-A space's layout is a **mode inside a family**. M2 ships:
+A space's layout is a **mode inside a family**. Crab ships exactly one mode per
+family:
 
-| Family | Modes (M2) | Later modes |
+| Family | Mode | Description |
 |---|---|---|
-| `Stack` | `floating`, `monocle` | `tabbed` (M7) |
-| `Tile` | `tile` (master/stack) | `grid`, `deck`, `dwindle`, `fair`, `vertical-*` (M7) |
-| `Scroll` (M3) | `scroll` (niri) | `vertical-scroll` |
+| `Stack` | `floating` | Windows keep their own geometry, cascaded by the compositor |
+| `Tile` | `fair` | Balanced grid of equal-width columns (mango's `fair`) |
+| `Scroll` | `scroll` | niri-style horizontal column strip |
+
+The family layer stays even though each family has a single mode today, so a
+mode can be added later without redefining the config or IPC vocabulary.
 
 Two cycle actions replace the single `cycle-layout`:
 
@@ -97,16 +101,18 @@ both work, and `free` is an alias for `floating`).
   the observable behaviour bars expect. If dynamic creation is ever needed, a
   follow-up ADR supersedes this one; it would be a pure-layer change
   (`SpaceSet` → `Vec`/`SlotMap` plus a `Window.space` singular).
-- **The layout enum stays small per family.** M7 adds modes to a family instead of
-  growing one flat list of 14; the cycle actions remain meaningful, and per-space
-  memory restores the exact mode. Promoting modes to per-family enums later is a
-  pure-layer change covered by the layout test suite.
+- **The layout enum stays small per family.** Modes are added to a family instead
+  of growing one flat list of 14; the cycle actions remain meaningful, and
+  per-space memory restores the exact mode. Promoting modes to per-family enums
+  later is a pure-layer change covered by the layout test suite.
 - **The `floating` layout now floats.** Previously a space whose layout was
   `floating` produced no placements for its *tiled* windows, which stayed
   invisible. In the family model `floating` is the `Stack` family's free mode, so
   the compositor cascades every window on such a space (`compositor/layout.rs`).
-- **Names are versionless and additive.** Config/IPC names (`floating`, `monocle`,
-  `tile`, `stack`, `scroll`, …) are stable; new modes are added, never renamed.
+- **Names are versionless and additive.** Config/IPC names (`floating`, `fair`,
+  `scroll`, `stack`, `tile`, …) are stable; new modes are added, never renamed.
+  The previously shipped `monocle` and `vertical-scroll` modes were removed when
+  the set was reduced to one mode per family.
 - `COMPOSITOR.md` §6–7 and `ROADMAP.md` §3A–3B are updated to this vocabulary.
 
 ## Update (2026-10-20): dynamic numbering
