@@ -21,17 +21,19 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-27):** 292 workspace tests pass; `cargo fmt --check`,
-clippy, and `check-boundaries.sh` are clean. Only the winit backend renders
-today: `tty` probes devices and bails, `headless` validates only. The 2026-10
-review, current-state comparison, and full niri borrow backlog live in
-**`IMPROV.md`** (`C1–C6`, `B01–B49`); this file tracks the milestones and only
+**Current state (2026-10-30):** 298 workspace tests pass; `cargo fmt --check`,
+clippy (`--all-features`), and `check-boundaries.sh` are clean. The §2.9
+correctness gate (`C3–C6`) is closed: focus and space state are per output, and
+the two-output harness drives real Wayland clients in-process. Only the winit
+backend renders today: `tty` probes devices and bails, `headless` validates only.
+The 2026-10 review, current-state comparison, and full niri borrow backlog live
+in **`IMPROV.md`** (`C1–C6`, `B01–B49`); this file tracks the milestones and only
 cross-references the actionable items.
 
 **Start here (from `IMPROV.md`):**
-1. `C3–C6` plus `B41`/`B43` — fix layer origin, focused-output scoping,
-   rename `primary_output`, and build the two-output/integration/CI harness.
-   This is the correctness gate in §2.9.
+1. `B43` plus the rest of `B41` — CI on `--all-features` with an enforced MSRV,
+   and the remaining scenario harnesses (move/resize/close, output re-add,
+   columns, transaction deadlines). The correctness gate itself is closed.
 2. `B09`/`B10` and `B12`/`B15`/`B16`/`B17` — a real TTY session, libinput, frame
    clock, DMA-BUF, presentation-time, and cursor shape. This is what makes crab a
    daily driver.
@@ -264,11 +266,11 @@ acceptance criteria are in `IMPROV.md` §3.
 
 - [x] `C1` — fix the `x11` config-key false positive in `scripts/check-boundaries.sh` / `src/config/mod.rs:439,656,963–964`; CI must be green. *(Replaced the bare `\bx11` needle with `x11rb`/`xcb`/`xwayland`; `check-boundaries.sh`, fmt, clippy, and all tests are green.)*
 - [x] `C2` — an `x11` rule that cannot match skips only itself, not the rest of the chain (`state.rs:2488,3653`); add a two-rule regression test. *(The window protocol is now a known `bool` (`false` until XWayland lands), so `pending` is only used for app-id/title/output; added `an_unmatchable_x11_rule_does_not_block_later_rules`.)*
-- [ ] `C3` — preserve the output origin when a layer commit updates `usable_area` on a secondary output (`state.rs:1617–1622` vs `1722–1727`).
-- [ ] `C4` — run space compaction for every output, and make rule application, focus cycling, and activation use the window's owning output rather than `primary_output` (`state.rs:2016,2316,2455,2651–2688`).
-- [ ] `C5` — rename/refactor `primary_output` → `focused_output` and keep a distinct fallback output; audit every use (`state.rs:1087–1089,2796–2800,2843–2847`).
-- [ ] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output.
-- [ ] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
+- [x] `C3` — preserve the output origin when a layer commit updates `usable_area` on a secondary output. *(`sync_layer_zone` now returns the area at the output's global origin; `an_exclusive_zone_on_a_secondary_output_keeps_its_global_origin` covers it.)*
+- [x] `C4` — run space compaction for every output, and make rule application, focus cycling, and activation use the window's owning output rather than `primary_output`. *(Compaction, rules, focus, and `xdg-activation` read the window's output; `closing_a_window_on_a_background_output_compacts_only_that_output` and `a_rule_uses_the_owning_output_when_that_output_is_not_focused` cover it.)*
+- [x] `C5` — rename/refactor `primary_output` → `focused_output` and keep a distinct fallback output; audit every use. *(`fallback_output` is set by the first output and survives focus changes; `remove_output` migrates windows to it and `normalize_focus` keeps both fields pointing at registered outputs.)*
+- [x] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output. *(`src/compositor/state/multi_output.rs` drives a real `wayland-client` over a socket pair; five scenarios plus output remove/re-add.)*
+- [ ] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(The C6 harness is in place, including output remove/re-add; the remaining scenarios are open. niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
 - [ ] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green.
 - [ ] `B44`/`B45` — remove per-arrange `ScrollState` cloning (`layout.rs:210–230`) and deep-cloning of the 32-slot state during compaction (`core/output.rs:394–403`) while these paths are open.
 

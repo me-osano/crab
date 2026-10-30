@@ -547,7 +547,7 @@ fn collect_outputs(state: &Crab) -> Vec<OutputInfo> {
                     model.geometry.h,
                 ),
                 scale: model.scale,
-                focused: id == state.primary_output,
+                focused: id == state.focused_output,
                 visible_spaces: model.view.visible.iter_indices().collect(),
                 layout: model
                     .current_space_state()

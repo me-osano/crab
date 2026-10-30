@@ -135,9 +135,9 @@ impl OutputBackend for WinitGraphicsBackend<GlesRenderer> {
     }
 }
 
-/// Renders the primary output into the winit window and presents it.
+/// Renders the focused output into the winit window and presents it.
 pub(crate) fn render(state: &mut Crab, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
-    let output = state.primary_output;
+    let output = state.focused_output;
     render_output(state, output, backend);
 }
 

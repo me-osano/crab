@@ -1,10 +1,10 @@
 # IMPROV — changes and implementations crab can borrow from niri
 
-> Status snapshot, 2026-10-27.
+> Status snapshot, 2026-10-30.
 >
-> - crab: `3d63e05` plus uncommitted multi-output/IPC work; 20,838 Rust LOC
->   (19,348 in `src/`, 641 in `tests/`), 293 passing tests, clippy/fmt clean,
->   `scripts/check-boundaries.sh` currently failing.
+> - crab: `3d63e05` plus the landed C3–C6 multi-output work; 21,620 Rust LOC
+>   (20,130 in `src/`, 641 in `tests/`), 298 passing tests, clippy/fmt clean,
+>   `scripts/check-boundaries.sh` green.
 > - niri: `9d8f4f8` (`v26.x`, 2026-10-26); ~99,400 Rust LOC in the main
 >   workspace (86,464 in `src/`, 10,304 in `niri-config`, 2,664 in `niri-ipc`);
 >   ~101,500 including `niri-visual-tests`.
@@ -27,14 +27,14 @@
 
 | Metric | crab | niri | Reading |
 |---|---|---|---|
-| Rust LOC | 20,838 (19,348 in `src/`) | ~99,400 main workspace; ~101,500 with visual tests | crab is ~1/5 the size |
-| Compositor `src/` LOC | 19,348 | 86,464 | niri's `layout/` alone is 25,387 |
-| Largest module | `src/compositor/state.rs`, 4,235 | `src/layout/scrolling.rs`, 5,752 | crab centralizes; niri specializes |
+| Rust LOC | 21,620 (20,130 in `src/`) | ~99,400 main workspace; ~101,500 with visual tests | crab is ~1/5 the size |
+| Compositor `src/` LOC | 20,130 | 86,464 | niri's `layout/` alone is 25,387 |
+| Largest module | `src/compositor/state.rs`, 4,400 | `src/layout/scrolling.rs`, 5,752 | crab centralizes; niri specializes |
 | Pure layout/config | 5,163 (`core` 3,572 + `layout` 1,591) + 1,776 config + 1,334 animation | 25,387 layout + 10,304 config | niri's layout is ~5× crab's pure core+layout |
-| Tests | 293 (169 lib, 91 bin, 23 integration/doctest, 10 crab-ipc) | 247 `#[test]` in `src/` + 6,780 LOC `src/tests` + 2,058 LOC visual tests | crab is denser per line; niri is deeper per feature |
+| Tests | 298 (169 lib, 96 bin, 23 integration/doctest, 10 crab-ipc) | 247 `#[test]` in `src/` + 6,780 LOC `src/tests` + 2,058 LOC visual tests | crab is denser per line; niri is deeper per feature |
 | Working backend | winit nested only | winit + DRM/KMS/libinput | the biggest practical gap |
 | Protocol globals | core + xdg-shell/layer-shell/decoration/viewporter/fractional-scale/xdg-output | broad core set + capture, workspaces, session lock, IME | crab is at the “first windows” layer |
-| Output model | per-output map, but one live output | multi-output, hotplug, multi-GPU | crab's model is partly built, untested |
+| Output model | per-output map, two-output harness, one live output | multi-output, hotplug, multi-GPU | crab's model is built and tested; only one output is live |
 | Configure sync | per-window refusal state machine + `WindowFit` | transactions + `ConfigureIntent` | different philosophies |
 | IPC | snapshot/diff JSON | typed niri-ipc + buffered event stream + output config + pick | crab is simpler; niri is richer |
 | Docs | 4,716 lines of Markdown, excluding this file (1,786 in `docs/`) | extensive but less ADR-centric | crab is unusually explicit |
@@ -139,7 +139,7 @@ Ordered by practical impact on “can this be a daily driver”:
 | Pure core forbids Smithay tokens | layout lives beside Smithay and is generic over `LayoutElement` | Borrow algorithms into `src/layout`; keep protocol/backend glue in `src/compositor`. |
 | Ordered custom scene (ADR-0008) | niri's own render element tree + render helpers | Borrow effect/animation structure, not render code. |
 | Smithay 0.7 crates.io | Smithay 0.7 git revision | Check every API against crab's pinned release; niri may use unreleased fixes. |
-| `primary_output` is the focused output | niri separates primary output (fallback) from focused output | Rename/refactor crab's field before porting multi-output logic (see §3). |
+| `focused_output` + `fallback_output` (C5, done) | niri separates primary output (fallback) from focused output | Aligned; port multi-output logic directly. |
 | IPC is snapshot/diff JSON | typed `EventStreamState` + per-entity deltas | Borrow the buffering/state pattern, keep crab's schema unless ADR-0005 is revised. |
 
 ### 1.6 Bottom line
@@ -159,8 +159,9 @@ order, are:
 5. **B18/B19/B14/B20** — `ext-workspace`, foreign-toplevel, session lock, idle.
    This is what makes bars, lockers, and idle daemons work.
 
-Everything else is valuable but secondary. Do **C1–C6** and **B41** first so
-those borrows have a testable foundation.
+Everything else is valuable but secondary. **C1–C6 are closed** (2026-10-30);
+finish **B43** and the rest of **B41** so those borrows have a testable
+foundation.
 
 ---
 
@@ -197,13 +198,13 @@ broken foundations.
 |---|---|---|---|
 | C1 | Boundary check false positive on the `x11` config key | `src/config/mod.rs:439,656,963–964`; `scripts/check-boundaries.sh` exits 1 | **Fixed 2026-10-27:** the bare `\bx11` needle now matches only `x11rb`/`xcb`/`xwayland`; the check is green |
 | C2 | `x11` window rules block the entire rule chain forever | `state.rs:2488` (`x11 = None`), `3653` (`Pending`) | **Fixed 2026-10-27:** protocol is a known `bool`; `pending` remains only for app-id/title/output, with a two-rule regression test |
-| C3 | Layer commit loses the output origin in `usable_area` | `state.rs:1722–1727` vs `1617–1622` | Secondary-output windows jump/clip |
-| C4 | Space compaction and rule application are focused-output-scoped | `state.rs:2016,2316,2455,2651–2688` | Background-output windows leave stale views |
-| C5 | Rename/refactor `primary_output` → `focused_output` | `state.rs:1087–1089`, `2796–2800`, `2843–2847` | Removes the source of C4 and prevents new bugs |
-| C6 | Add a headless two-output test harness | no multi-output test exists; winit makes one output | Every multi-output change below needs it |
+| C3 | Layer commit loses the output origin in `usable_area` | `state.rs:1722–1727` vs `1617–1622` | **Fixed 2026-10-30:** `sync_layer_zone` returns the area at the output's global origin; covered by `an_exclusive_zone_on_a_secondary_output_keeps_its_global_origin` |
+| C4 | Space compaction and rule application are focused-output-scoped | `state.rs:2016,2316,2455,2651–2688` | **Fixed 2026-10-30:** compaction, rules, focus, and activation read the window's output; covered by two harness scenarios |
+| C5 | Rename/refactor `primary_output` → `focused_output` | `state.rs:1087–1089`, `2796–2800`, `2843–2847` | **Fixed 2026-10-30:** `focused_output` + `fallback_output`, `normalize_focus` keeps both valid, and `remove_output` migrates to the fallback |
+| C6 | Add a headless two-output test harness | no multi-output test exists; winit makes one output | **Fixed 2026-10-30:** `src/compositor/state/multi_output.rs` drives a real `wayland-client`; six scenarios |
 
 **Acceptance for this section:** `check-boundaries.sh`, clippy, fmt, and the
-292+ tests are green; a two-output test covers close-on-background-output, layer
+298 tests are green; a two-output test covers close-on-background-output, layer
 zone updates, and rule application on a non-focused output.
 
 ---
@@ -938,14 +939,16 @@ These are not niri ports, but niri's scale makes the patterns worth adopting.
 
 ## 5. Recommended sequencing
 
-### Phase A — Stabilize the current tree (1–2 weeks)
+### Phase A — Stabilize the current tree (1–2 weeks) — *C1–C6 done 2026-10-30*
 
-1. C1 boundary check.
-2. C2 `x11` rule semantics.
-3. C3 layer origin.
-4. C4/C5 focused-output refactor + two-output tests.
-5. B43 CI (`--all-features`, MSRV).
-6. B44/B45 cheap allocation fixes.
+1. ~~C1 boundary check.~~ ✅
+2. ~~C2 `x11` rule semantics.~~ ✅
+3. ~~C3 layer origin.~~ ✅
+4. ~~C4/C5 focused-output refactor + two-output tests.~~ ✅
+5. ~~C6 two-output harness.~~ ✅
+6. B43 CI (`--all-features`, MSRV) — next.
+7. B41 remaining scenarios as B01–B05 land.
+8. B44/B45 cheap allocation fixes.
 
 **Exit:** green CI; multi-output invariants tested; no known rule/view bugs.
 

@@ -155,7 +155,7 @@ pub(crate) fn directional_target(
 ) -> Option<WindowId> {
     let output = state
         .window(current)
-        .map_or(state.primary_output, |window| window.window.output);
+        .map_or(state.focused_output, |window| window.window.output);
     let runtime = state.outputs.get(&output)?;
     let view = runtime.model.view.visible;
     let (kind, params, mut scroll) = current_layout(state, output);

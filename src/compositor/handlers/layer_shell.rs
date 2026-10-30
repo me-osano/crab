@@ -27,7 +27,7 @@ impl WlrLayerShellHandler for Crab {
     ) {
         // A client may name an output or leave it to the compositor. Resolve
         // the protocol object to crab's handle here; `add_layer_surface`
-        // falls back to the primary output when it is unknown.
+        // falls back to the focused output when it is unknown.
         let output = output.and_then(|output| Output::from_resource(&output));
         self.add_layer_surface(surface, namespace, output);
     }
