@@ -21,19 +21,20 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-30):** 298 workspace tests pass; `cargo fmt --check`,
-clippy (`--all-features`), and `check-boundaries.sh` are clean. The §2.9
-correctness gate (`C3–C6`) is closed: focus and space state are per output, and
-the two-output harness drives real Wayland clients in-process. Only the winit
-backend renders today: `tty` probes devices and bails, `headless` validates only.
-The 2026-10 review, current-state comparison, and full niri borrow backlog live
-in **`IMPROV.md`** (`C1–C6`, `B01–B49`); this file tracks the milestones and only
-cross-references the actionable items.
+**Current state (2026-10-31):** 314 workspace tests pass; `cargo fmt --check`,
+clippy (`--all-features`), `cargo check` on MSRV 1.85, and
+`check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
+focus and space state are per output, and the two-output harness drives real
+Wayland clients in-process. Only the winit backend renders today: `tty` probes
+devices and bails, while `headless` builds real compositor state without a GPU
+and then exits. The 2026-10 review, current-state comparison, and full niri
+borrow backlog live in **`IMPROV.md`** (`C1–C6`, `B01–B49`); this file tracks the
+milestones and only cross-references the actionable items.
 
 **Start here (from `IMPROV.md`):**
-1. `B43` plus the rest of `B41` — CI on `--all-features` with an enforced MSRV,
-   and the remaining scenario harnesses (move/resize/close, output re-add,
-   columns, transaction deadlines). The correctness gate itself is closed.
+1. ~~`B43`~~ (done: all-features CI, MSRV 1.85, headless state smoke test) plus the
+   rest of `B41` — the remaining scenario harnesses (move/resize/close, output
+   re-add, columns, transaction deadlines). The correctness gate itself is closed.
 2. `B09`/`B10` and `B12`/`B15`/`B16`/`B17` — a real TTY session, libinput, frame
    clock, DMA-BUF, presentation-time, and cursor shape. This is what makes crab a
    daily driver.
@@ -94,7 +95,7 @@ locally as the canonical reference.
 - [x] Confirmed the toolchain builds `smithay` + `calloop` + `input` + `drm`/`gbm`/`egl`/`udev`/`libseat` on the target distro: the backends are cargo features (`backend-tty` pulls the DRM/session/input stack) and CI runs `cargo clippy --all-features`, so the whole stack keeps building. `renderer_multi` on (under `backend-tty`), `backend_vulkan` off (ADR-0002), `xwayland` deferred to M9.
 
 ### 0.5 CI, logging, errors
-- [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `scripts/check-boundaries.sh`, `cargo deny check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now. `--all-features`, MSRV 1.85, and a headless smoke test are still open — B43 in §2.9.)*
+- [x] CI (`.github/workflows/ci.yml`): `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`, `cargo test --workspace --all-features`, `scripts/check-boundaries.sh`, `cargo deny check`, and an MSRV 1.85 `cargo check`. *(Uses `cargo test`, not `cargo nextest`, to avoid an extra tool dependency for now. B43 also added a GPU-free headless state smoke test.)*
 - [x] `tracing` + `tracing-subscriber` (env-filter), panic hook writing a backtrace to `$XDG_STATE_HOME/crab/crash.log`.
 - [x] `main.rs`: arg parsing (`--backend {winit,tty,headless}`, `--config`, `--validate`, `--log-filter`), config load, backend select, logging init.
 
@@ -270,7 +271,7 @@ acceptance criteria are in `IMPROV.md` §3.
 - [x] `C5` — rename/refactor `primary_output` → `focused_output` and keep a distinct fallback output; audit every use. *(`fallback_output` is set by the first output and survives focus changes; `remove_output` migrates windows to it and `normalize_focus` keeps both fields pointing at registered outputs.)*
 - [x] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output. *(`src/compositor/state/multi_output.rs` drives a real `wayland-client` over a socket pair; five scenarios plus output remove/re-add.)*
 - [ ] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(The C6 harness is in place, including output remove/re-add; the remaining scenarios are open. niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
-- [ ] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green.
+- [x] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green. *(CI runs all-features tests, adds an MSRV job, and `--backend headless` builds real compositor state on an in-process display; a bin unit test and a CLI integration test cover it.)*
 - [ ] `B44`/`B45` — remove per-arrange `ScrollState` cloning (`layout.rs:210–230`) and deep-cloning of the 32-slot state during compaction (`core/output.rs:394–403`) while these paths are open.
 
 **Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crab layout` green; the §2.9 correctness/test gate is green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
@@ -767,7 +768,7 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 
 ## Definition of Done (Global)
 - [ ] Every phase ends with something **runnable** (nested at first; on bare metal from M4).
-- [ ] `cargo fmt --check`, `cargo clippy --all-features -D warnings`, `cargo test --workspace --all-features`, and `cargo deny check` pass in CI; MSRV 1.85 is checked. [B43]
+- [x] `cargo fmt --check`, `cargo clippy --all-features -D warnings`, `cargo test --workspace --all-features`, and `cargo deny check` pass in CI; MSRV 1.85 is checked. [B43]
 - [x] **Boundary lint** holds: `-core`/`-layout`/`-anim`/`-config` have no Smithay/Wayland deps; `-ipc` is a leaf; no cycles; only the binary touches Smithay. [C1]
 - [ ] Layouts are pure and property-tested; single logical→physical rounding site.
 - [ ] Multi-output invariants are covered by a headless two-output harness (background close, layer zones, rules, output remove/re-add). [C4/C6/B41]

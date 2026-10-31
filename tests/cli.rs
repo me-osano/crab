@@ -75,3 +75,16 @@ fn validate_accepts_the_shipped_example() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn headless_backend_builds_compositor_state() {
+    let output = crab()
+        .args(["--backend", "headless"])
+        .output()
+        .expect("run crab --backend headless");
+    assert!(
+        output.status.success(),
+        "expected success; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
