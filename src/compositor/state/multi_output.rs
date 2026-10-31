@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crab::core::SpaceSet;
 use smithay::output::{Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as ServerResizeEdge;
 use smithay::reexports::wayland_server::Display;
 use smithay::utils::Transform;
 use wayland_client::backend::WaylandError;
@@ -260,6 +261,24 @@ impl Harness {
     fn add_output(&mut self, id: OutputId, name: &str, geometry: Rect) -> OutputId {
         let config = self.state.config.clone();
         add_test_output(&mut self.state, &self.handle, id, name, geometry, &config)
+    }
+
+    /// Marks a toplevel mapped and arranges it, so hit-testing and interaction
+    /// see the rectangle the layout chose. The tests that use this disable
+    /// animations so `visual_rect` equals the target immediately.
+    fn map_toplevel(&mut self, id: WindowId) {
+        if let Some(window) = self.state.window_mut(id) {
+            window.mapped = true;
+        }
+        self.state.relayout();
+    }
+
+    /// The layout rectangle of a window (location and configured size).
+    fn window_rect(&self, id: WindowId) -> Rect {
+        self.state
+            .window(id)
+            .expect("the scenario window exists")
+            .rect()
     }
 }
 
@@ -614,4 +633,185 @@ fn clicking_empty_space_moves_focus_to_that_output() {
     h.state.focus_at((2000.0, 500.0).into());
     assert_eq!(h.state.focused_output, right);
     assert_eq!(h.state.focus, FocusTarget::None);
+}
+
+#[test]
+fn moving_a_window_to_another_space_leaves_the_other_output_untouched() {
+    let mut h = Harness::new(Config::default());
+    let [left, right] = h.outputs;
+
+    // Two windows on the left in space 1, one on the right.
+    h.focus(left);
+    let (first, _first_client) = h.create_toplevel();
+    let (moved, moved_client) = h.create_toplevel();
+    h.focus(right);
+    let (peer, _peer_client) = h.create_toplevel();
+    h.state.focus_window(Some(moved));
+    assert_eq!(h.state.focused_output, left);
+
+    h.state.move_to_space(2);
+    assert_eq!(
+        h.state.window(moved).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_2)
+    );
+    assert_eq!(
+        h.state.window(first).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1),
+        "the source space keeps its window"
+    );
+    assert_eq!(
+        h.state.output().model.view.visible,
+        SpaceSet::SPACE_2,
+        "moving a window shows its destination"
+    );
+    assert_eq!(
+        h.state.outputs[&right].model.view.visible,
+        SpaceSet::SPACE_1,
+        "the other output's view did not follow"
+    );
+    assert_eq!(
+        h.state.window(peer).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1)
+    );
+
+    // Closing the only window on the viewed space keeps the empty space past
+    // the end (niri's dynamic-space rule), without renumbering the other one.
+    moved_client.close();
+    h.pump();
+    assert!(h.state.window(moved).is_none());
+    assert_eq!(h.state.output().model.view.visible, SpaceSet::SPACE_2);
+    assert_eq!(
+        h.state.window(first).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1)
+    );
+}
+
+#[test]
+fn a_move_drag_snaps_to_the_output_edge_and_keeps_its_output() {
+    let mut config = Config::default();
+    config.animations.enabled = false;
+    let mut h = Harness::new(config);
+    let [left, _right] = h.outputs;
+
+    h.focus(left);
+    let (first, _first_client) = h.create_toplevel();
+    let (second, _second_client) = h.create_toplevel();
+    // Map both so the fair grid gives each a half-width column.
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+    assert_eq!(h.window_rect(first), Rect::new(8.0, 8.0, 948.0, 1064.0));
+
+    assert!(
+        h.state
+            .begin_interaction(GrabMode::Move, (100.0, 100.0).into(), 1)
+    );
+    // Drag right until the far edge is within the snap distance of DP-1's
+    // usable edge: the window lands flush at 972 + 948 = 1920, and the top
+    // edge snaps to the usable area's origin rather than the gap inset.
+    assert!(h.state.update_interaction((1050.0, 100.0).into()));
+    assert_eq!(h.window_rect(first), Rect::new(972.0, 0.0, 948.0, 1064.0));
+    assert_eq!(
+        h.state.window(first).map(|window| window.window.output),
+        Some(left),
+        "the drag did not hand the window to the other output"
+    );
+    assert!(
+        h.state
+            .window(first)
+            .is_some_and(|window| window.window.floating),
+        "moving a tiled window floats it"
+    );
+    assert!(h.state.end_interaction(1).is_some());
+    assert!(h.state.interaction.is_none());
+}
+
+#[test]
+fn a_resize_drag_pins_the_opposite_edges_and_keeps_its_output() {
+    let mut config = Config::default();
+    config.animations.enabled = false;
+    let mut h = Harness::new(config);
+    let [left, _right] = h.outputs;
+
+    h.focus(left);
+    let (first, _first_client) = h.create_toplevel();
+    let (second, _second_client) = h.create_toplevel();
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+    assert_eq!(h.window_rect(first), Rect::new(8.0, 8.0, 948.0, 1064.0));
+    assert_eq!(h.window_rect(second), Rect::new(964.0, 8.0, 948.0, 1064.0));
+
+    // Bottom-right follows the pointer; the top-left corner stays put.
+    assert!(h.state.begin_interaction(
+        GrabMode::Resize {
+            edges: ServerResizeEdge::BottomRight,
+        },
+        (100.0, 100.0).into(),
+        1,
+    ));
+    assert!(h.state.update_interaction((150.0, 150.0).into()));
+    assert_eq!(h.window_rect(first), Rect::new(8.0, 8.0, 998.0, 1114.0));
+    assert!(h.state.end_interaction(1).is_some());
+
+    // Top-left follows; the opposite corner is pinned, so the size shrinks by
+    // exactly the distance the pointer travelled. Floating the first window
+    // left the second as the only tile, so it now fills the usable area.
+    assert!(h.state.begin_interaction(
+        GrabMode::Resize {
+            edges: ServerResizeEdge::TopLeft,
+        },
+        (1200.0, 500.0).into(),
+        1,
+    ));
+    assert!(h.state.update_interaction((1250.0, 550.0).into()));
+    let resized = h.window_rect(second);
+    assert_eq!(resized, Rect::new(58.0, 58.0, 1854.0, 1014.0));
+    assert_eq!(resized.right(), 1912.0, "the right edge did not move");
+    assert_eq!(resized.bottom(), 1072.0, "the bottom edge did not move");
+    assert_eq!(
+        h.state.window(second).map(|window| window.window.output),
+        Some(left)
+    );
+    assert!(h.state.end_interaction(1).is_some());
+}
+
+#[test]
+fn closing_the_focused_window_hands_focus_to_a_survivor_on_its_output() {
+    let mut h = Harness::new(Config::default());
+    let [left, right] = h.outputs;
+
+    h.focus(left);
+    let (first, first_client) = h.create_toplevel();
+    let (second, _second_client) = h.create_toplevel();
+    h.focus(right);
+    let (peer, _peer_client) = h.create_toplevel();
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+
+    h.state.focus_window(Some(first));
+    assert_eq!(h.state.focused_output, left);
+    assert_eq!(h.state.focused_id(), Some(first));
+
+    first_client.close();
+    h.pump();
+
+    assert!(h.state.window(first).is_none());
+    assert_eq!(h.state.focused_output, left);
+    assert_eq!(
+        h.state.focused_id(),
+        Some(second),
+        "the surviving window on the same output takes focus"
+    );
+    assert_eq!(
+        h.state.window(second).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1)
+    );
+    assert_eq!(
+        h.state.window(peer).map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1),
+        "the other output's window was not renumbered"
+    );
+    assert_eq!(
+        h.state.outputs[&right].model.view.visible,
+        SpaceSet::SPACE_1
+    );
 }

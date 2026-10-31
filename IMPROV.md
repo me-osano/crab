@@ -882,6 +882,15 @@ one.
 - column move/consume/expel (B03);
 - transaction deadline with a fake refusing client (B01).
 
+**Status:** `tests/layout_scenarios.rs` covers the pure half — independent
+two-output arrangement, move-to-space and its source reflow, cross-output
+migration, swap order, close reflow, and a scroll column closing before the
+focused one. `src/compositor/state/multi_output.rs` covers the protocol half —
+move-drag edge snapping without changing output, resize-drag pinned opposite
+edges, focused-close focus handoff on the owning output, move-to-space leaving
+the peer output untouched, plus the existing C3/C4 and unplug/replug cases.
+Column move/consume/expel waits on B03 and the transaction deadline on B01.
+
 **Priority:** P1 · **Effort:** M/L.
 
 ---
