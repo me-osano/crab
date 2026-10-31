@@ -770,6 +770,10 @@ plus the event stream.
   are relative to the including file, `?` marks an optional entry, includes are
   recursive with cycle detection, and the including file overrides what it
   includes (tables merge recursively, arrays concatenate).
+- A `[variables]` table defines strings referenced as `${name}` in table keys and
+  string values. Expansion runs after includes merge, so variables are shared
+  across files; nested references, cycles, `$$` escaping, and unknown names are
+  handled explicitly.
 - Provide `crab-cli config schema` or documented defaults so editors can offer completion later.
 
 ### 13.3 Example

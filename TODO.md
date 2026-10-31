@@ -462,7 +462,10 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       entries, recursive resolution with cycle detection, and per-key merge
       (tables recursive, arrays concatenated, later wins). Syntax errors in an
       include name that file.
-- [ ] User variables (definitions and substitution across included files).
+- [x] User variables: a `[variables]` table of strings, `${name}` expansion in
+      table keys and string values, resolved after includes are merged; nested
+      references, cycle detection, `$$` escaping, and errors for unknown,
+      malformed, or non-string definitions.
 - [ ] Explicit parse → merge → validate → apply for layered config (defaults + user
       + runtime overrides), with path-qualified semantic errors. [IMPROV B39]
       *(niri-config patterns, not its schema)*

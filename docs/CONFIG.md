@@ -24,6 +24,29 @@ include = ["base.toml", "theme.toml", "?local.toml"]
 - Each included file's syntax errors name that file. `parse()` (text-only) rejects `include`; use `load()` / `--config` so the base directory is known.
 - Hot reload watches the **main** config's directory. Files included from other directories are re-read on reload but editing them alone does not trigger it.
 
+### Variables
+
+Define reusable strings in a `[variables]` table and reference them as `${name}`:
+
+```toml
+[variables]
+mod = "SUPER"
+terminal = "alacritty"
+monitor = "DP-1"
+
+[binds.default]
+"${mod}+Return" = "spawn:${terminal}"
+[output."${monitor}"]
+scale = 1.5
+```
+
+- Substitution applies to **table keys and string values**, so bind chords and output/rule names can use variables.
+- Definitions are resolved after includes are merged: any file may use a variable defined by any other file, and a later definition wins.
+- A definition may reference another variable (`launcher = "${mod}+Space"`); cycles are rejected with the chain.
+- An unknown `${name}`, an unterminated `${`, or an empty `${}` is an error naming the problem.
+- `$$` escapes a literal `$`, so `$${HOME}` expands to `${HOME}`.
+- Values must be strings; quote numbers (`"8"`). Expansion happens before typed parsing, so a variable can stand in for a number, bool, or enum name.
+
 ## Conventions
 
 - **Booleans/flags**: accept `true`/`false` or `0`/`1` (mango style). Other values are errors.

@@ -8,7 +8,9 @@
 //! `resources/default-config.toml`; without `--config`, crab reads
 //! [`default_path`] when that file exists. [`load`] resolves an `include` list
 //! relative to the including file before parsing, while [`parse`] handles a
-//! single already-merged document.
+//! single already-merged document. A `[variables]` table defines `${name}`
+//! placeholders that are expanded in keys and string values after includes are
+//! merged.
 //!
 //! Unknown keys are ignored, so a config keeps working across versions; a key
 //! that is *present* but has the wrong type is an error, so a typo is reported
@@ -1092,34 +1094,204 @@ const LEGACY_TOP_LEVEL: [&str; 5] = [
 /// Parses a configuration from TOML text (does not validate).
 ///
 /// `include` is resolved only by [`load`], which knows the file's directory;
-/// text passed here must already be fully merged.
+/// text passed here must already be fully merged. A `[variables]` table is
+/// resolved here, so both [`parse`] and [`load`] accept it.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] on malformed TOML or wrongly-typed values, and
 /// [`ConfigError::Invalid`] for a value that parsed but is not a valid choice
-/// (e.g. an unknown layout name).
+/// (e.g. an unknown layout name), for an unknown or cyclic variable, or for an
+/// unterminated `${`.
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
-    // Check the raw document first so the pre-`[layout]` form gets a helpful
+    let mut document: toml::Value =
+        toml::from_str(text).map_err(|err| ConfigError::Parse(err.to_string()))?;
+    // Check the document first so the pre-`[layout]` form gets a helpful
     // message instead of "invalid type" for the `layout` key.
-    if let Ok(document) = toml::from_str::<toml::Value>(text) {
-        if let Some(table) = document.as_table() {
-            if table.contains_key("include") {
-                return Err(ConfigError::Invalid(
-                    "`include` is resolved only when loading from a file; use `load`".to_owned(),
-                ));
-            }
-            if let Some(key) = LEGACY_TOP_LEVEL
-                .iter()
-                .find(|key| table.get(**key).is_some_and(|value| !value.is_table()))
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "`{key}` now lives under `[layout]`; move it into that table"
-                )));
-            }
+    if let Some(table) = document.as_table() {
+        if table.contains_key("include") {
+            return Err(ConfigError::Invalid(
+                "`include` is resolved only when loading from a file; use `load`".to_owned(),
+            ));
+        }
+        if let Some(key) = LEGACY_TOP_LEVEL
+            .iter()
+            .find(|key| table.get(**key).is_some_and(|value| !value.is_table()))
+        {
+            return Err(ConfigError::Invalid(format!(
+                "`{key}` now lives under `[layout]`; move it into that table"
+            )));
         }
     }
-    let raw: RawConfig = toml::from_str(text).map_err(|err| ConfigError::Parse(err.to_string()))?;
+    let has_variables = document
+        .as_table()
+        .is_some_and(|table| table.contains_key("variables"));
+    // Most configs have neither variables nor placeholders. Deserializing the
+    // original text keeps the source line/column in type errors; the expanded
+    // document is only reserialized when there is something to substitute.
+    if !has_variables && !text.contains('$') {
+        let raw: RawConfig =
+            toml::from_str(text).map_err(|err| ConfigError::Parse(err.to_string()))?;
+        return raw.into_config();
+    }
+    resolve_variables(&mut document)?;
+    let expanded = toml::to_string(&document).map_err(|err| ConfigError::Parse(err.to_string()))?;
+    let raw: RawConfig =
+        toml::from_str(&expanded).map_err(|err| ConfigError::Parse(err.to_string()))?;
     raw.into_config()
+}
+
+/// Removes `[variables]` and substitutes `${name}` in the rest of the document.
+///
+/// Substitution runs after includes are merged, so any file may use a variable
+/// defined by any other file. Definitions may reference each other; cycles are
+/// rejected. Both table keys (e.g. bind chords) and string values are expanded,
+/// and `$$` escapes a literal `$`.
+fn resolve_variables(document: &mut toml::Value) -> Result<(), ConfigError> {
+    let variables = take_variables(document)?;
+    let mut resolved = BTreeMap::new();
+    let mut stack = Vec::new();
+    // Resolve every definition up front so a typo is reported even if the
+    // variable is never used.
+    for name in variables.keys() {
+        resolve_variable(name, &variables, &mut resolved, &mut stack)?;
+    }
+    substitute_value(document, &variables, &mut resolved, &mut stack)
+}
+
+/// Removes the `[variables]` table and returns its string definitions.
+fn take_variables(document: &mut toml::Value) -> Result<BTreeMap<String, String>, ConfigError> {
+    let Some(table) = document.as_table_mut() else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(raw) = table.remove("variables") else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(entries) = raw.as_table() else {
+        return Err(ConfigError::Invalid(
+            "`[variables]` must be a table of `name = \"value\"` pairs".to_owned(),
+        ));
+    };
+    entries
+        .iter()
+        .map(|(name, value)| match value.as_str() {
+            Some(value) => Ok((name.clone(), value.to_owned())),
+            None => Err(ConfigError::Invalid(format!(
+                "config variable `{name}` must be a string, not {}",
+                value.type_str()
+            ))),
+        })
+        .collect()
+}
+
+/// Resolves one variable, following references and rejecting cycles.
+fn resolve_variable(
+    name: &str,
+    variables: &BTreeMap<String, String>,
+    resolved: &mut BTreeMap<String, String>,
+    stack: &mut Vec<String>,
+) -> Result<String, ConfigError> {
+    if let Some(value) = resolved.get(name) {
+        return Ok(value.clone());
+    }
+    if stack.iter().any(|entry| entry == name) {
+        let mut chain = stack.clone();
+        chain.push(name.to_owned());
+        return Err(ConfigError::Invalid(format!(
+            "config variable cycle: {}",
+            chain.join(" -> ")
+        )));
+    }
+    let raw = variables
+        .get(name)
+        .ok_or_else(|| ConfigError::Invalid(format!("unknown config variable `{name}`")))?;
+    stack.push(name.to_owned());
+    let value = substitute(raw, variables, resolved, stack)?;
+    stack.pop();
+    resolved.insert(name.to_owned(), value.clone());
+    Ok(value)
+}
+
+/// Replaces `${name}` in `text`, with `$$` as a literal `$`.
+fn substitute(
+    text: &str,
+    variables: &BTreeMap<String, String>,
+    resolved: &mut BTreeMap<String, String>,
+    stack: &mut Vec<String>,
+) -> Result<String, ConfigError> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().map(|(_, next)| *next) {
+            Some('$') => {
+                chars.next();
+                out.push('$');
+            }
+            Some('{') => {
+                chars.next();
+                let mut name = String::new();
+                let mut closed = false;
+                for (_, next) in chars.by_ref() {
+                    if next == '}' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(next);
+                }
+                if !closed {
+                    return Err(ConfigError::Invalid(
+                        "unterminated `${` in config; close it with `}`".to_owned(),
+                    ));
+                }
+                if name.is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "empty config variable name `${}`".to_owned(),
+                    ));
+                }
+                out.push_str(&resolve_variable(&name, variables, resolved, stack)?);
+            }
+            _ => out.push('$'),
+        }
+    }
+    Ok(out)
+}
+
+/// Substitutes variables in every table key and string value.
+fn substitute_value(
+    value: &mut toml::Value,
+    variables: &BTreeMap<String, String>,
+    resolved: &mut BTreeMap<String, String>,
+    stack: &mut Vec<String>,
+) -> Result<(), ConfigError> {
+    match value {
+        toml::Value::String(text) => {
+            *text = substitute(text, variables, resolved, stack)?;
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                substitute_value(value, variables, resolved, stack)?;
+            }
+        }
+        toml::Value::Table(table) => {
+            let mut rebuilt = toml::Table::new();
+            for (key, mut value) in std::mem::take(table) {
+                substitute_value(&mut value, variables, resolved, stack)?;
+                let key = substitute(&key, variables, resolved, stack)?;
+                if rebuilt.contains_key(&key) {
+                    return Err(ConfigError::Invalid(format!(
+                        "config variable substitution produced duplicate key `{key}`"
+                    )));
+                }
+                rebuilt.insert(key, value);
+            }
+            *table = rebuilt;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Loads and validates a configuration from `path`, resolving `include`.
@@ -1130,6 +1302,10 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
 /// order, and a file may include others; cycles are rejected. Tables merge
 /// recursively, arrays concatenate, and a later value wins over an earlier one,
 /// so the including file overrides what it includes.
+///
+/// A `[variables]` table in any included file is merged like any other table and
+/// expanded after merging, so a variable defined in the main file is visible to
+/// every include (and vice versa).
 ///
 /// # Errors
 /// Returns a [`ConfigError`] if a file cannot be read, parsed, or validated, if
@@ -1773,10 +1949,11 @@ mod tests {
 
     #[test]
     fn rejects_wrong_type() {
-        assert!(matches!(
-            parse("[layout]\ngaps = \"lots\""),
-            Err(ConfigError::Parse(_))
-        ));
+        let err = parse("[layout]\ngaps = \"lots\"").unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
+        // Without variables the original text is deserialized directly, so the
+        // error keeps its source position.
+        assert!(err.to_string().contains("line 2"), "{err}");
     }
 
     #[test]
@@ -2063,5 +2240,126 @@ mod tests {
         let main = dir.write("config.toml", "include = 3\n");
         let err = load(&main).unwrap_err();
         assert!(err.to_string().contains("include"), "{err}");
+    }
+
+    #[test]
+    fn variables_expand_in_keys_and_values() {
+        let cfg = parse(
+            r#"
+            [variables]
+            mod = "SUPER"
+            terminal = "alacritty"
+            [binds.default]
+            "${mod}+Return" = "spawn:${terminal}"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.binds.default["SUPER+Return"], "spawn:alacritty");
+
+        // Table keys (here an output connector) are expanded too.
+        let cfg = parse("[variables]\nmonitor = \"DP-1\"\n[output.\"${monitor}\"]\nscale = 1.5\n")
+            .unwrap();
+        assert_eq!(cfg.outputs["DP-1"].scale, Some(1.5));
+    }
+
+    #[test]
+    fn variables_may_reference_each_other() {
+        let cfg = parse(
+            "[variables]\nmod = \"SUPER\"\nlauncher = \"${mod}+Space\"\n[binds.default]\n\"${launcher}\" = \"spawn:rofi\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.binds.default["SUPER+Space"], "spawn:rofi");
+    }
+
+    #[test]
+    fn dollar_escapes_a_literal_placeholder() {
+        let cfg = parse(
+            "[variables]\nhome = \"/home/me\"\n[autostart]\nexec_once = [\"echo $${HOME} and $$\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.autostart.exec_once, ["echo ${HOME} and $"]);
+        // The variable is still usable elsewhere.
+        let cfg =
+            parse("[variables]\nhome = \"/home/me\"\n[autostart]\nexec_once = [\"cd ${home}\"]\n")
+                .unwrap();
+        assert_eq!(cfg.autostart.exec_once, ["cd /home/me"]);
+    }
+
+    #[test]
+    fn unknown_variables_are_rejected() {
+        let err = parse("[binds.default]\n\"${missing}\" = \"killclient\"\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown config variable `missing`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn variable_cycles_are_rejected() {
+        let err = parse("[variables]\na = \"${b}\"\nb = \"${a}\"\n").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cycle"), "{message}");
+        assert!(message.contains('a') && message.contains('b'), "{message}");
+    }
+
+    #[test]
+    fn variable_values_must_be_strings() {
+        let err = parse("[variables]\ngap = 8\n").unwrap_err();
+        assert!(err.to_string().contains("must be a string"), "{err}");
+    }
+
+    #[test]
+    fn malformed_placeholders_are_rejected() {
+        let err = parse("[autostart]\nexec_once = [\"${oops\"]\n").unwrap_err();
+        assert!(err.to_string().contains("unterminated"), "{err}");
+        let err = parse("[autostart]\nexec_once = [\"${}\"]\n").unwrap_err();
+        assert!(err.to_string().contains("empty config variable"), "{err}");
+    }
+
+    #[test]
+    fn variable_expansion_may_not_create_duplicate_keys() {
+        let err = parse(
+            "[variables]\na = \"same\"\nb = \"same\"\n[binds.default]\n\"${a}\" = \"one\"\n\"${b}\" = \"two\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate key"), "{err}");
+    }
+
+    #[test]
+    fn variables_are_visible_across_includes() {
+        let dir = TempDir::new("variables");
+        dir.write(
+            "binds.toml",
+            "[binds.default]\n\"${mod}+Return\" = \"spawn:${term}\"\n",
+        );
+        let main = dir.write(
+            "config.toml",
+            "include = [\"binds.toml\"]\n[variables]\nmod = \"SUPER\"\nterm = \"foot\"\n",
+        );
+        let config = load(&main).unwrap();
+        assert_eq!(config.binds.default["SUPER+Return"], "spawn:foot");
+
+        // A variable defined by an include is visible to the main file.
+        dir.write("vars.toml", "[variables]\nterm = \"kitty\"\n");
+        let main = dir.write(
+            "config.toml",
+            "include = [\"vars.toml\"]\n[binds.default]\n\"${term}\" = \"spawn:${term}\"\n",
+        );
+        assert_eq!(load(&main).unwrap().binds.default["kitty"], "spawn:kitty");
+    }
+
+    #[test]
+    fn a_later_variable_definition_wins_across_includes() {
+        let dir = TempDir::new("variables-wins");
+        dir.write("base.toml", "[variables]\nterm = \"foot\"\n");
+        let main = dir.write(
+            "config.toml",
+            "include = [\"base.toml\"]\n[variables]\nterm = \"alacritty\"\n[binds.default]\n\"${term}\" = \"spawn:${term}\"\n",
+        );
+        assert_eq!(
+            load(&main).unwrap().binds.default["alacritty"],
+            "spawn:alacritty"
+        );
     }
 }
