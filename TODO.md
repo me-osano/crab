@@ -466,10 +466,14 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [ ] Explicit parse → merge → validate → apply for layered config (defaults + user
       + runtime overrides), with path-qualified semantic errors. [IMPROV B39]
       *(niri-config patterns, not its schema)*
-- [ ] Audit parsed-only fields (`client_side_decorations`, `next_space_direction`,
-      `always_center_single_column`, touchpad/mouse/keyboard fields,
-      `swipe_min_threshold`, per-rule `x11`): wire them or reject them explicitly,
-      and make `pending_sections()` cover them. [IMPROV B40]
+- [x] Audit parsed-only fields: `pending_sections()` now reports only keys that
+      are genuinely ignored (NumLock, touchpad/mouse details, output
+      mode/transform, `client_side_decorations`, `*_next_space_direction`,
+      `scroll.always_center_single_column`, and `x11 = true`), with corrected
+      key paths; applied fields (keyboard repeat/layout, output position/scale,
+      animation styles) are no longer reported. [IMPROV B40]
+      Remaining fields stay parse-and-validate (a config can be written ahead of
+      its milestone); wiring them is tracked by M4/M9.
 
 ### 5.2 Hot reload
 - [x] `notify` file watcher with debounce; **atomic apply** — parse+validate into a new `Config`, swap only if valid. *(Winit wires the watcher and a 250 ms debounce; the tty backend reuses it when B09 lands.)*

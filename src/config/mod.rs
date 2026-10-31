@@ -139,23 +139,51 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Sections that parsed but whose behavior is not implemented yet.
+    /// Keys that parsed but whose behavior is not implemented yet.
     ///
-    /// A hand-written config can carry sections ahead of their milestone; this
-    /// names them so startup can say which parts are not doing anything yet.
-    /// Entries disappear as their features land (M4–M6).
+    /// A hand-written config can carry keys ahead of their milestone; this names
+    /// them so startup can say which parts are not doing anything yet. Entries
+    /// disappear as their features land (M4–M6). Only fields that are genuinely
+    /// ignored are listed: a field that is applied is never reported, so a
+    /// non-empty list always means some configured behavior is missing.
     #[must_use]
     pub fn pending_sections(&self) -> Vec<&'static str> {
         let defaults = Self::default();
         let mut pending = Vec::new();
-        if self.input != defaults.input {
-            pending.push("input");
+
+        // Key repeat and the xkb layout are applied; NumLock is not.
+        if self.input.numlock_on != defaults.input.numlock_on {
+            pending.push("input.keyboard.numlock_on");
         }
-        if self.outputs.values().any(|output| {
-            output.mode.is_some() || output.scale.is_some() || output.transform.is_some()
-        }) {
+        // Every touchpad field is parsed but not wired to a device yet.
+        let touchpad = |input: &Input| {
+            (
+                input.disable_touchpad,
+                input.tap_to_click,
+                input.tap_and_drag,
+                input.drag_lock,
+                input.touchpad_natural_scrolling,
+                input.touchpad_disable_while_typing,
+                input.swipe_min_threshold,
+            )
+        };
+        if touchpad(&self.input) != touchpad(&defaults.input) {
+            pending.push("input.touchpad");
+        }
+        if self.input.mouse_natural_scrolling != defaults.input.mouse_natural_scrolling {
+            pending.push("input.mouse.natural_scrolling");
+        }
+
+        // Position and scale are applied when an output is registered; choosing
+        // a mode or transform needs a real output backend.
+        if self
+            .outputs
+            .values()
+            .any(|output| output.mode.is_some() || output.transform.is_some())
+        {
             pending.push("output");
         }
+
         if self.client_side_decorations != defaults.client_side_decorations {
             pending.push("layout.client_side_decorations");
         }
@@ -163,13 +191,14 @@ impl Config {
             pending.push("layout.*_next_space_direction");
         }
         if self.scroll.always_center_single_column != defaults.scroll.always_center_single_column {
-            pending.push("layout.scroll_always_center_single_column");
+            pending.push("layout.scroll.always_center_single_column");
         }
-        if self.animations.open != defaults.animations.open
-            || self.animations.close != defaults.animations.close
-        {
-            pending.push("animations.animation_type_*");
+        // `x11 = false` correctly matches Wayland windows; `x11 = true` can never
+        // match until XWayland lands (M9).
+        if self.window_rules.iter().any(|rule| rule.x11 == Some(true)) {
+            pending.push("window_rule.x11");
         }
+
         pending
     }
 
@@ -1801,6 +1830,7 @@ mod tests {
 
         let cfg = parse(include_str!("../../resources/default-config.toml")).unwrap();
         let pending = cfg.pending_sections();
+        // The example sets a mode, which needs a real output backend.
         assert!(pending.contains(&"output"), "missing output: {pending:?}");
         assert!(!pending.contains(&"layer_rule"));
         assert!(!pending.contains(&"mousebinds"));
@@ -1808,21 +1838,56 @@ mod tests {
         assert!(!pending.contains(&"gesturebinds"));
         assert!(!pending.contains(&"modes"));
         // The example's `[input]` matches the built-in defaults, so nothing is
-        // lost by not applying it; `[layout]` is applied.
-        assert!(!pending.contains(&"input"));
+        // lost by not applying it; `[layout]` and the animation styles are
+        // applied.
+        assert!(!pending.iter().any(|name| name.starts_with("input")));
         assert!(!pending.contains(&"layout"));
+        assert!(!pending.iter().any(|name| name.starts_with("animations")));
 
-        let cfg = parse(
-            "[input.keyboard]\nrepeat_rate = 40\n[layout]\nclient_side_decorations = 1\nfocus_follows_cursor = 0\n",
-        )
-        .unwrap();
+        // Key repeat and the xkb layout are applied, so they are not pending.
+        let cfg = parse("[input.keyboard]\nrepeat_rate = 40\nxkb_rules_layout = \"de\"\n").unwrap();
+        assert!(
+            !cfg.pending_sections()
+                .iter()
+                .any(|name| name.starts_with("input"))
+        );
+
+        let cfg = parse("[input.keyboard]\nnumlock_on = 1\n").unwrap();
+        assert!(
+            cfg.pending_sections()
+                .contains(&"input.keyboard.numlock_on")
+        );
+
+        let cfg = parse("[input.touchpad]\ntap_to_click = 0\n").unwrap();
+        assert!(cfg.pending_sections().contains(&"input.touchpad"));
+
+        let cfg = parse("[input.mouse]\nnatural_scrolling = 1\n").unwrap();
+        assert!(
+            cfg.pending_sections()
+                .contains(&"input.mouse.natural_scrolling")
+        );
+
+        let cfg =
+            parse("[layout]\nclient_side_decorations = 1\nfocus_follows_cursor = 0\n").unwrap();
         let pending = cfg.pending_sections();
-        assert!(pending.contains(&"input"));
         assert!(pending.contains(&"layout.client_side_decorations"));
+        assert!(!pending.contains(&"layout"), "{pending:?}");
 
-        // A position-only output table is applied when the output is
+        let cfg = parse("[layout.scroll]\nalways_center_single_column = 0\n").unwrap();
+        assert!(
+            cfg.pending_sections()
+                .contains(&"layout.scroll.always_center_single_column")
+        );
+
+        let cfg = parse("[[window_rule]]\nx11 = true\n").unwrap();
+        assert!(cfg.pending_sections().contains(&"window_rule.x11"));
+        // `x11 = false` matches Wayland windows today, so it is not pending.
+        let cfg = parse("[[window_rule]]\nx11 = false\n").unwrap();
+        assert!(!cfg.pending_sections().contains(&"window_rule.x11"));
+
+        // A position/scale-only output table is applied when the output is
         // registered, so nothing is pending for it.
-        let cfg = parse("[output.DP-1]\nposition = { x = 1920, y = 0 }\n").unwrap();
+        let cfg = parse("[output.DP-1]\nposition = { x = 1920, y = 0 }\nscale = 1.5\n").unwrap();
         assert!(!cfg.pending_sections().contains(&"output"));
     }
 
