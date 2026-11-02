@@ -32,8 +32,9 @@ pub use output_plan::{
     ConnectorInfo, ConnectorMode, OutputPlan, OutputPlanError, OutputPlanner, OutputPreference,
 };
 pub use params::{
-    Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutFamily, LayoutKind,
-    LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets,
+    Column, ColumnDisplay, ColumnWidth, Direction, HeightPresets, LayoutCommand, LayoutFamily,
+    LayoutKind, LayoutParams, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets,
+    WindowHeight,
 };
 pub use rules::WindowRule;
 pub use spaces::{SpaceRemap, SpaceSet, SpaceView};

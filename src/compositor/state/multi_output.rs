@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crab::core::{ColumnWidth, LayoutCommand, SpaceSet};
+use crab::core::{ColumnWidth, LayoutCommand, SpaceSet, WindowHeight};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as ServerResizeEdge;
 use smithay::reexports::wayland_server::Display;
@@ -825,6 +825,17 @@ fn column_actions_reorder_and_resize_the_scroll_strip() {
         .layout_command(LayoutCommand::SetColumnWidth(ColumnWidth::Fixed(400.0)));
     assert_eq!(h.window_rect(third), Rect::new(640.0, 0.0, 400.0, 1080.0));
     assert_eq!(h.window_rect(first).w, 960.0);
+
+    // Window heights are per window: the column stays put while the window
+    // inside it becomes shorter.
+    h.state
+        .layout_command(LayoutCommand::SetWindowHeight(WindowHeight::Fixed(500.0)));
+    assert_eq!(h.window_rect(third), Rect::new(640.0, 0.0, 400.0, 500.0));
+    assert_eq!(
+        h.window_rect(first).h,
+        1080.0,
+        "other columns keep their height"
+    );
 }
 
 #[test]

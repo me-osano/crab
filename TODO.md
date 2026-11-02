@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-31):** 333 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-10-31):** 336 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -322,10 +322,10 @@ are smooth, interruptible, and free of pops.
   and focus within a column. Implement pure operations in `src/layout/scroll.rs`,
   then add `Action` variants, binds, IPC, and property tests. [IMPROV B03]
   *(niri `layout/scrolling.rs`)*
-  *(Done: move column, move window to column, consume/expel, expand, and
-  set-column-width are pure `ScrollState` operations with unit + property tests,
-  `Action`/bind/IPC wiring, and a real-client compositor scenario. Still open:
-  `set-window-height` / `switch-preset-window-height` and focus-within-column.)*
+  *(Done: move column, move window to column, consume/expel, expand,
+  set-column-width, and per-window height presets are pure `ScrollState`
+  operations with unit + property tests, `Action`/bind/IPC wiring, and a
+  real-client compositor scenario. Still open: focus-within-column.)*
 
 ### 3.4 Named spaces + overflow
 - [ ] Named spaces / persistent workspaces; survive output unplug (§3A).

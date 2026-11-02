@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 
 use crab::config::{Config, KeyMode};
-use crab::core::{ColumnWidth, LayoutKind, SpaceSet};
+use crab::core::{ColumnWidth, LayoutKind, SpaceSet, WindowHeight};
 use crab_ipc::Direction;
 #[cfg(test)]
 use smithay::input::keyboard::Keysym;
@@ -879,6 +879,21 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         });
     }
     if let Some(value) = action
+        .strip_prefix("set_window_height:")
+        .or_else(|| action.strip_prefix("set-window-height:"))
+    {
+        let height = value.trim();
+        if height.is_empty() {
+            return Err("empty window height".to_owned());
+        }
+        if WindowHeight::parse(height).is_none() {
+            return Err(format!("`{height}` is not a window height"));
+        }
+        return Ok(Action::SetWindowHeight {
+            height: height.to_owned(),
+        });
+    }
+    if let Some(value) = action
         .strip_prefix("set_layout:")
         .or_else(|| action.strip_prefix("set-layout:"))
     {
@@ -986,6 +1001,10 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         "expand_column_to_available_width" | "expand-column-to-available-width" => {
             Ok(Action::ExpandColumnToAvailableWidth)
         }
+        "switch_preset_window_height"
+        | "switch-preset-window-height"
+        | "preset_window_height"
+        | "preset-window-height" => Ok(Action::PresetWindowHeight),
         "" => Err("empty action".to_owned()),
         // Mango actions for features crab does not implement yet. They are
         // accepted by the parser and skipped here with a startup warning.
@@ -1182,6 +1201,29 @@ mod tests {
         );
         assert!(parse_action("set-column-width:").is_err());
         assert!(parse_action("set-column-width:wide").is_err());
+
+        assert_eq!(
+            parse_action("switch-preset-window-height"),
+            Ok(Action::PresetWindowHeight)
+        );
+        assert_eq!(
+            parse_action("preset_window_height"),
+            Ok(Action::PresetWindowHeight)
+        );
+        assert_eq!(
+            parse_action("set-window-height:0.5"),
+            Ok(Action::SetWindowHeight {
+                height: "0.5".to_owned()
+            })
+        );
+        assert_eq!(
+            parse_action("set_window_height:400px"),
+            Ok(Action::SetWindowHeight {
+                height: "400px".to_owned()
+            })
+        );
+        assert!(parse_action("set-window-height:").is_err());
+        assert!(parse_action("set-window-height:tall").is_err());
     }
 
     #[test]

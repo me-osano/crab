@@ -164,6 +164,13 @@ pub enum Action {
         /// Width expression, parsed by the compositor.
         width: String,
     },
+    /// Cycle the focused window's height within its column through the presets.
+    PresetWindowHeight,
+    /// Set the focused window's height (`0.5`, `proportion 0.5`, or `400px`).
+    SetWindowHeight {
+        /// Height expression, parsed by the compositor.
+        height: String,
+    },
     /// Reload the configuration.
     ///
     /// A failed reload leaves the previous configuration in effect and is
@@ -458,6 +465,10 @@ mod tests {
             Action::ExpandColumnToAvailableWidth,
             Action::SetColumnWidth {
                 width: "0.5".to_owned(),
+            },
+            Action::PresetWindowHeight,
+            Action::SetWindowHeight {
+                height: "400px".to_owned(),
             },
             Action::ReloadConfig,
             Action::EnterMode {

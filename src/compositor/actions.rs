@@ -9,7 +9,9 @@
 //! for a target that no longer exists, so the IPC server can report it instead
 //! of silently doing nothing.
 
-use crab::core::{ColumnWidth, Direction as CoreDirection, LayoutCommand, SpaceSet, WindowId};
+use crab::core::{
+    ColumnWidth, Direction as CoreDirection, LayoutCommand, SpaceSet, WindowHeight, WindowId,
+};
 use crab_ipc::{Action, Direction};
 
 use crate::compositor::reload;
@@ -83,6 +85,15 @@ pub(crate) fn apply(state: &mut Crab, action: Action) -> Result<(), String> {
                 return Err(format!("`{width}` is not a column width"));
             };
             state.layout_command(LayoutCommand::SetColumnWidth(width));
+        }
+        Action::PresetWindowHeight => {
+            state.layout_command(LayoutCommand::SwitchPresetWindowHeight);
+        }
+        Action::SetWindowHeight { height } => {
+            let Some(height) = WindowHeight::parse(&height) else {
+                return Err(format!("`{height}` is not a window height"));
+            };
+            state.layout_command(LayoutCommand::SetWindowHeight(height));
         }
         Action::ReloadConfig => match reload::reload(state) {
             reload::ReloadOutcome::NoPath => return Err("no config file to reload".to_owned()),

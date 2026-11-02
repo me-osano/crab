@@ -454,6 +454,12 @@ windows it is handed.
   `expand-column-to-available-width` / `set-column-width` resize the focused
   column. These are pure `ScrollState` operations, so they are unit- and
   property-tested without a compositor.
+- Window heights live beside the columns (`ScrollState::heights`, keyed by
+  window) so they follow a window when it changes column and disappear with it.
+  A normal column resolves fixed heights first and shares what is left between
+  proportional ones; `switch-preset-window-height` / `set-window-height` edit
+  the focused window's entry. `tabbed` columns ignore heights because every tab
+  shares the column.
 - Movement along the strip is animated window-by-window like any other relayout
   (each window's target rect is where its column lands), so a scroll is a
   `move` animation. Animating the *offset* itself — free scrolling, gestures,

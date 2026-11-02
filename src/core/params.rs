@@ -301,6 +301,135 @@ impl core::fmt::Display for ColumnWidth {
     }
 }
 
+/// How tall one window in a scroll column asks to be.
+///
+/// A column resolves every window's request against its cross-axis span and
+/// normalises them together, so two default windows still split the column in
+/// half. A fixed height keeps its pixel size; a proportion scales with the
+/// column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowHeight {
+    /// A fraction of the column's cross-axis span.
+    Proportion(f64),
+    /// A fixed span in logical pixels.
+    Fixed(f64),
+}
+
+impl WindowHeight {
+    /// The height a window gets when nothing has changed it: an equal share.
+    pub const DEFAULT: Self = Self::Proportion(1.0);
+
+    /// The span this asks for inside a column `span` logical pixels tall.
+    ///
+    /// Negative results are clamped away; the column normalises the requests
+    /// that remain, so asking for more than the column is not an error.
+    #[must_use]
+    pub fn resolve(self, span: f64) -> f64 {
+        match self {
+            Self::Proportion(fraction) => span * fraction.max(0.0),
+            Self::Fixed(px) => px.max(0.0),
+        }
+    }
+
+    /// Parses the same forms as [`ColumnWidth::parse`]: `0.5` (a bare number
+    /// is a proportion), `proportion 0.5`, and `fixed 400`/`400px`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Some(rest) = text.strip_suffix("px") {
+            return rest.trim().parse().ok().map(Self::Fixed);
+        }
+        if let Some(rest) = text.strip_prefix("proportion") {
+            return rest.trim().parse().ok().map(Self::Proportion);
+        }
+        if let Some(rest) = text.strip_prefix("fixed") {
+            return rest.trim().parse().ok().map(Self::Fixed);
+        }
+        text.parse().ok().map(Self::Proportion)
+    }
+}
+
+impl core::fmt::Display for WindowHeight {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Proportion(fraction) => write!(f, "proportion {fraction}"),
+            Self::Fixed(px) => write!(f, "fixed {px}"),
+        }
+    }
+}
+
+/// The heights `switch-preset-window-height` cycles a window through.
+///
+/// Like [`WidthPresets`], a fixed-size array keeps a space's parameters `Copy`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeightPresets {
+    entries: [WindowHeight; HeightPresets::CAPACITY],
+    len: usize,
+}
+
+impl HeightPresets {
+    /// How many presets a space can hold.
+    pub const CAPACITY: usize = 8;
+
+    /// An empty list.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: [WindowHeight::DEFAULT; Self::CAPACITY],
+            len: 0,
+        }
+    }
+
+    /// Appends `height`, ignoring anything past [`HeightPresets::CAPACITY`].
+    pub fn push(&mut self, height: WindowHeight) {
+        if self.len < Self::CAPACITY {
+            self.entries[self.len] = height;
+            self.len += 1;
+        }
+    }
+
+    /// The presets, in order.
+    pub fn iter(&self) -> impl Iterator<Item = WindowHeight> + '_ {
+        self.entries[..self.len].iter().copied()
+    }
+
+    /// How many presets there are.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the list is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The preset after `current`, wrapping round; `None` when there are none.
+    #[must_use]
+    pub fn next_after(&self, current: WindowHeight) -> Option<WindowHeight> {
+        if self.is_empty() {
+            return None;
+        }
+        let index = self
+            .iter()
+            .position(|height| height == current)
+            .map_or(0, |index| (index + 1) % self.len);
+        self.iter().nth(index)
+    }
+}
+
+impl Default for HeightPresets {
+    /// niri's thirds: one third, one half, two thirds of the column.
+    fn default() -> Self {
+        let mut presets = Self::new();
+        presets.push(WindowHeight::Proportion(1.0 / 3.0));
+        presets.push(WindowHeight::Proportion(0.5));
+        presets.push(WindowHeight::Proportion(2.0 / 3.0));
+        presets
+    }
+}
+
 /// How the windows inside one scroll column share it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ColumnDisplay {
@@ -499,6 +628,9 @@ pub struct ScrollAnchor {
 pub struct ScrollState {
     /// The columns of the strip, first to last.
     pub columns: Vec<Column>,
+    /// Per-window cross-axis heights, keyed by window. Windows without an entry
+    /// use [`WindowHeight::DEFAULT`], and entries are pruned as windows leave.
+    pub heights: Vec<(WindowId, WindowHeight)>,
     /// View offset along the main axis, in logical pixels.
     pub offset: f64,
     /// Where the focus was at the last arrange.
@@ -523,6 +655,8 @@ pub struct LayoutParams {
     pub column_width: ColumnWidth,
     /// The widths `switch-preset-width` cycles through.
     pub preset_widths: WidthPresets,
+    /// The heights `switch-preset-window-height` cycles through.
+    pub preset_window_heights: HeightPresets,
     /// Where the view puts the focused column.
     pub center: ScrollCenter,
     /// Whether a column wider than the view keeps its width and spills past
@@ -551,6 +685,7 @@ impl Default for LayoutParams {
             border_width: 2.0,
             column_width: ColumnWidth::DEFAULT,
             preset_widths: WidthPresets::default(),
+            preset_window_heights: HeightPresets::default(),
             center: ScrollCenter::Never,
             overspread: true,
             column_display: ColumnDisplay::Normal,
@@ -594,11 +729,15 @@ pub enum LayoutCommand {
     ExpandColumnToAvailableWidth,
     /// Set the focused column's width explicitly.
     SetColumnWidth(ColumnWidth),
+    /// Cycle the focused window's height through the presets (scrolling layouts).
+    SwitchPresetWindowHeight,
+    /// Set the focused window's height explicitly.
+    SetWindowHeight(WindowHeight),
 }
 
 impl LayoutCommand {
     /// Every command that takes no argument, for binds and IPC tables.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::SwitchPresetWidth,
         Self::CenterColumn,
         Self::MoveColumnLeft,
@@ -608,6 +747,7 @@ impl LayoutCommand {
         Self::ConsumeWindowIntoColumn,
         Self::ExpelWindowFromColumn,
         Self::ExpandColumnToAvailableWidth,
+        Self::SwitchPresetWindowHeight,
     ];
 
     /// A stable, kebab-case identifier (used by config and IPC).
@@ -624,13 +764,16 @@ impl LayoutCommand {
             Self::ExpelWindowFromColumn => "expel-window-from-column",
             Self::ExpandColumnToAvailableWidth => "expand-column-to-available-width",
             Self::SetColumnWidth(_) => "set-column-width",
+            Self::SwitchPresetWindowHeight => "switch-preset-window-height",
+            Self::SetWindowHeight(_) => "set-window-height",
         }
     }
 
     /// Parses the identifier produced by [`LayoutCommand::name`].
     ///
     /// Parameterised commands cannot be built from a bare name, so
-    /// [`LayoutCommand::SetColumnWidth`] is not reachable here.
+    /// [`LayoutCommand::SetColumnWidth`] and
+    /// [`LayoutCommand::SetWindowHeight`] are not reachable here.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|cmd| cmd.name() == name)
@@ -813,6 +956,53 @@ mod tests {
     }
 
     #[test]
+    fn window_heights_parse_and_resolve() {
+        assert_eq!(
+            WindowHeight::parse("0.5"),
+            Some(WindowHeight::Proportion(0.5))
+        );
+        assert_eq!(
+            WindowHeight::parse("proportion 0.25"),
+            Some(WindowHeight::Proportion(0.25))
+        );
+        assert_eq!(
+            WindowHeight::parse("fixed 400"),
+            Some(WindowHeight::Fixed(400.0))
+        );
+        assert_eq!(
+            WindowHeight::parse("400px"),
+            Some(WindowHeight::Fixed(400.0))
+        );
+        assert_eq!(WindowHeight::parse("tall"), None);
+
+        assert_eq!(WindowHeight::Proportion(0.5).resolve(800.0), 400.0);
+        assert_eq!(WindowHeight::Fixed(300.0).resolve(800.0), 300.0);
+        assert_eq!(WindowHeight::Fixed(-5.0).resolve(800.0), 0.0);
+        assert_eq!(WindowHeight::Fixed(300.0).to_string(), "fixed 300");
+    }
+
+    #[test]
+    fn height_presets_cycle_and_wrap() {
+        let presets = HeightPresets::default();
+        assert_eq!(presets.len(), 3);
+        let thirds: Vec<_> = presets.iter().collect();
+        assert_eq!(presets.next_after(thirds[0]), Some(thirds[1]));
+        assert_eq!(presets.next_after(thirds[2]), Some(thirds[0]), "wraps");
+        assert_eq!(
+            presets.next_after(WindowHeight::Fixed(123.0)),
+            Some(thirds[0]),
+            "an unknown height starts over"
+        );
+        assert_eq!(HeightPresets::new().next_after(WindowHeight::DEFAULT), None);
+
+        let mut full = HeightPresets::new();
+        for index in 0..HeightPresets::CAPACITY + 4 {
+            full.push(WindowHeight::Fixed(index as f64));
+        }
+        assert_eq!(full.len(), HeightPresets::CAPACITY);
+    }
+
+    #[test]
     fn scroll_option_names_round_trip() {
         for display in ColumnDisplay::ALL {
             assert_eq!(ColumnDisplay::from_name(display.name()), Some(display));
@@ -831,6 +1021,10 @@ mod tests {
         assert_eq!(
             LayoutCommand::from_name("center-column"),
             Some(LayoutCommand::CenterColumn)
+        );
+        assert_eq!(
+            LayoutCommand::from_name("switch-preset-window-height"),
+            Some(LayoutCommand::SwitchPresetWindowHeight)
         );
         assert_eq!(
             LayoutCommand::from_name("inc-master-ratio"),

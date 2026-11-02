@@ -62,6 +62,8 @@ Actions use kebab-case and match [`crab_ipc::Action`](../crab-ipc/src/protocol.r
 - `{"expel-window-from-column":{}}`
 - `{"expand-column-to-available-width":{}}`
 - `{"set-column-width":{"width":"0.5"}}` (also `proportion 0.5`, `800px`)
+- `{"preset-window-height":{}}`
+- `{"set-window-height":{"height":"400px"}}` (also `0.5`, `proportion 0.5`)
 - `{"reload-config":{}}`
 - `{"enter-mode":{"name":"resize"}}`
 - `{"leave-mode":{}}`

@@ -189,6 +189,9 @@ layer_name = ["rofi", "alacritty"]
 "1" = "set_column_width:0.5"
 "2" = "set_column_width:0.6667"
 "3" = "set_column_width:800px"
+# Heights are per window inside a column.
+"t" = "switch_preset_window_height"
+"shift+t" = "set_window_height:0.5"
 "Escape" = "leave_mode"
 
 

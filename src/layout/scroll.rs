@@ -22,8 +22,9 @@ use super::placement::{
     Layout, LayoutInput, LayoutWindow, Placement, apply_hints, directional_neighbor,
 };
 use crate::core::{
-    Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutKind, LayoutParams, Rect,
-    ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets, WindowId,
+    Column, ColumnDisplay, ColumnWidth, Direction, HeightPresets, LayoutCommand, LayoutKind,
+    LayoutParams, Rect, ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets,
+    WindowHeight, WindowId,
 };
 
 /// The `scroll` layout: an unbounded strip of columns along one axis.
@@ -114,6 +115,16 @@ impl Layout for Scroll {
                     set_column_width(scroll, window, width);
                 }
             }
+            LayoutCommand::SwitchPresetWindowHeight => {
+                if let Some(window) = focused {
+                    switch_preset_window_height(scroll, window, &params.preset_window_heights);
+                }
+            }
+            LayoutCommand::SetWindowHeight(height) => {
+                if let Some(window) = focused {
+                    set_window_height(scroll, window, height);
+                }
+            }
         }
     }
 }
@@ -177,14 +188,20 @@ fn arrange_scroll(axis: ScrollAxis, input: &mut LayoutInput<'_>) -> Vec<Placemen
                     .unwrap_or(0),
             ),
         };
+        // In `tabbed` all of a column's windows share its rect, so a tab
+        // switch is a visibility change and nothing moves.
+        let slots = match column.display {
+            ColumnDisplay::Normal => {
+                column_slots(axis, rect, &column.windows, &scroll.heights, gaps)
+            }
+            ColumnDisplay::Tabbed => Vec::new(),
+        };
         for (stack, id) in column.windows.iter().enumerate() {
             let Some(index) = windows.iter().position(|window| window.id == *id) else {
                 continue;
             };
-            // In `tabbed` all of a column's windows share its rect, so a tab
-            // switch is a visibility change and nothing moves.
             let slot = match column.display {
-                ColumnDisplay::Normal => window_slot(axis, rect, stack, column.windows.len(), gaps),
+                ColumnDisplay::Normal => slots[stack],
                 ColumnDisplay::Tabbed => rect,
             };
             placements[index] = Some(Placement {
@@ -257,6 +274,12 @@ fn reconcile(
             .retain(|id| windows.iter().any(|w| w.id == *id));
     }
     scroll.columns.retain(|column| !column.windows.is_empty());
+    // Heights follow windows, not columns: a window that leaves the strip (or
+    // moves between columns) keeps the height the user gave it, and a closed
+    // window's entry goes away.
+    scroll
+        .heights
+        .retain(|(id, _)| windows.iter().any(|window| window.id == *id));
 
     let insert_at = focused
         .and_then(|id| column_of(scroll, id))
@@ -302,19 +325,87 @@ fn column_span(
 }
 
 /// The rectangle window `stack` of `count` occupies inside a column.
-fn window_slot(axis: ScrollAxis, column: Rect, stack: usize, count: usize, gaps: f64) -> Rect {
-    if count <= 1 {
-        return column;
+/// The cross-axis slot of every window in a normal column.
+///
+/// Fixed heights claim their pixels first; proportions then divide what is
+/// left, so two default windows still split the column and a fixed-height
+/// window keeps its size beside them. If the fixed heights alone exceed the
+/// column they are scaled down together, and a column of all-zero requests
+/// falls back to equal shares.
+fn column_slots(
+    axis: ScrollAxis,
+    column: Rect,
+    windows: &[WindowId],
+    heights: &[(WindowId, WindowHeight)],
+    gaps: f64,
+) -> Vec<Rect> {
+    let count = windows.len();
+    if count == 0 {
+        return Vec::new();
     }
-    let count = count as f64;
-    let index = stack as f64;
-    let span = (axis.cross_span(column) - gaps * (count - 1.0)) / count;
-    axis.rect(
-        axis.main_start(column),
-        axis.cross_start(column) + index * (span.max(0.0) + gaps),
-        axis.main_span(column),
-        span.max(0.0),
-    )
+    let available = (axis.cross_span(column) - gaps * (count.saturating_sub(1) as f64)).max(0.0);
+    let requests: Vec<WindowHeight> = windows
+        .iter()
+        .map(|id| window_height(heights, *id))
+        .collect();
+
+    let fixed_total: f64 = requests
+        .iter()
+        .map(|height| match height {
+            WindowHeight::Fixed(px) => px.max(0.0),
+            WindowHeight::Proportion(_) => 0.0,
+        })
+        .sum();
+    let fixed_scale = if fixed_total > available && fixed_total > 0.0 {
+        available / fixed_total
+    } else {
+        1.0
+    };
+    let remaining = (available - fixed_total * fixed_scale).max(0.0);
+    let proportion_total: f64 = requests
+        .iter()
+        .map(|height| match height {
+            WindowHeight::Proportion(fraction) => fraction.max(0.0),
+            WindowHeight::Fixed(_) => 0.0,
+        })
+        .sum();
+    let proportional = proportion_total > 0.0;
+    // A column whose every request is zero still has to show its windows.
+    let equal = fixed_total <= 0.0 && !proportional;
+
+    let mut cursor = axis.cross_start(column);
+    requests
+        .into_iter()
+        .map(|height| {
+            let span = if equal {
+                available / count as f64
+            } else {
+                match height {
+                    WindowHeight::Fixed(px) => px.max(0.0) * fixed_scale,
+                    WindowHeight::Proportion(fraction) if proportional => {
+                        remaining * fraction.max(0.0) / proportion_total
+                    }
+                    WindowHeight::Proportion(_) => 0.0,
+                }
+            };
+            let slot = axis.rect(
+                axis.main_start(column),
+                cursor,
+                axis.main_span(column),
+                span,
+            );
+            cursor += span + gaps;
+            slot
+        })
+        .collect()
+}
+
+/// The height configured for `window`, or the default share.
+fn window_height(heights: &[(WindowId, WindowHeight)], window: WindowId) -> WindowHeight {
+    heights
+        .iter()
+        .find(|(id, _)| *id == window)
+        .map_or(WindowHeight::DEFAULT, |(_, height)| *height)
 }
 
 /// Decides where the view sits, and records where the focused column ended up.
@@ -507,6 +598,38 @@ fn switch_preset_width(scroll: &mut ScrollState, window: WindowId, presets: &Wid
     };
     scroll.columns[index].width = next;
     true
+}
+
+/// Sets the height of `window` within its column.
+///
+/// Heights are stored per window rather than per column, so they survive a
+/// window moving between columns. A window that is not in the strip yet is
+/// ignored: the compositor only targets the focused window.
+fn set_window_height(scroll: &mut ScrollState, window: WindowId, height: WindowHeight) -> bool {
+    if column_of(scroll, window).is_none() {
+        return false;
+    }
+    match scroll.heights.iter_mut().find(|(id, _)| *id == window) {
+        Some((_, current)) => *current = height,
+        None => scroll.heights.push((window, height)),
+    }
+    true
+}
+
+/// Cycles `window` through the configured height presets.
+fn switch_preset_window_height(
+    scroll: &mut ScrollState,
+    window: WindowId,
+    presets: &HeightPresets,
+) -> bool {
+    if column_of(scroll, window).is_none() {
+        return false;
+    }
+    let current = window_height(&scroll.heights, window);
+    let Some(next) = presets.next_after(current) else {
+        return false;
+    };
+    set_window_height(scroll, window, next)
 }
 
 /// Directional focus within the strip.
@@ -1173,6 +1296,80 @@ mod tests {
     }
 
     #[test]
+    fn window_heights_share_a_column_and_survive_moves() {
+        let windows = list(2);
+        let (mut scroll, mut params) = arranged(2, 1);
+        let layout = Scroll::new(HORIZONTAL);
+
+        // Merge the focused window into the column on its left.
+        layout.command(
+            LayoutCommand::ConsumeWindowIntoColumn,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns.len(), 1);
+        let placements = arrange(HORIZONTAL, &windows, Some(1), &params, &mut scroll);
+        assert_eq!(rect(&placements, 0).h, 400.0);
+        assert_eq!(rect(&placements, 1).h, 400.0);
+
+        // A fixed height claims its pixels; the other window takes the rest.
+        layout.command(
+            LayoutCommand::SetWindowHeight(WindowHeight::Fixed(200.0)),
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        let placements = arrange(HORIZONTAL, &windows, Some(1), &params, &mut scroll);
+        assert_eq!(rect(&placements, 0).h, 600.0);
+        assert_eq!(rect(&placements, 1).h, 200.0);
+        assert_eq!(rect(&placements, 1).y, 600.0, "stacked below the first");
+
+        // Cycling walks the presets: 1/3, 1/2, 2/3…
+        layout.command(
+            LayoutCommand::SwitchPresetWindowHeight,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            window_height(&scroll.heights, WindowId::new(2)),
+            WindowHeight::Proportion(1.0 / 3.0)
+        );
+        layout.command(
+            LayoutCommand::SwitchPresetWindowHeight,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            window_height(&scroll.heights, WindowId::new(2)),
+            WindowHeight::Proportion(0.5)
+        );
+
+        // The height belongs to the window, so expelling it keeps it.
+        layout.command(
+            LayoutCommand::ExpelWindowFromColumn,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns.len(), 2);
+        assert_eq!(
+            window_height(&scroll.heights, WindowId::new(2)),
+            WindowHeight::Proportion(0.5)
+        );
+
+        // Closing the window prunes its entry on the next arrange.
+        let placements = arrange(HORIZONTAL, &list(1), Some(0), &params, &mut scroll);
+        assert_eq!(placements.len(), 1);
+        assert_eq!(
+            window_height(&scroll.heights, WindowId::new(2)),
+            WindowHeight::DEFAULT
+        );
+    }
+
+    #[test]
     fn commands_without_a_focused_window_do_nothing() {
         let (mut scroll, mut params) = arranged(3, 0);
         let before = scroll.clone();
@@ -1187,10 +1384,13 @@ mod tests {
             LayoutCommand::ExpelWindowFromColumn,
             LayoutCommand::ExpandColumnToAvailableWidth,
             LayoutCommand::SetColumnWidth(ColumnWidth::Fixed(100.0)),
+            LayoutCommand::SwitchPresetWindowHeight,
+            LayoutCommand::SetWindowHeight(WindowHeight::Fixed(100.0)),
         ] {
             layout.command(command, None, &mut params, &mut scroll);
         }
         assert_eq!(scroll.columns, before.columns);
+        assert_eq!(scroll.heights, before.heights);
         assert_eq!(scroll.offset, before.offset);
     }
 }

@@ -8,7 +8,7 @@
 
 use crab::core::{
     Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutKind, LayoutParams, Rect,
-    ScrollAxis, ScrollCenter, ScrollState, WindowId,
+    ScrollAxis, ScrollCenter, ScrollState, WindowHeight, WindowId,
 };
 use crab::layout::{
     Layout as _, LayoutInput, LayoutWindow, Placement, Scroll, apply_command, arrange,
@@ -388,7 +388,7 @@ proptest! {
     #[test]
     fn scroll_column_actions_preserve_the_window_set(
         count in 1usize..16,
-        ops in prop::collection::vec((0u8..8, 0usize..16), 0..24),
+        ops in prop::collection::vec((0u8..10, 0usize..16), 0..24),
     ) {
         let windows = sample_windows(count);
         let mut params = scroll_params(8.0, ColumnWidth::DEFAULT, true, ScrollCenter::Never);
@@ -411,7 +411,9 @@ proptest! {
                 4 => LayoutCommand::ConsumeWindowIntoColumn,
                 5 => LayoutCommand::ExpelWindowFromColumn,
                 6 => LayoutCommand::ExpandColumnToAvailableWidth,
-                _ => LayoutCommand::SetColumnWidth(ColumnWidth::Proportion(0.5)),
+                7 => LayoutCommand::SetColumnWidth(ColumnWidth::Proportion(0.5)),
+                8 => LayoutCommand::SwitchPresetWindowHeight,
+                _ => LayoutCommand::SetWindowHeight(WindowHeight::Fixed(200.0)),
             };
             apply_command(
                 LayoutKind::Scroll,

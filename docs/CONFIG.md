@@ -211,6 +211,7 @@ Matched by namespace when a layer-shell surface maps. **First matching rule wins
 "comma" = "consume_window_into_column"
 "period" = "expel_window_from_column"
 "f" = "expand_column_to_available_width"
+"t" = "switch_preset_window_height"
 "Escape" = "leave_mode"     # back to default
 ```
 
@@ -282,6 +283,8 @@ Canonical actions match [`crab_ipc::Action`](../crab-ipc/src/protocol.rs). Confi
 | `expel-window-from-column` | `expel_window_from_column`, `expel-window-from-column` | - | Split the focused window into a new column on its right |
 | `expand-column-to-available-width` | `expand_column_to_available_width`, `expand-column-to-available-width` | - | Widen the focused column to the view |
 | `set-column-width` | `set_column_width:<width>`, `set-column-width:<width>` | `0.5`, `proportion 0.5`, `800px` | Set the focused column's width |
+| `preset-window-height` | `switch_preset_window_height`, `preset_window_height`, `preset-window-height` | - | Cycle the focused window's height within its column |
+| `set-window-height` | `set_window_height:<height>`, `set-window-height:<height>` | `0.5`, `proportion 0.5`, `400px` | Set the focused window's height within its column |
 | `reload-config` | `reload_config`, `reload-config` | - | Reload config file (hot reload) |
 | `enter-mode` | `enter_mode:<name>`, `enter-mode:<name>`, `mode:<name>` | mode name | Enter a key mode |
 | `leave-mode` | `leave_mode`, `leave-mode`, `exit_mode` | - | Reset to the default mode |
