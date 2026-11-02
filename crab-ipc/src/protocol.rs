@@ -143,6 +143,27 @@ pub enum Action {
     PresetWidth,
     /// Scroll the focused scroll column to the middle of the view.
     CenterColumn,
+    /// Move the focused scroll column one place in `direction`.
+    MoveColumn {
+        /// Direction along the strip.
+        direction: Direction,
+    },
+    /// Move the focused window into the neighbouring column in `direction`.
+    MoveWindowToColumn {
+        /// Direction toward the target column.
+        direction: Direction,
+    },
+    /// Consume the focused window into the column to its left.
+    ConsumeWindowIntoColumn,
+    /// Expel the focused window into a new column to its right.
+    ExpelWindowFromColumn,
+    /// Widen the focused scroll column to fill the view.
+    ExpandColumnToAvailableWidth,
+    /// Set the focused scroll column's width (`0.5`, `proportion 0.5`, or `800px`).
+    SetColumnWidth {
+        /// Width expression, parsed by the compositor.
+        width: String,
+    },
     /// Reload the configuration.
     ///
     /// A failed reload leaves the previous configuration in effect and is
@@ -426,6 +447,18 @@ mod tests {
             Action::ToggleMaximized,
             Action::PresetWidth,
             Action::CenterColumn,
+            Action::MoveColumn {
+                direction: Direction::Left,
+            },
+            Action::MoveWindowToColumn {
+                direction: Direction::Right,
+            },
+            Action::ConsumeWindowIntoColumn,
+            Action::ExpelWindowFromColumn,
+            Action::ExpandColumnToAvailableWidth,
+            Action::SetColumnWidth {
+                width: "0.5".to_owned(),
+            },
             Action::ReloadConfig,
             Action::EnterMode {
                 name: "resize".to_owned(),

@@ -130,10 +130,13 @@ pub trait Layout: core::fmt::Debug + Send + Sync {
     ///
     /// Commands that need persistent layout state — the scroller's column
     /// widths and centring — are handled by the layout that owns it, which is
-    /// where the scroller keeps its columns (`COMPOSITOR.md` §7.1).
+    /// where the scroller keeps its columns (`COMPOSITOR.md` §7.1). `focused`
+    /// is the window the user is on, so column actions have a target even when
+    /// the stored anchor is stale.
     fn command(
         &self,
         _command: LayoutCommand,
+        _focused: Option<WindowId>,
         _params: &mut LayoutParams,
         _scroll: &mut ScrollState,
     ) {

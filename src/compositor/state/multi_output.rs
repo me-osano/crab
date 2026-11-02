@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crab::core::SpaceSet;
+use crab::core::{ColumnWidth, LayoutCommand, SpaceSet};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as ServerResizeEdge;
 use smithay::reexports::wayland_server::Display;
@@ -772,6 +772,59 @@ fn a_resize_drag_pins_the_opposite_edges_and_keeps_its_output() {
         Some(left)
     );
     assert!(h.state.end_interaction(1).is_some());
+}
+
+#[test]
+fn column_actions_reorder_and_resize_the_scroll_strip() {
+    let mut config = Config {
+        layout: "scroll".to_owned(),
+        gaps: 0,
+        ..Config::default()
+    };
+    config.animations.enabled = false;
+    let mut h = Harness::new(config);
+    let [left, _right] = h.outputs;
+
+    h.focus(left);
+    let (first, _first_client) = h.create_toplevel();
+    let (second, _second_client) = h.create_toplevel();
+    let (third, _third_client) = h.create_toplevel();
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+    h.map_toplevel(third);
+
+    // Three half-view columns; the focused third one is scrolled to the right
+    // edge, so the first column starts one view to the left.
+    assert_eq!(h.window_rect(first), Rect::new(-960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(h.window_rect(second), Rect::new(0.0, 0.0, 960.0, 1080.0));
+    assert_eq!(h.window_rect(third), Rect::new(960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(h.state.focused_id(), Some(third));
+
+    // Moving the focused column left swaps it with the middle column.
+    h.state.layout_command(LayoutCommand::MoveColumnLeft);
+    assert_eq!(h.window_rect(first), Rect::new(0.0, 0.0, 960.0, 1080.0));
+    assert_eq!(h.window_rect(third), Rect::new(960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(
+        h.window_rect(second),
+        Rect::new(1920.0, 0.0, 960.0, 1080.0),
+        "the middle column moved to the end"
+    );
+
+    // The width preset widens only the focused column (half → two thirds).
+    // The view scrolls left so the wider column still fits entirely on screen.
+    h.state.layout_command(LayoutCommand::SwitchPresetWidth);
+    assert_eq!(h.window_rect(third), Rect::new(640.0, 0.0, 1280.0, 1080.0));
+    assert_eq!(
+        h.window_rect(first).w,
+        960.0,
+        "the neighbour kept its width"
+    );
+
+    // An explicit width replaces the preset without touching the neighbour.
+    h.state
+        .layout_command(LayoutCommand::SetColumnWidth(ColumnWidth::Fixed(400.0)));
+    assert_eq!(h.window_rect(third), Rect::new(640.0, 0.0, 400.0, 1080.0));
+    assert_eq!(h.window_rect(first).w, 960.0);
 }
 
 #[test]

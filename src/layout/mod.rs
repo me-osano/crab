@@ -28,6 +28,7 @@ pub use scroll::Scroll;
 
 use crate::core::{
     Direction, LayoutCommand, LayoutKind, LayoutParams, Point, Rect, ScrollAxis, ScrollState, Size,
+    WindowId,
 };
 
 /// Places nothing automatically; windows keep their own floating geometry.
@@ -86,10 +87,11 @@ pub fn neighbor(
 pub fn apply_command(
     kind: LayoutKind,
     command: LayoutCommand,
+    focused: Option<WindowId>,
     params: &mut LayoutParams,
     scroll: &mut ScrollState,
 ) {
-    layout_for(kind).command(command, params, scroll);
+    layout_for(kind).command(command, focused, params, scroll);
 }
 
 /// A cascading starting position for a new floating window.
@@ -186,6 +188,7 @@ mod tests {
         apply_command(
             LayoutKind::Scroll,
             LayoutCommand::CenterColumn,
+            None,
             &mut params,
             &mut scroll,
         );
@@ -199,6 +202,7 @@ mod tests {
         apply_command(
             LayoutKind::Fair,
             LayoutCommand::CenterColumn,
+            None,
             &mut params,
             &mut scroll,
         );

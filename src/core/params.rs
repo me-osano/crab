@@ -572,17 +572,43 @@ pub enum Direction {
 }
 
 /// A layout-specific command issued by a bind or IPC (`COMPOSITOR.md` §7.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LayoutCommand {
     /// Cycle the focused column's width through the presets (scrolling layouts).
     SwitchPresetWidth,
     /// Scroll the focused column to the middle of the view (scrolling layouts).
     CenterColumn,
+    /// Move the focused column one place toward the strip's start.
+    MoveColumnLeft,
+    /// Move the focused column one place toward the strip's end.
+    MoveColumnRight,
+    /// Move the focused window into the neighbouring column on the left.
+    MoveWindowToColumnLeft,
+    /// Move the focused window into the neighbouring column on the right.
+    MoveWindowToColumnRight,
+    /// Consume the focused window into the column to its left.
+    ConsumeWindowIntoColumn,
+    /// Expel the focused window into a new column to its right.
+    ExpelWindowFromColumn,
+    /// Widen the focused column to fill the view.
+    ExpandColumnToAvailableWidth,
+    /// Set the focused column's width explicitly.
+    SetColumnWidth(ColumnWidth),
 }
 
 impl LayoutCommand {
-    /// Every command, for binds and IPC tables.
-    pub const ALL: [Self; 2] = [Self::SwitchPresetWidth, Self::CenterColumn];
+    /// Every command that takes no argument, for binds and IPC tables.
+    pub const ALL: [Self; 9] = [
+        Self::SwitchPresetWidth,
+        Self::CenterColumn,
+        Self::MoveColumnLeft,
+        Self::MoveColumnRight,
+        Self::MoveWindowToColumnLeft,
+        Self::MoveWindowToColumnRight,
+        Self::ConsumeWindowIntoColumn,
+        Self::ExpelWindowFromColumn,
+        Self::ExpandColumnToAvailableWidth,
+    ];
 
     /// A stable, kebab-case identifier (used by config and IPC).
     #[must_use]
@@ -590,10 +616,21 @@ impl LayoutCommand {
         match self {
             Self::SwitchPresetWidth => "switch-preset-width",
             Self::CenterColumn => "center-column",
+            Self::MoveColumnLeft => "move-column-left",
+            Self::MoveColumnRight => "move-column-right",
+            Self::MoveWindowToColumnLeft => "move-window-to-column-left",
+            Self::MoveWindowToColumnRight => "move-window-to-column-right",
+            Self::ConsumeWindowIntoColumn => "consume-window-into-column",
+            Self::ExpelWindowFromColumn => "expel-window-from-column",
+            Self::ExpandColumnToAvailableWidth => "expand-column-to-available-width",
+            Self::SetColumnWidth(_) => "set-column-width",
         }
     }
 
     /// Parses the identifier produced by [`LayoutCommand::name`].
+    ///
+    /// Parameterised commands cannot be built from a bare name, so
+    /// [`LayoutCommand::SetColumnWidth`] is not reachable here.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|cmd| cmd.name() == name)

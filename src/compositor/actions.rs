@@ -9,7 +9,7 @@
 //! for a target that no longer exists, so the IPC server can report it instead
 //! of silently doing nothing.
 
-use crab::core::{Direction as CoreDirection, LayoutCommand, SpaceSet, WindowId};
+use crab::core::{ColumnWidth, Direction as CoreDirection, LayoutCommand, SpaceSet, WindowId};
 use crab_ipc::{Action, Direction};
 
 use crate::compositor::reload;
@@ -63,6 +63,27 @@ pub(crate) fn apply(state: &mut Crab, action: Action) -> Result<(), String> {
         Action::ToggleMaximized => state.toggle_maximized(),
         Action::PresetWidth => state.layout_command(LayoutCommand::SwitchPresetWidth),
         Action::CenterColumn => state.layout_command(LayoutCommand::CenterColumn),
+        Action::MoveColumn { direction } => {
+            state.layout_command(column_command(direction, true)?);
+        }
+        Action::MoveWindowToColumn { direction } => {
+            state.layout_command(column_command(direction, false)?);
+        }
+        Action::ConsumeWindowIntoColumn => {
+            state.layout_command(LayoutCommand::ConsumeWindowIntoColumn);
+        }
+        Action::ExpelWindowFromColumn => {
+            state.layout_command(LayoutCommand::ExpelWindowFromColumn);
+        }
+        Action::ExpandColumnToAvailableWidth => {
+            state.layout_command(LayoutCommand::ExpandColumnToAvailableWidth);
+        }
+        Action::SetColumnWidth { width } => {
+            let Some(width) = ColumnWidth::parse(&width) else {
+                return Err(format!("`{width}` is not a column width"));
+            };
+            state.layout_command(LayoutCommand::SetColumnWidth(width));
+        }
         Action::ReloadConfig => match reload::reload(state) {
             reload::ReloadOutcome::NoPath => return Err("no config file to reload".to_owned()),
             reload::ReloadOutcome::Unchanged => return Ok(()),
@@ -105,6 +126,26 @@ fn core_direction(direction: Direction) -> CoreDirection {
         Direction::Up => CoreDirection::Up,
         Direction::Down => CoreDirection::Down,
     }
+}
+
+/// Maps a wire direction onto a column action.
+///
+/// The exposed scroller runs horizontally, so only left/right name a place in
+/// the strip; up/down are rejected rather than silently doing nothing.
+fn column_command(direction: Direction, column: bool) -> Result<LayoutCommand, String> {
+    let forward = match direction {
+        Direction::Left => false,
+        Direction::Right => true,
+        Direction::Up | Direction::Down => {
+            return Err("columns run horizontally: use left or right".to_owned());
+        }
+    };
+    Ok(match (column, forward) {
+        (true, false) => LayoutCommand::MoveColumnLeft,
+        (true, true) => LayoutCommand::MoveColumnRight,
+        (false, false) => LayoutCommand::MoveWindowToColumnLeft,
+        (false, true) => LayoutCommand::MoveWindowToColumnRight,
+    })
 }
 
 #[cfg(test)]

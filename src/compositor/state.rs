@@ -3308,10 +3308,12 @@ impl Crab {
     /// parameters, so a family that owns its state — the scroller and its
     /// columns — gets to handle it (`crab::layout::apply_command`).
     pub(crate) fn layout_command(&mut self, command: LayoutCommand) {
+        let focused = self.focused_id();
         if let Some(space) = self.output_mut().model.current_space_state_mut() {
             crab::layout::apply_command(
                 space.layout,
                 command,
+                focused,
                 &mut space.params,
                 &mut space.scroll,
             );

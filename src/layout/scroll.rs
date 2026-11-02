@@ -22,8 +22,8 @@ use super::placement::{
     Layout, LayoutInput, LayoutWindow, Placement, apply_hints, directional_neighbor,
 };
 use crate::core::{
-    Column, ColumnDisplay, Direction, LayoutCommand, LayoutKind, LayoutParams, Rect, ScrollAnchor,
-    ScrollAxis, ScrollCenter, ScrollState, WindowId,
+    Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutKind, LayoutParams, Rect,
+    ScrollAnchor, ScrollAxis, ScrollCenter, ScrollState, WidthPresets, WindowId,
 };
 
 /// The `scroll` layout: an unbounded strip of columns along one axis.
@@ -56,23 +56,64 @@ impl Layout for Scroll {
         neighbor_scroll(self.axis, input, from, dir)
     }
 
-    fn command(&self, command: LayoutCommand, params: &mut LayoutParams, scroll: &mut ScrollState) {
+    fn command(
+        &self,
+        command: LayoutCommand,
+        focused: Option<WindowId>,
+        params: &mut LayoutParams,
+        scroll: &mut ScrollState,
+    ) {
         match command {
-            // The column widths are the scroller's own state, so both commands
-            // that touch them are handled here rather than in `params`.
+            // The column widths are the scroller's own state, so every command
+            // that touches them is handled here rather than in `params`.
             LayoutCommand::SwitchPresetWidth => {
-                let Some(window) = scroll.anchor.window else {
-                    return;
-                };
-                let Some(index) = column_of(scroll, window) else {
-                    return;
-                };
-                let current = scroll.columns[index].width;
-                if let Some(next) = params.preset_widths.next_after(current) {
-                    scroll.columns[index].width = next;
+                if let Some(window) = focused {
+                    switch_preset_width(scroll, window, &params.preset_widths);
                 }
             }
             LayoutCommand::CenterColumn => scroll.center_request = true,
+            LayoutCommand::MoveColumnLeft => {
+                if let Some(window) = focused {
+                    move_column(scroll, window, false);
+                }
+            }
+            LayoutCommand::MoveColumnRight => {
+                if let Some(window) = focused {
+                    move_column(scroll, window, true);
+                }
+            }
+            LayoutCommand::MoveWindowToColumnLeft => {
+                if let Some(window) = focused {
+                    move_window_to_column(scroll, window, false);
+                }
+            }
+            LayoutCommand::MoveWindowToColumnRight => {
+                if let Some(window) = focused {
+                    move_window_to_column(scroll, window, true);
+                }
+            }
+            LayoutCommand::ConsumeWindowIntoColumn => {
+                if let Some(window) = focused {
+                    // Consuming is a leftward window move; an emptied source
+                    // column is dropped, so a single-window column merges whole.
+                    move_window_to_column(scroll, window, false);
+                }
+            }
+            LayoutCommand::ExpelWindowFromColumn => {
+                if let Some(window) = focused {
+                    expel_window_from_column(scroll, window);
+                }
+            }
+            LayoutCommand::ExpandColumnToAvailableWidth => {
+                if let Some(window) = focused {
+                    set_column_width(scroll, window, ColumnWidth::Proportion(1.0));
+                }
+            }
+            LayoutCommand::SetColumnWidth(width) => {
+                if let Some(window) = focused {
+                    set_column_width(scroll, window, width);
+                }
+            }
         }
     }
 }
@@ -365,6 +406,107 @@ fn column_of(scroll: &ScrollState, window: WindowId) -> Option<usize> {
         .columns
         .iter()
         .position(|column| column.windows.contains(&window))
+}
+
+/// Moves the column holding `window` one place along the strip.
+///
+/// Returns whether the strip changed: the first and last columns cannot move
+/// outward. The focused window keeps its place on screen because
+/// [`update_view`] re-derives the offset from the new strip position.
+fn move_column(scroll: &mut ScrollState, window: WindowId, forward: bool) -> bool {
+    let Some(index) = column_of(scroll, window) else {
+        return false;
+    };
+    let target = if forward {
+        index + 1
+    } else {
+        let Some(target) = index.checked_sub(1) else {
+            return false;
+        };
+        target
+    };
+    if target >= scroll.columns.len() {
+        return false;
+    }
+    scroll.columns.swap(index, target);
+    true
+}
+
+/// Moves the window into the neighbouring column.
+///
+/// The source column is dropped when the move empties it, which is what makes
+/// [`LayoutCommand::ConsumeWindowIntoColumn`] merge a one-window column whole.
+fn move_window_to_column(scroll: &mut ScrollState, window: WindowId, forward: bool) -> bool {
+    let Some(source) = column_of(scroll, window) else {
+        return false;
+    };
+    let Some(mut target) = (if forward {
+        Some(source + 1)
+    } else {
+        source.checked_sub(1)
+    }) else {
+        return false;
+    };
+    if target >= scroll.columns.len() {
+        return false;
+    }
+
+    scroll.columns[source].windows.retain(|id| *id != window);
+    if scroll.columns[source].windows.is_empty() {
+        scroll.columns.remove(source);
+        if source < target {
+            target -= 1;
+        }
+    }
+    scroll.columns[target].windows.push(window);
+    true
+}
+
+/// Splits the focused window out of its column into a new column on the right.
+///
+/// A column holding only that window has nothing to split, so the command is a
+/// no-op there (niri's `expel-window-from-column`).
+fn expel_window_from_column(scroll: &mut ScrollState, window: WindowId) -> bool {
+    let Some(index) = column_of(scroll, window) else {
+        return false;
+    };
+    if scroll.columns[index].windows.len() <= 1 {
+        return false;
+    }
+    scroll.columns[index].windows.retain(|id| *id != window);
+    let width = scroll.columns[index].width;
+    let display = scroll.columns[index].display;
+    scroll.columns.insert(
+        index + 1,
+        Column {
+            width,
+            windows: vec![window],
+            display,
+        },
+    );
+    true
+}
+
+/// Sets the width of the column holding `window`.
+fn set_column_width(scroll: &mut ScrollState, window: WindowId, width: ColumnWidth) -> bool {
+    let Some(index) = column_of(scroll, window) else {
+        return false;
+    };
+    scroll.columns[index].width = width;
+    true
+}
+
+/// Cycles the column holding `window` through the configured width presets.
+fn switch_preset_width(scroll: &mut ScrollState, window: WindowId, presets: &WidthPresets) -> bool {
+    let Some(index) = column_of(scroll, window) else {
+        return false;
+    };
+    let current = scroll.columns[index].width;
+    let Some(next) = presets.next_after(current) else {
+        return false;
+    };
+    scroll.columns[index].width = next;
+    true
 }
 
 /// Directional focus within the strip.
@@ -796,13 +938,23 @@ mod tests {
         let scroll_layout = Scroll::new(HORIZONTAL);
 
         // Cycling walks the presets: 1/3, 1/2, 2/3, 1/3…
-        scroll_layout.command(LayoutCommand::SwitchPresetWidth, &mut params, &mut scroll);
+        scroll_layout.command(
+            LayoutCommand::SwitchPresetWidth,
+            Some(WindowId::new(1)),
+            &mut params,
+            &mut scroll,
+        );
         assert_eq!(
             scroll.columns[0].width,
             ColumnWidth::Proportion(2.0 / 3.0),
             "half comes after a third"
         );
-        scroll_layout.command(LayoutCommand::SwitchPresetWidth, &mut params, &mut scroll);
+        scroll_layout.command(
+            LayoutCommand::SwitchPresetWidth,
+            Some(WindowId::new(1)),
+            &mut params,
+            &mut scroll,
+        );
         assert_eq!(scroll.columns[0].width, ColumnWidth::Proportion(1.0 / 3.0));
         assert_eq!(
             scroll.columns[1].width,
@@ -815,9 +967,230 @@ mod tests {
         assert!((rect(&placements, 0).w - 1000.0 / 3.0).abs() < 1e-9);
 
         // And centring is honoured once, by the next arrange.
-        scroll_layout.command(LayoutCommand::CenterColumn, &mut params, &mut scroll);
+        scroll_layout.command(
+            LayoutCommand::CenterColumn,
+            Some(WindowId::new(1)),
+            &mut params,
+            &mut scroll,
+        );
         assert!(scroll.center_request);
         arrange(HORIZONTAL, &windows, Some(0), &params, &mut scroll);
         assert!(!scroll.center_request, "the request is consumed");
+    }
+
+    /// The window at the head of each column, i.e. the strip's order.
+    fn order(scroll: &ScrollState) -> Vec<WindowId> {
+        scroll
+            .columns
+            .iter()
+            .map(|column| column.windows[0])
+            .collect()
+    }
+
+    /// Arranges `count` windows with the focus on `focused` and returns the
+    /// scroller state plus its parameters.
+    fn arranged(count: usize, focused: usize) -> (ScrollState, LayoutParams) {
+        let windows = list(count);
+        let params = params();
+        let mut scroll = ScrollState::default();
+        arrange(HORIZONTAL, &windows, Some(focused), &params, &mut scroll);
+        (scroll, params)
+    }
+
+    #[test]
+    fn move_column_reorders_and_clamps_at_the_edges() {
+        let (mut scroll, mut params) = arranged(3, 1);
+        let layout = Scroll::new(HORIZONTAL);
+        let window = WindowId::new(2);
+
+        // The focused middle column moves right, then cannot move further.
+        layout.command(
+            LayoutCommand::MoveColumnRight,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            order(&scroll),
+            vec![WindowId::new(1), WindowId::new(3), WindowId::new(2)]
+        );
+        layout.command(
+            LayoutCommand::MoveColumnRight,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            order(&scroll),
+            vec![WindowId::new(1), WindowId::new(3), WindowId::new(2)],
+            "the last column cannot move outward"
+        );
+
+        // And back to the start.
+        for _ in 0..2 {
+            layout.command(
+                LayoutCommand::MoveColumnLeft,
+                Some(window),
+                &mut params,
+                &mut scroll,
+            );
+        }
+        assert_eq!(
+            order(&scroll),
+            vec![WindowId::new(2), WindowId::new(1), WindowId::new(3)]
+        );
+        layout.command(
+            LayoutCommand::MoveColumnLeft,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(order(&scroll)[0], WindowId::new(2), "clamped at the start");
+    }
+
+    #[test]
+    fn move_window_to_column_merges_and_drops_the_empty_source() {
+        let (mut scroll, mut params) = arranged(3, 1);
+        let layout = Scroll::new(HORIZONTAL);
+        let window = WindowId::new(2);
+
+        layout.command(
+            LayoutCommand::MoveWindowToColumnRight,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            order(&scroll),
+            vec![WindowId::new(1), WindowId::new(3)],
+            "the emptied source column went away"
+        );
+        assert_eq!(
+            scroll.columns[1].windows,
+            vec![WindowId::new(3), WindowId::new(2)],
+            "the window joined the right column"
+        );
+    }
+
+    #[test]
+    fn consume_merges_the_focused_column_into_the_left() {
+        let (mut scroll, mut params) = arranged(3, 1);
+        let layout = Scroll::new(HORIZONTAL);
+        let window = WindowId::new(2);
+
+        layout.command(
+            LayoutCommand::ConsumeWindowIntoColumn,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(order(&scroll), vec![WindowId::new(1), WindowId::new(3)]);
+        assert_eq!(
+            scroll.columns[0].windows,
+            vec![WindowId::new(1), WindowId::new(2)]
+        );
+
+        // A column with several windows gives up only the focused one.
+        scroll.columns[0].windows = vec![WindowId::new(1), WindowId::new(2)];
+        scroll.columns[1].windows = vec![WindowId::new(3)];
+        layout.command(
+            LayoutCommand::ConsumeWindowIntoColumn,
+            Some(WindowId::new(3)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(
+            scroll.columns[0].windows,
+            vec![WindowId::new(1), WindowId::new(2), WindowId::new(3)]
+        );
+        assert_eq!(scroll.columns.len(), 1);
+    }
+
+    #[test]
+    fn expel_splits_a_window_into_a_new_column() {
+        let windows = list(2);
+        let (mut scroll, mut params) = arranged(2, 0);
+        let layout = Scroll::new(HORIZONTAL);
+        scroll.columns = vec![Column {
+            width: ColumnWidth::Fixed(700.0),
+            windows: vec![WindowId::new(1), WindowId::new(2)],
+            display: ColumnDisplay::Normal,
+        }];
+
+        layout.command(
+            LayoutCommand::ExpelWindowFromColumn,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns.len(), 2);
+        assert_eq!(scroll.columns[0].windows, vec![WindowId::new(1)]);
+        assert_eq!(scroll.columns[1].windows, vec![WindowId::new(2)]);
+        assert_eq!(
+            scroll.columns[1].width,
+            ColumnWidth::Fixed(700.0),
+            "the new column keeps the source width"
+        );
+        let placements = arrange(HORIZONTAL, &windows, Some(1), &params, &mut scroll);
+        assert_eq!(placements.len(), 2, "both windows are still placed");
+
+        // A one-window column has nothing to split.
+        layout.command(
+            LayoutCommand::ExpelWindowFromColumn,
+            Some(WindowId::new(2)),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns.len(), 2);
+    }
+
+    #[test]
+    fn expand_and_set_width_resize_the_focused_column() {
+        let windows = list(3);
+        let (mut scroll, mut params) = arranged(3, 0);
+        let layout = Scroll::new(HORIZONTAL);
+        let window = WindowId::new(1);
+
+        layout.command(
+            LayoutCommand::ExpandColumnToAvailableWidth,
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns[0].width, ColumnWidth::Proportion(1.0));
+        let placements = arrange(HORIZONTAL, &windows, Some(0), &params, &mut scroll);
+        assert_eq!(rect(&placements, 0).w, AREA.w, "the column fills the view");
+
+        layout.command(
+            LayoutCommand::SetColumnWidth(ColumnWidth::Fixed(320.0)),
+            Some(window),
+            &mut params,
+            &mut scroll,
+        );
+        assert_eq!(scroll.columns[0].width, ColumnWidth::Fixed(320.0));
+        let placements = arrange(HORIZONTAL, &windows, Some(0), &params, &mut scroll);
+        assert_eq!(rect(&placements, 0).w, 320.0);
+    }
+
+    #[test]
+    fn commands_without_a_focused_window_do_nothing() {
+        let (mut scroll, mut params) = arranged(3, 0);
+        let before = scroll.clone();
+        let layout = Scroll::new(HORIZONTAL);
+        for command in [
+            LayoutCommand::SwitchPresetWidth,
+            LayoutCommand::MoveColumnLeft,
+            LayoutCommand::MoveColumnRight,
+            LayoutCommand::MoveWindowToColumnLeft,
+            LayoutCommand::MoveWindowToColumnRight,
+            LayoutCommand::ConsumeWindowIntoColumn,
+            LayoutCommand::ExpelWindowFromColumn,
+            LayoutCommand::ExpandColumnToAvailableWidth,
+            LayoutCommand::SetColumnWidth(ColumnWidth::Fixed(100.0)),
+        ] {
+            layout.command(command, None, &mut params, &mut scroll);
+        }
+        assert_eq!(scroll.columns, before.columns);
+        assert_eq!(scroll.offset, before.offset);
     }
 }

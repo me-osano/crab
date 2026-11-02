@@ -177,6 +177,18 @@ layer_name = ["rofi", "alacritty"]
 # Binds here are checked before the default tables; unbound keys still work.
 "r" = "preset_width"
 "c" = "center_column"
+# Columns are first-class: reorder them, move windows between them, split a
+# window out, and resize the focused one.
+"h" = "move_column_left"
+"l" = "move_column_right"
+"shift+h" = "move_window_to_column_left"
+"shift+l" = "move_window_to_column_right"
+"comma" = "consume_window_into_column"
+"period" = "expel_window_from_column"
+"f" = "expand_column_to_available_width"
+"1" = "set_column_width:0.5"
+"2" = "set_column_width:0.6667"
+"3" = "set_column_width:800px"
 "Escape" = "leave_mode"
 
 

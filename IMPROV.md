@@ -321,6 +321,13 @@ operations + property tests); new `crab_ipc::Action` variants; binds/aliases in
 `switch-preset-window-height`, `set-column-width`, `set-window-height`,
 `center-column`, and focus-window-within-column.
 
+**Status:** columns now carry the move/window-move/consume/expel/expand and
+set-width operations as pure `ScrollState` functions in `src/layout/scroll.rs`,
+with unit tests, a randomized invariant (no window is lost, duplicated, or
+invented), `crab_ipc::Action` variants, bind aliases, and a real-client
+compositor scenario. Window heights (`set-window-height`,
+`switch-preset-window-height`) and focus-within-column remain.
+
 **Acceptance:** property tests preserve window set and ordering; IPC actions are
 idempotent where expected; a nested client session exercises a column move and a
 width preset.

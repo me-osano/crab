@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 
 use crab::config::{Config, KeyMode};
-use crab::core::{LayoutKind, SpaceSet};
+use crab::core::{ColumnWidth, LayoutKind, SpaceSet};
 use crab_ipc::Direction;
 #[cfg(test)]
 use smithay::input::keyboard::Keysym;
@@ -864,6 +864,21 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         return parse_index(value).map(|index| Action::ToggleSpace { index });
     }
     if let Some(value) = action
+        .strip_prefix("set_column_width:")
+        .or_else(|| action.strip_prefix("set-column-width:"))
+    {
+        let width = value.trim();
+        if width.is_empty() {
+            return Err("empty column width".to_owned());
+        }
+        if ColumnWidth::parse(width).is_none() {
+            return Err(format!("`{width}` is not a column width"));
+        }
+        return Ok(Action::SetColumnWidth {
+            width: width.to_owned(),
+        });
+    }
+    if let Some(value) = action
         .strip_prefix("set_layout:")
         .or_else(|| action.strip_prefix("set-layout:"))
     {
@@ -946,6 +961,31 @@ fn parse_action(authored: &str) -> Result<Action, String> {
         "pop_mode" | "pop-mode" => Ok(Action::PopMode),
         "preset_width" | "switch_preset_width" | "preset-width" => Ok(Action::PresetWidth),
         "center_column" | "center-column" => Ok(Action::CenterColumn),
+        "move_column_left" | "move-column-left" => Ok(Action::MoveColumn {
+            direction: Direction::Left,
+        }),
+        "move_column_right" | "move-column-right" => Ok(Action::MoveColumn {
+            direction: Direction::Right,
+        }),
+        "move_window_to_column_left" | "move-window-to-column-left" => {
+            Ok(Action::MoveWindowToColumn {
+                direction: Direction::Left,
+            })
+        }
+        "move_window_to_column_right" | "move-window-to-column-right" => {
+            Ok(Action::MoveWindowToColumn {
+                direction: Direction::Right,
+            })
+        }
+        "consume_window_into_column" | "consume-window-into-column" => {
+            Ok(Action::ConsumeWindowIntoColumn)
+        }
+        "expel_window_from_column" | "expel-window-from-column" => {
+            Ok(Action::ExpelWindowFromColumn)
+        }
+        "expand_column_to_available_width" | "expand-column-to-available-width" => {
+            Ok(Action::ExpandColumnToAvailableWidth)
+        }
         "" => Err("empty action".to_owned()),
         // Mango actions for features crab does not implement yet. They are
         // accepted by the parser and skipped here with a startup warning.
@@ -1094,6 +1134,54 @@ mod tests {
         assert!(parse_action("nonsense").is_err());
         assert!(parse_action("view_space:0").is_err());
         assert!(parse_action("view_space:99").is_err());
+    }
+
+    #[test]
+    fn column_actions_parse_under_their_canonical_names() {
+        assert_eq!(
+            parse_action("move-column-left"),
+            Ok(Action::MoveColumn {
+                direction: Direction::Left
+            })
+        );
+        assert_eq!(
+            parse_action("move_column_right"),
+            Ok(Action::MoveColumn {
+                direction: Direction::Right
+            })
+        );
+        assert_eq!(
+            parse_action("move-window-to-column-left"),
+            Ok(Action::MoveWindowToColumn {
+                direction: Direction::Left
+            })
+        );
+        assert_eq!(
+            parse_action("consume-window-into-column"),
+            Ok(Action::ConsumeWindowIntoColumn)
+        );
+        assert_eq!(
+            parse_action("expel-window-from-column"),
+            Ok(Action::ExpelWindowFromColumn)
+        );
+        assert_eq!(
+            parse_action("expand-column-to-available-width"),
+            Ok(Action::ExpandColumnToAvailableWidth)
+        );
+        assert_eq!(
+            parse_action("set-column-width:0.75"),
+            Ok(Action::SetColumnWidth {
+                width: "0.75".to_owned()
+            })
+        );
+        assert_eq!(
+            parse_action("set_column_width:800px"),
+            Ok(Action::SetColumnWidth {
+                width: "800px".to_owned()
+            })
+        );
+        assert!(parse_action("set-column-width:").is_err());
+        assert!(parse_action("set-column-width:wide").is_err());
     }
 
     #[test]

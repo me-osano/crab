@@ -447,6 +447,13 @@ windows it is handed.
   (a third, a half, two thirds by default); `center-column` centres it once.
   Both commands are the scroller's own — they edit `ScrollState`, not
   `LayoutParams`, which is why the trait's `command` receives both.
+- Columns are first-class: `move-column-left/right` reorders the focused column,
+  `move-window-to-column-left/right` sends the focused window into a neighbour,
+  `consume-window-into-column` merges it leftward (dropping an emptied column),
+  `expel-window-from-column` splits it into a new column on the right, and
+  `expand-column-to-available-width` / `set-column-width` resize the focused
+  column. These are pure `ScrollState` operations, so they are unit- and
+  property-tested without a compositor.
 - Movement along the strip is animated window-by-window like any other relayout
   (each window's target rect is where its column lands), so a scroll is a
   `move` animation. Animating the *offset* itself — free scrolling, gestures,

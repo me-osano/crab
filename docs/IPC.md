@@ -56,6 +56,12 @@ Actions use kebab-case and match [`crab_ipc::Action`](../crab-ipc/src/protocol.r
 - `{"master-count":{"add":true}}`
 - `{"preset-width":{}}`
 - `{"center-column":{}}`
+- `{"move-column":{"direction":"left"}}`
+- `{"move-window-to-column":{"direction":"right"}}`
+- `{"consume-window-into-column":{}}`
+- `{"expel-window-from-column":{}}`
+- `{"expand-column-to-available-width":{}}`
+- `{"set-column-width":{"width":"0.5"}}` (also `proportion 0.5`, `800px`)
 - `{"reload-config":{}}`
 - `{"enter-mode":{"name":"resize"}}`
 - `{"leave-mode":{}}`

@@ -7,10 +7,12 @@
 //! ones a human thought of.
 
 use crab::core::{
-    Column, ColumnDisplay, ColumnWidth, Direction, LayoutKind, LayoutParams, Rect, ScrollAxis,
-    ScrollCenter, ScrollState, WindowId,
+    Column, ColumnDisplay, ColumnWidth, Direction, LayoutCommand, LayoutKind, LayoutParams, Rect,
+    ScrollAxis, ScrollCenter, ScrollState, WindowId,
 };
-use crab::layout::{Layout as _, LayoutInput, LayoutWindow, Placement, Scroll, arrange};
+use crab::layout::{
+    Layout as _, LayoutInput, LayoutWindow, Placement, Scroll, apply_command, arrange,
+};
 use proptest::prelude::*;
 
 const AREA: Rect = Rect::new(0.0, 0.0, 1280.0, 720.0);
@@ -379,5 +381,74 @@ proptest! {
                 "the new column overlaps window {index}"
             );
         }
+    }
+
+    /// Column actions never lose, duplicate, or invent a window, and every
+    /// window still gets exactly one placement afterwards.
+    #[test]
+    fn scroll_column_actions_preserve_the_window_set(
+        count in 1usize..16,
+        ops in prop::collection::vec((0u8..8, 0usize..16), 0..24),
+    ) {
+        let windows = sample_windows(count);
+        let mut params = scroll_params(8.0, ColumnWidth::DEFAULT, true, ScrollCenter::Never);
+        let mut scroll = ScrollState::default();
+        scroll_arrange(
+            ScrollAxis::Horizontal,
+            &windows,
+            Some(0),
+            &params,
+            &mut scroll,
+        );
+
+        for (op, seed) in ops {
+            let window = WindowId::new((seed % count) as u64 + 1);
+            let command = match op {
+                0 => LayoutCommand::MoveColumnLeft,
+                1 => LayoutCommand::MoveColumnRight,
+                2 => LayoutCommand::MoveWindowToColumnLeft,
+                3 => LayoutCommand::MoveWindowToColumnRight,
+                4 => LayoutCommand::ConsumeWindowIntoColumn,
+                5 => LayoutCommand::ExpelWindowFromColumn,
+                6 => LayoutCommand::ExpandColumnToAvailableWidth,
+                _ => LayoutCommand::SetColumnWidth(ColumnWidth::Proportion(0.5)),
+            };
+            apply_command(
+                LayoutKind::Scroll,
+                command,
+                Some(window),
+                &mut params,
+                &mut scroll,
+            );
+
+            let mut seen: Vec<WindowId> = scroll
+                .columns
+                .iter()
+                .flat_map(|column| column.windows.iter().copied())
+                .collect();
+            seen.sort();
+            let mut expected: Vec<WindowId> = windows.iter().map(|window| window.id).collect();
+            expected.sort();
+            prop_assert_eq!(&seen, &expected, "after {:?}", command);
+            prop_assert!(
+                scroll.columns.iter().all(|column| !column.windows.is_empty()),
+                "an empty column survived {:?}",
+                command
+            );
+        }
+
+        let placements = scroll_arrange(
+            ScrollAxis::Horizontal,
+            &windows,
+            Some(0),
+            &params,
+            &mut scroll,
+        );
+        prop_assert_eq!(placements.len(), count);
+        let mut placed: Vec<WindowId> = placements.iter().map(|p| p.window).collect();
+        placed.sort();
+        let mut expected: Vec<WindowId> = windows.iter().map(|window| window.id).collect();
+        expected.sort();
+        prop_assert_eq!(placed, expected);
     }
 }

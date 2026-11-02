@@ -206,6 +206,11 @@ Matched by namespace when a layer-shell surface maps. **First matching rule wins
 [modes.scroll.binds]
 "r" = "preset_width"
 "c" = "center_column"
+"h" = "move_column_left"
+"l" = "move_column_right"
+"comma" = "consume_window_into_column"
+"period" = "expel_window_from_column"
+"f" = "expand_column_to_available_width"
 "Escape" = "leave_mode"     # back to default
 ```
 
@@ -271,6 +276,12 @@ Canonical actions match [`crab_ipc::Action`](../crab-ipc/src/protocol.rs). Confi
 | `toggle-maximized` | `toggle_maximize_window`, `toggle_maximized`, `togglemaximizescreen`, `toggle-maximized` | - | Toggle maximized |
 | `preset-width` | `preset_width`, `switch_preset_width`, `preset-width` | - | Cycle scroll column width preset |
 | `center-column` | `center_column`, `center-column` | - | Center focused scroll column |
+| `move-column` | `move_column_left`/`move-column-left`, `move_column_right`/`move-column-right` | - | Reorder the focused scroll column |
+| `move-window-to-column` | `move_window_to_column_left`/`move-window-to-column-left`, `move_window_to_column_right`/`move-window-to-column-right` | - | Move the focused window into a neighbouring column |
+| `consume-window-into-column` | `consume_window_into_column`, `consume-window-into-column` | - | Merge the focused window into the column on its left |
+| `expel-window-from-column` | `expel_window_from_column`, `expel-window-from-column` | - | Split the focused window into a new column on its right |
+| `expand-column-to-available-width` | `expand_column_to_available_width`, `expand-column-to-available-width` | - | Widen the focused column to the view |
+| `set-column-width` | `set_column_width:<width>`, `set-column-width:<width>` | `0.5`, `proportion 0.5`, `800px` | Set the focused column's width |
 | `reload-config` | `reload_config`, `reload-config` | - | Reload config file (hot reload) |
 | `enter-mode` | `enter_mode:<name>`, `enter-mode:<name>`, `mode:<name>` | mode name | Enter a key mode |
 | `leave-mode` | `leave_mode`, `leave-mode`, `exit_mode` | - | Reset to the default mode |
