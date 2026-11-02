@@ -11,7 +11,7 @@
 //! and stay entirely inside the Smithay-free library.
 
 use crab::core::{
-    LayoutKind, LayoutParams, Output, OutputId, Rect, SpaceSet, SpaceState, WindowId,
+    LayoutCommand, LayoutKind, LayoutParams, Output, OutputId, Rect, SpaceSet, SpaceState, WindowId,
 };
 use crab::layout::{self, LayoutInput, LayoutWindow, Placement};
 
@@ -133,6 +133,21 @@ impl Scene {
     /// Shows exactly `spaces` on an output.
     fn view(&mut self, output: usize, spaces: SpaceSet) {
         self.outputs[output].view_space(spaces);
+    }
+
+    /// Runs a layout command against an output's current space, targeting the
+    /// scene's focused window the way the compositor does.
+    fn command(&mut self, output: usize, command: LayoutCommand) {
+        let focused = self.focus;
+        if let Some(state) = self.outputs[output].current_space_state_mut() {
+            layout::apply_command(
+                state.layout,
+                command,
+                focused,
+                &mut state.params,
+                &mut state.scroll,
+            );
+        }
     }
 
     /// The placements for an output's current view, writing the scroller's
@@ -368,4 +383,53 @@ fn closing_a_scroll_column_before_the_focus_keeps_it_still() {
         Rect::new(0.0, 0.0, 960.0, 1080.0),
         "the surviving column before it moved into the gap"
     );
+}
+
+#[test]
+fn moving_a_scroll_column_reorders_the_strip_without_moving_the_focus() {
+    let mut scene = Scene::new(LayoutKind::Scroll);
+    let first = scene.open(0, SpaceSet::SPACE_1);
+    let middle = scene.open(0, SpaceSet::SPACE_1);
+    let focused = scene.open(0, SpaceSet::SPACE_1);
+    scene.focus = Some(focused);
+
+    // The focused third column sits at the right edge of the view.
+    let before = scene.arrange(0);
+    assert_eq!(rect(&before, first), Rect::new(-960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(rect(&before, focused), Rect::new(960.0, 0.0, 960.0, 1080.0));
+
+    // Moving it one place left swaps it with the middle column. The focused
+    // window keeps its place on screen; the middle column moves to the end.
+    scene.command(0, LayoutCommand::MoveColumnLeft);
+    let after = scene.arrange(0);
+    assert_eq!(rect(&after, first), Rect::new(0.0, 0.0, 960.0, 1080.0));
+    assert_eq!(rect(&after, focused), Rect::new(960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(rect(&after, middle), Rect::new(1920.0, 0.0, 960.0, 1080.0));
+}
+
+#[test]
+fn consuming_and_expelling_windows_keeps_every_window_placed() {
+    let mut scene = Scene::new(LayoutKind::Scroll);
+    let first = scene.open(0, SpaceSet::SPACE_1);
+    let focused = scene.open(0, SpaceSet::SPACE_1);
+    let third = scene.open(0, SpaceSet::SPACE_1);
+    scene.focus = Some(focused);
+    scene.arrange(0);
+
+    // Consuming the focused window merges it into the column on its left,
+    // where the two windows share the column's height.
+    scene.command(0, LayoutCommand::ConsumeWindowIntoColumn);
+    let merged = scene.arrange(0);
+    assert_eq!(rect(&merged, first), Rect::new(0.0, 0.0, 960.0, 540.0));
+    assert_eq!(rect(&merged, focused), Rect::new(0.0, 540.0, 960.0, 540.0));
+    assert_eq!(rect(&merged, third), Rect::new(960.0, 0.0, 960.0, 1080.0));
+
+    // Expelling it splits it back out into its own column on the right, and
+    // the source column returns to one window. The focused window keeps its
+    // place on screen, so the strip scrolls rather than dragging it sideways.
+    scene.command(0, LayoutCommand::ExpelWindowFromColumn);
+    let split = scene.arrange(0);
+    assert_eq!(rect(&split, first), Rect::new(-960.0, 0.0, 960.0, 1080.0));
+    assert_eq!(rect(&split, focused), Rect::new(0.0, 0.0, 960.0, 1080.0));
+    assert_eq!(rect(&split, third), Rect::new(960.0, 0.0, 960.0, 1080.0));
 }
