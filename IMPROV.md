@@ -60,7 +60,7 @@ Legend: **yes** = working; **partial** = implemented but limited/untested;
 | First-class columns + column actions | partial (columns exist, few operations) | yes | see B03 |
 | Floating layout | yes, per-space + per-window | yes, separate `FloatingSpace` | see B04 |
 | Configure transactions | no | yes, 300 ms blockers | see B01 |
-| Configure throttling | partial (skip same size) | yes, `ConfigureIntent` | see B02 |
+| Configure throttling | partial (skip same size) | yes, `ConfigureIntent` | done: 16 ms, latest size wins (B02) |
 | Animations | open/close/placement springs | full layout/scroll/overview animations | crab's core is solid |
 | Live gestures | no (end-only, 30 px) | yes (3-finger view/space, 4-finger overview) | see B33 |
 | Touch / tablet | no | yes | see B34 |
@@ -288,6 +288,12 @@ for focus/fullscreen/state changes so they are never delayed.
 **Acceptance:** a synthetic resize loop with a 30 ms client produces bounded
 configures (e.g. ≤ 2 per 30 ms) and converges to the final size; existing
 resize/refusal tests still pass.
+
+**Status:** landed. `Configure` carries `last_sent`/`pending`, `configure_to`
+plans a `ConfigureIntent` and coalesces to the latest size, and the backends
+flush at the frame boundary. `MIN_CONFIGURE_INTERVAL` is one frame (16 ms); the
+resize-loop test asserts at most four sends over 60 ms and convergence to the
+final size.
 
 **Priority:** P1 · **Effort:** M · **Depends on:** B01 (or lands first as a
 smaller step).

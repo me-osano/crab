@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-31):** 338 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-10-31):** 340 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -390,9 +390,11 @@ are smooth, interruptible, and free of pops.
   on all commits or a 300 ms deadline; keep the `Configure`/`WindowFit` path as the
   fallback. Add a two-fake-client test. [IMPROV B01]
   *(niri `utils/transaction.rs`; new `src/compositor/transaction.rs`; depends on C6.)*
-- [ ] **Configure throttling** — classify size-only vs position/visibility/state
+- [x] **Configure throttling** — classify size-only vs position/visibility/state
   changes, coalesce rapid size changes to one frame, and never delay focus or state
-  changes. [IMPROV B02] *(niri `ConfigureIntent`, `layout/mod.rs`)*
+  changes. [IMPROV B02] *(niri `ConfigureIntent`, `layout/mod.rs`; `Configure`
+  now keeps `last_sent`/`pending`, `MIN_CONFIGURE_INTERVAL` is 16 ms, and the
+  backends flush at the frame boundary.)*
 
 **Exit criteria (phase):** space/space switches and layout changes are smooth and interruptible with no pops; opening a window in the `scroll` mode does not disturb existing columns; multi-window resizes never present a mixed-generation frame.
 

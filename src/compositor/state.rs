@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crab::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
 use crab::config::{AnimationStyle, Config, WindowRule};
@@ -720,9 +720,28 @@ impl ManagedWindow {
     /// the client actually commits.
     pub(crate) fn configure_to(&mut self, size: Size<i32, Logical>) {
         let size = clamp_to_hints(size, self.window.min_size, self.window.max_size);
-        if self.configure.ask(size) {
+        let now = Instant::now();
+        if self.configure.plan(size, now) == ConfigureIntent::CanSend {
+            if let Some(size) = self.configure.take_pending(now) {
+                self.send_configure(size);
+            }
+        }
+    }
+
+    /// Sends a size change that was waiting for the throttle window.
+    ///
+    /// The backends call this at the start of each frame. A burst of layout
+    /// changes within one frame therefore configures each window at most once,
+    /// with the latest size, instead of once per intermediate size.
+    pub(crate) fn flush_configure(&mut self, now: Instant) {
+        if let Some(size) = self.configure.take_pending(now) {
             self.send_configure(size);
         }
+    }
+
+    /// Whether a throttled size change is still waiting to be sent.
+    pub(crate) fn has_pending_configure(&self) -> bool {
+        self.configure.pending.is_some()
     }
 
     /// Sends a configure for what was last asked, without forgetting what was
@@ -731,6 +750,7 @@ impl ManagedWindow {
         let Some(size) = self.configure.asked() else {
             return;
         };
+        self.configure.note_sent(size, Instant::now());
         self.send_configure(size);
     }
 
@@ -780,6 +800,26 @@ enum Reply {
     GaveUp,
 }
 
+/// How long a window waits between size configures.
+///
+/// One frame at 60 Hz: a burst of layout changes coalesces to the latest size
+/// rather than queueing one configure per intermediate rectangle. Position,
+/// focus, fullscreen, and other state changes do not go through this path, so
+/// they are never delayed.
+const MIN_CONFIGURE_INTERVAL: Duration = Duration::from_millis(16);
+
+/// What a size request should do right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigureIntent {
+    /// The client is already being asked for this size.
+    NotNeeded,
+    /// A different size is wanted, but the last configure was too recent; it
+    /// is remembered and sent when the window has elapsed.
+    Throttled,
+    /// The size can be sent now.
+    CanSend,
+}
+
 /// What a client was asked to be, and how it has answered.
 ///
 /// A configure is a request, not a command, so this is what tells "the client
@@ -797,6 +837,10 @@ struct Configure {
     refusals: u8,
     /// Whether asking has been given up on.
     gave_up: bool,
+    /// The last size a configure was actually sent for, and when.
+    last_sent: Option<(Size<i32, Logical>, Instant)>,
+    /// The latest size waiting for [`MIN_CONFIGURE_INTERVAL`].
+    pending: Option<Size<i32, Logical>>,
 }
 
 impl Configure {
@@ -810,12 +854,53 @@ impl Configure {
         self.gave_up
     }
 
+    /// Decides whether `size` should be sent now, later, or not at all.
+    ///
+    /// A size that is already being asked for clears any older pending request:
+    /// the layout went back to what the client is already configured for.
+    fn plan(&mut self, size: Size<i32, Logical>, now: Instant) -> ConfigureIntent {
+        if self.asked == Some(size) {
+            self.pending = None;
+            return ConfigureIntent::NotNeeded;
+        }
+        self.pending = Some(size);
+        match self.last_sent {
+            Some((_, last)) if now.saturating_duration_since(last) < MIN_CONFIGURE_INTERVAL => {
+                ConfigureIntent::Throttled
+            }
+            _ => ConfigureIntent::CanSend,
+        }
+    }
+
+    /// Takes the latest pending size once the throttle window has passed.
+    fn take_pending(&mut self, now: Instant) -> Option<Size<i32, Logical>> {
+        let size = self.pending?;
+        if let Some((_, last)) = self.last_sent {
+            if now.saturating_duration_since(last) < MIN_CONFIGURE_INTERVAL {
+                return None;
+            }
+        }
+        self.pending = None;
+        self.asked = Some(size);
+        self.refusals = 0;
+        self.gave_up = false;
+        self.last_sent = Some((size, now));
+        Some(size)
+    }
+
+    /// Books a configure that was sent outside [`Self::take_pending`].
+    fn note_sent(&mut self, size: Size<i32, Logical>, now: Instant) {
+        self.asked = Some(size);
+        self.last_sent = Some((size, now));
+    }
+
     /// Starts asking for `size`, unless it has already been asked for.
     ///
     /// A size that differs from the last one is a fresh start: the client
     /// refused nothing yet for *this* rectangle, so it gets a new allowance of
     /// refusals. Asking again for the same size returns false, which is what
     /// keeps a re-layout from configuring a window over and over.
+    #[cfg(test)]
     fn ask(&mut self, size: Size<i32, Logical>) -> bool {
         if self.asked == Some(size) {
             return false;
@@ -1999,6 +2084,13 @@ impl Crab {
     /// pass the real one (TODO.md §3.2).
     pub(crate) fn advance_frame(&mut self, frame_time: f64) {
         self.frame_clock.advance(frame_time);
+        // Send any size change the throttle held back, coalesced to the latest
+        // size. Doing it at the frame boundary is what makes a burst of layout
+        // changes cost one configure per window.
+        let now = Instant::now();
+        for window in &mut self.windows {
+            window.flush_configure(now);
+        }
         // A close whose fade has finished has nothing left to draw; retire it
         // before the frame that would sample it at zero opacity.
         self.closings
@@ -2014,6 +2106,8 @@ impl Crab {
         self.windows.iter().any(|window| {
             window.visual.is_animating(&self.frame_clock)
                 || window.open.is_animating(&self.frame_clock)
+                // A throttled configure still needs the next frame to go out.
+                || window.has_pending_configure()
         }) || self
             .layers
             .iter()
@@ -2055,7 +2149,7 @@ impl Crab {
         // its own and gets an empty configure (xdg-shell's initial one).
         let mut configure = Configure::default();
         if !window.floating {
-            configure.ask(DEFAULT_WINDOW_SIZE.into());
+            configure.note_sent(DEFAULT_WINDOW_SIZE.into(), Instant::now());
         }
 
         self.windows.push(ManagedWindow {
@@ -4034,6 +4128,82 @@ mod tests {
         assert_eq!(start.h, target.h * OPEN_ZOOM);
         assert_eq!(start.x + start.w / 2.0, target.x + target.w / 2.0);
         assert_eq!(start.y + start.h / 2.0, target.y + target.h / 2.0);
+    }
+
+    #[test]
+    fn rapid_size_changes_are_coalesced_to_the_latest_one() {
+        let start = Instant::now();
+        let mut configure = Configure::default();
+
+        // The first size goes out immediately.
+        assert_eq!(
+            configure.plan(size(100, 100), start),
+            ConfigureIntent::CanSend
+        );
+        assert_eq!(configure.take_pending(start), Some(size(100, 100)));
+
+        // Every later size inside the interval is held back; only the newest
+        // one is remembered.
+        for width in 101..=120 {
+            assert_eq!(
+                configure.plan(size(width, 100), start + Duration::from_millis(1)),
+                ConfigureIntent::Throttled
+            );
+        }
+        assert_eq!(
+            configure.take_pending(start + Duration::from_millis(10)),
+            None,
+            "the interval has not passed yet"
+        );
+        assert_eq!(
+            configure.take_pending(start + MIN_CONFIGURE_INTERVAL),
+            Some(size(120, 100)),
+            "the latest size goes out, not an intermediate one"
+        );
+
+        // Once it is the asked-for size, a re-layout is a no-op.
+        assert_eq!(
+            configure.plan(size(120, 100), start + MIN_CONFIGURE_INTERVAL),
+            ConfigureIntent::NotNeeded
+        );
+        assert_eq!(configure.take_pending(start + MIN_CONFIGURE_INTERVAL), None);
+    }
+
+    #[test]
+    fn a_resize_loop_sends_at_most_one_configure_per_interval() {
+        let start = Instant::now();
+        let mut configure = Configure::default();
+        let mut sends = Vec::new();
+
+        // A client that resizes every millisecond for 60 ms. The throttle
+        // window is 16 ms, so at most two configures fit in any 30 ms span.
+        for ms in 0..=60 {
+            let now = start + Duration::from_millis(ms);
+            configure.plan(size(100 + ms as i32, 100), now);
+            if let Some(size) = configure.take_pending(now) {
+                sends.push((ms, size.w));
+            }
+        }
+
+        assert!(
+            sends.len() <= 4,
+            "expected a handful of configures, got {sends:?}"
+        );
+        assert_eq!(sends[0], (0, 100), "the first change is immediate");
+        for pair in sends.windows(2) {
+            assert!(
+                pair[1].0 - pair[0].0 >= 16,
+                "configures were closer than the interval: {sends:?}"
+            );
+        }
+
+        // Once the resize stops, the last size still gets sent and converges.
+        let settled = start + Duration::from_millis(80);
+        assert_eq!(configure.take_pending(settled), Some(size(160, 100)));
+        assert_eq!(
+            configure.plan(size(160, 100), settled),
+            ConfigureIntent::NotNeeded
+        );
     }
 
     #[test]

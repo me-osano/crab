@@ -617,6 +617,10 @@ Clients commit new buffers after being configured, not instantly. For smooth vis
   (`MAX_SIZE_REFUSALS`); then the window is marked as refusing, left at the size it chose,
   and drawn cut back to its rect. A client that keeps repeating itself is never configured
   again, so this cannot loop.
+- Coalesce size-only changes to at most one configure per `MIN_CONFIGURE_INTERVAL`
+  (one frame, 16 ms). The latest size wins; the backends flush it at the next
+  frame boundary. Position, focus, fullscreen, and other state changes do not go
+  through this path, so they are never delayed.
 - Pointer input is mapped back through the same fit: the seat is given an origin that makes
   `position - origin` land on the surface-local point *drawn* there, not the one the
   placement puts there (`WindowFit::input_origin`). A window that is cut back is drawn 1:1
