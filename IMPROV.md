@@ -251,6 +251,16 @@ never presents a mixed-generation frame; a client that ignores configure does
 not stall other windows past 300 ms; a test with two fake clients shows both
 commits releasing the frame.
 
+**Status:** landed. `src/compositor/transaction.rs` owns a `TransactionQueue`;
+`layout::arrange` returns the windows still owing a commit, `Crab::relayout`
+starts a transaction, and `on_commit` releases a window once its `Configure` is
+no longer awaiting. `Crab::can_present_frame` gates rendering in the winit
+backend, and `advance_frame` expires the 300 ms deadline. The deadline is
+checked at the frame boundary — frames keep being requested while a transaction
+blocks through `is_animating` — rather than by a calloop timer, so the same rule
+works for the future tty backend. A real two-client resize test commits both
+buffers and asserts that the frame is held until the second commit.
+
 **Priority:** P1 · **Effort:** L · **Depends on:** C6.
 
 ---

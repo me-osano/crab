@@ -62,6 +62,7 @@ use crate::compositor::binds::{
 use crate::compositor::fit::WindowFit;
 use crate::compositor::layout;
 use crate::compositor::spawn;
+use crate::compositor::transaction::TransactionQueue;
 
 /// Size a new toplevel is configured to before the layout first sizes it, in
 /// logical pixels. Floating windows pick their own size instead.
@@ -744,6 +745,15 @@ impl ManagedWindow {
         self.configure.pending.is_some()
     }
 
+    /// Whether the client still owes a commit for the size it was asked for.
+    ///
+    /// This is what a configure transaction blocks on: a window that has
+    /// already committed its target (or has refused it enough to give up) is
+    /// not holding a mixed frame.
+    pub(crate) fn awaits_configure(&self) -> bool {
+        self.configure.is_awaiting()
+    }
+
     /// Sends a configure for what was last asked, without forgetting what was
     /// refused for it: a retry asks again, it does not start over.
     fn retry_configure(&mut self) {
@@ -852,6 +862,18 @@ impl Configure {
     /// Whether the client has refused so many sizes that we stopped asking.
     fn gave_up(&self) -> bool {
         self.gave_up
+    }
+
+    /// Whether a configure is outstanding: a size is waiting to go out, or the
+    /// client has not committed the size it was last asked for.
+    fn is_awaiting(&self) -> bool {
+        if self.pending.is_some() {
+            return true;
+        }
+        match self.asked {
+            Some(asked) => !self.gave_up && self.committed != Some(asked),
+            None => false,
+        }
     }
 
     /// Decides whether `size` should be sent now, later, or not at all.
@@ -1224,6 +1246,12 @@ pub(crate) struct Crab {
     pub(crate) layers: Vec<LayerEntry>,
     /// Toplevels that are gone but still fading out, drawn above the scene.
     pub(crate) closings: Vec<ClosingWindow>,
+    /// Layout changes waiting for the clients they configured to commit.
+    ///
+    /// While one is blocking, the backend holds the next frame so a layout
+    /// change never presents a mixed generation (see
+    /// [`crate::compositor::transaction`]).
+    pub(crate) transactions: TransactionQueue,
     /// The xdg popup trees, one per toplevel, plus their grabs.
     ///
     /// Smithay's manager is the source of truth: it descends each popup's
@@ -1400,6 +1428,7 @@ impl Crab {
             windows: Vec::new(),
             layers: Vec::new(),
             closings: Vec::new(),
+            transactions: TransactionQueue::default(),
             popup_manager: PopupManager::default(),
             focus: FocusTarget::None,
             focus_stack: FocusStack::new(),
@@ -2069,11 +2098,44 @@ impl Crab {
     }
 
     /// Recomputes every window's rectangle for the current view and layout.
+    ///
+    /// Windows whose size changed are configured and become blockers of a new
+    /// transaction: the backend holds the next frame until they commit (or the
+    /// 300 ms deadline passes), so the change is never presented half-applied.
     pub(crate) fn relayout(&mut self) {
+        let blockers = self.arrange_all();
+        self.transactions.begin(blockers, Instant::now());
+    }
+
+    /// Re-arranges after a client commit, without starting a new transaction.
+    ///
+    /// The commit itself may reveal a layout change (size hints, geometry).
+    /// Starting a fresh hold here would make every commit wait for another
+    /// commit; instead the windows that still need a configure join the
+    /// transaction that is already holding the frame, if there is one.
+    fn relayout_after_commit(&mut self) {
+        let blockers = self.arrange_all();
+        self.transactions.add_blockers(blockers);
+    }
+
+    /// Arranges every output and returns the windows still owing a commit.
+    fn arrange_all(&mut self) -> Vec<WindowId> {
         let outputs: Vec<OutputId> = self.outputs.keys().copied().collect();
+        let mut blockers = Vec::new();
         for output in outputs {
-            layout::arrange(self, output);
+            blockers.extend(layout::arrange(self, output));
         }
+        blockers
+    }
+
+    /// Whether the backend may present the next frame.
+    ///
+    /// While a transaction is blocking, drawing now would mix the new layout
+    /// with buffers from before the configure. The backends still run
+    /// [`Self::advance_frame`] and keep requesting frames, so commits and the
+    /// deadline can release it.
+    pub(crate) fn can_present_frame(&self) -> bool {
+        !self.transactions.is_blocking()
     }
 
     /// Re-times the animation clock for the frame about to be drawn.
@@ -2090,6 +2152,27 @@ impl Crab {
         let now = Instant::now();
         for window in &mut self.windows {
             window.flush_configure(now);
+        }
+        // A window can stop owing a commit without committing: floating it
+        // resets its configure, and a client that refused too many sizes is
+        // left at its own size. Neither should hold the frame any longer.
+        let caught_up: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|window| !window.awaits_configure())
+            .map(ManagedWindow::id)
+            .collect();
+        for id in caught_up {
+            self.transactions.commit(id);
+        }
+        // A client that never answered a configure must not hold the frame
+        // past the transaction deadline.
+        let expired = self.transactions.expire(now);
+        if expired > 0 {
+            tracing::debug!(
+                expired,
+                "a configure transaction timed out; presenting the committed state"
+            );
         }
         // A close whose fade has finished has nothing left to draw; retire it
         // before the frame that would sample it at zero opacity.
@@ -2108,10 +2191,11 @@ impl Crab {
                 || window.open.is_animating(&self.frame_clock)
                 // A throttled configure still needs the next frame to go out.
                 || window.has_pending_configure()
-        }) || self
-            .layers
-            .iter()
-            .any(|layer| layer.open.is_animating(&self.frame_clock))
+        }) || self.transactions.is_blocking()
+            || self
+                .layers
+                .iter()
+                .any(|layer| layer.open.is_animating(&self.frame_clock))
             || self
                 .closings
                 .iter()
@@ -2279,6 +2363,7 @@ impl Crab {
         let bbox = smithay::desktop::utils::bbox_from_surface_tree(surface, (0, 0));
         let geometry = window_geometry(surface, bbox);
         let committed = committed_frame(surface);
+        let mut caught_up = None;
         for window in &mut self.windows {
             if window.wl_surface() != surface {
                 continue;
@@ -2340,6 +2425,14 @@ impl Crab {
                 // apart (TODO.md §1.5).
                 window.on_committed_size(geometry.size);
             }
+            // A commit that leaves nothing outstanding releases this window
+            // from every transaction holding the frame. A client that is
+            // merely behind keeps its blocker until it catches up or the
+            // deadline expires.
+            caught_up = Some((window.id(), !window.configure.is_awaiting()));
+        }
+        if let Some((id, true)) = caught_up {
+            self.transactions.commit(id);
         }
 
         // Popups change trees and map through the manager (it needs every
@@ -2353,7 +2446,7 @@ impl Crab {
         }
 
         if relayout {
-            self.relayout();
+            self.relayout_after_commit();
         }
 
         // The first buffer is where the window becomes visible: start its open
@@ -2822,6 +2915,9 @@ impl Crab {
         self.compact_spaces();
         for &id in ids {
             self.focus_stack.remove(FocusTarget::Window(id));
+            // A destroyed client can never commit, so it must not hold a
+            // transaction until the deadline.
+            self.transactions.commit(id);
             for runtime in self.outputs.values_mut() {
                 for space in &mut runtime.model.space_states {
                     space.forget(id);
@@ -4128,6 +4224,40 @@ mod tests {
         assert_eq!(start.h, target.h * OPEN_ZOOM);
         assert_eq!(start.x + start.w / 2.0, target.x + target.w / 2.0);
         assert_eq!(start.y + start.h / 2.0, target.y + target.h / 2.0);
+    }
+
+    #[test]
+    fn a_throttled_configure_still_counts_as_awaiting_a_commit() {
+        let start = Instant::now();
+        let mut configure = Configure::default();
+        assert_eq!(
+            configure.plan(size(100, 100), start),
+            ConfigureIntent::CanSend
+        );
+        assert_eq!(configure.take_pending(start), Some(size(100, 100)));
+        configure.commit(size(100, 100));
+        assert!(!configure.is_awaiting(), "the client caught up");
+
+        // The new size is inside the throttle window: it has not been sent,
+        // so the client cannot have committed it. A transaction must wait.
+        assert_eq!(
+            configure.plan(size(120, 100), start + Duration::from_millis(1)),
+            ConfigureIntent::Throttled
+        );
+        assert!(
+            configure.is_awaiting(),
+            "a pending configure is not a caught-up client"
+        );
+        assert_eq!(
+            configure.take_pending(start + MIN_CONFIGURE_INTERVAL),
+            Some(size(120, 100))
+        );
+        assert!(
+            configure.is_awaiting(),
+            "the configure was sent, but the commit is still owed"
+        );
+        configure.commit(size(120, 100));
+        assert!(!configure.is_awaiting());
     }
 
     #[test]

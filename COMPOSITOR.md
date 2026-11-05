@@ -621,6 +621,15 @@ Clients commit new buffers after being configured, not instantly. For smooth vis
   (one frame, 16 ms). The latest size wins; the backends flush it at the next
   frame boundary. Position, focus, fullscreen, and other state changes do not go
   through this path, so they are never delayed.
+- Hold the next frame until every client whose size changed has committed, or a
+  `TIME_LIMIT` of 300 ms has passed. A layout pass records the windows that still
+  owe a commit as transaction blockers; the commit handler releases each one once
+  it has committed the size it was asked for. The backend skips presentation while
+  a transaction is blocking, so a multi-window resize or column move never shows a
+  mix of old and new buffers. Expiry presents the committed state and lets the
+  `WindowFit` fallback draw a laggard into its rect; a client that ignores
+  configure therefore cannot stall the others. A re-layout triggered by a commit
+  joins the transaction already in flight instead of starting another hold.
 - Pointer input is mapped back through the same fit: the seat is given an origin that makes
   `position - origin` land on the surface-local point *drawn* there, not the one the
   placement puts there (`WindowFit::input_origin`). A window that is cut back is drawn 1:1

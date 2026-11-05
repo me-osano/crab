@@ -153,7 +153,14 @@ pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Re
                         // tty backend will pass the real one (TODO.md §3.2).
                         let frame_time = data.state.start_time.elapsed().as_secs_f64();
                         data.state.advance_frame(frame_time);
-                        render::render(&mut data.state, &mut data.backend);
+                        // A configure transaction holds the frame until the
+                        // clients it configured commit, so the change is not
+                        // presented as a mix of old and new buffers. The loop
+                        // keeps requesting frames while it is blocking, which
+                        // is what lets the deadline expire.
+                        if data.state.can_present_frame() {
+                            render::render(&mut data.state, &mut data.backend);
+                        }
                         // Keep frames coming while anything is still moving.
                         // This folds into the frame just presented, so
                         // `finish_frame` reports the follow-up and winit

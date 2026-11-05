@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-31):** 340 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-10-31):** 349 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -32,13 +32,13 @@ borrow backlog live in **`IMPROV.md`** (`C1–C6`, `B01–B49`); this file track
 milestones and only cross-references the actionable items.
 
 **Start here (from `IMPROV.md`):**
-1. ~~`B43`~~ (done: all-features CI, MSRV 1.85, headless state smoke test) plus the
-   rest of `B41` — the remaining scenario harnesses (move/resize/close, output
-   re-add, columns, transaction deadlines). The correctness gate itself is closed.
+1. ~~`B43`~~ (done: all-features CI, MSRV 1.85, headless state smoke test) and
+   ~~`B41`~~ (done: move/resize/close, output re-add, columns, and transaction
+   deadlines). The correctness gate itself is closed.
 2. `B09`/`B10` and `B12`/`B15`/`B16`/`B17` — a real TTY session, libinput, frame
    clock, DMA-BUF, presentation-time, and cursor shape. This is what makes crab a
    daily driver.
-3. `B01`/`B02` — configure transactions and throttling.
+3. ~~`B01`/`B02`~~ (done: configure transactions and throttling).
 4. `B05` — preserve space identity and layout state across output unplug/replug.
 5. `B18`/`B19`/`B14`/`B20` — `ext-workspace`, foreign-toplevel, session lock, and
    idle.
@@ -270,7 +270,7 @@ acceptance criteria are in `IMPROV.md` §3.
 - [x] `C4` — run space compaction for every output, and make rule application, focus cycling, and activation use the window's owning output rather than `primary_output`. *(Compaction, rules, focus, and `xdg-activation` read the window's output; `closing_a_window_on_a_background_output_compacts_only_that_output` and `a_rule_uses_the_owning_output_when_that_output_is_not_focused` cover it.)*
 - [x] `C5` — rename/refactor `primary_output` → `focused_output` and keep a distinct fallback output; audit every use. *(`fallback_output` is set by the first output and survives focus changes; `remove_output` migrates windows to it and `normalize_focus` keeps both fields pointing at registered outputs.)*
 - [x] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output. *(`src/compositor/state/multi_output.rs` drives a real `wayland-client` over a socket pair; five scenarios plus output remove/re-add.)*
-- [ ] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(Done: `tests/layout_scenarios.rs` drives pure `Output`/`SpaceState`/`LayoutWindow` values through add, move-to-space, move-between-outputs, swap, close, scroll-column close, column move, and consume/expel; `src/compositor/state/multi_output.rs` adds protocol-level move-drag snap, resize-drag pinned edges, focused-close focus handoff, move-to-space output isolation, and scroll column move/width/height. Still open: the transaction deadline (needs B01). niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
+- [x] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(Done: `tests/layout_scenarios.rs` drives pure `Output`/`SpaceState`/`LayoutWindow` values through add, move-to-space, move-between-outputs, swap, close, scroll-column close, column move, and consume/expel; `src/compositor/state/multi_output.rs` adds protocol-level move-drag snap, resize-drag pinned edges, focused-close focus handoff, move-to-space output isolation, and scroll column move/width/height, plus the transaction deadline and both clients releasing a held frame. niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
 - [x] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green. *(CI runs all-features tests, adds an MSRV job, and `--backend headless` builds real compositor state on an in-process display; a bin unit test and a CLI integration test cover it.)*
 - [ ] `B44`/`B45` — remove per-arrange `ScrollState` cloning (`layout.rs:210–230`) and deep-cloning of the 32-slot state during compaction (`core/output.rs:394–403`) while these paths are open.
 
@@ -385,11 +385,15 @@ are smooth, interruptible, and free of pops.
   *(niri `input/mod.rs`, `input/scroll_swipe_gesture.rs`; depends on B03/B09)*
 
 ### 3.7 Configure synchronization
-- [ ] **Transaction-based configure sync** — before a layout change sizes/moves
+- [x] **Transaction-based configure sync** — before a layout change sizes/moves
   multiple windows, configure them, block the frame on their commits, and release
   on all commits or a 300 ms deadline; keep the `Configure`/`WindowFit` path as the
   fallback. Add a two-fake-client test. [IMPROV B01]
   *(niri `utils/transaction.rs`; new `src/compositor/transaction.rs`; depends on C6.)*
+  *(landed: `TransactionQueue` holds a frame while windows owe a configure; the
+  commit handler releases a window once it catches up, `advance_frame` expires the
+  deadline, and a real two-client resize test covers both commits releasing the
+  frame.)*
 - [x] **Configure throttling** — classify size-only vs position/visibility/state
   changes, coalesce rapid size changes to one frame, and never delay focus or state
   changes. [IMPROV B02] *(niri `ConfigureIntent`, `layout/mod.rs`; `Configure`

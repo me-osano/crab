@@ -28,9 +28,13 @@ const CASCADE_STEP: f64 = 32.0;
 /// The order the passes run in is the stacking order: fullscreen/maximized
 /// windows fill the output, then the tiled windows are arranged, then floating
 /// windows sit on top with their remembered geometry.
-pub(crate) fn arrange(state: &mut Crab, output: OutputId) {
+///
+/// Returns the windows that were configured and have not committed the size
+/// they were asked for. [`Crab::relayout`] turns them into a configure
+/// transaction so the frame is not presented with a mix of generations.
+pub(crate) fn arrange(state: &mut Crab, output: OutputId) -> Vec<WindowId> {
     let Some(runtime) = state.outputs.get(&output) else {
-        return;
+        return Vec::new();
     };
     let view = runtime.model.view.visible;
     let area = runtime.model.usable_area;
@@ -56,8 +60,11 @@ pub(crate) fn arrange(state: &mut Crab, output: OutputId) {
         .map(ManagedWindow::id)
         .collect();
     let covering_count = covering.len();
+    let mut blockers = Vec::new();
     for id in covering {
-        place(state, id, area, true, true);
+        if place(state, id, area, true, true) {
+            blockers.push(id);
+        }
     }
 
     // 2. Tiled windows, arranged by the current space's layout.
@@ -89,8 +96,8 @@ pub(crate) fn arrange(state: &mut Crab, output: OutputId) {
         },
     );
     for placement in &placements {
-        if placement.visible {
-            place(state, placement.window, placement.rect, true, true);
+        if placement.visible && place(state, placement.window, placement.rect, true, true) {
+            blockers.push(placement.window);
         }
     }
     // The scroller's model is worth seeing when a strip does not look right; it
@@ -145,6 +152,8 @@ pub(crate) fn arrange(state: &mut Crab, output: OutputId) {
         covering = covering_count,
         "arranged the view"
     );
+
+    blockers
 }
 
 /// The window to focus when moving `dir` from `current`, if any.
@@ -237,7 +246,7 @@ fn current_layout(state: &Crab, output: OutputId) -> (LayoutKind, LayoutParams, 
 /// earns a refusal — and the drawn rectangle is animated toward it. The kind
 /// records what moved the window — a change of size or a change of place —
 /// which is the granularity animations are configured at (M5).
-fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visible: bool) {
+fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visible: bool) -> bool {
     let location = point_i32(rect.x, rect.y);
     let size = size_i32(rect.w, rect.h);
     let clocks = state.frame_clock;
@@ -245,7 +254,7 @@ fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visib
     // placement snaps either way.
     let animate = state.config.animations.enabled;
     let Some(window) = state.window_mut(id) else {
-        return;
+        return false;
     };
     window.visible = visible;
     window.location = location;
@@ -254,6 +263,7 @@ fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visib
     } else {
         Kind::WindowResize
     };
+    let mut awaits_configure = false;
     if configure_size {
         window.size = size;
         // Asks the client for this rectangle. A size already asked for sends
@@ -261,12 +271,14 @@ fn place(state: &mut Crab, id: WindowId, rect: Rect, configure_size: bool, visib
         // client; a rectangle the client cannot be (its hints) asks for the
         // size it can.
         window.configure_to(size);
+        awaits_configure = window.awaits_configure();
     }
     if animate {
         window.animate_to(rect, kind, &clocks);
     } else {
         window.snap_visual_to(rect);
     }
+    awaits_configure
 }
 
 /// Places a floating window at its remembered geometry (cascading a new one).

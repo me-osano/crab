@@ -13,8 +13,11 @@
 //! read. No background thread, socket path, or `XDG_RUNTIME_DIR` is needed.
 
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use crab::core::{ColumnWidth, LayoutCommand, SpaceSet, WindowHeight};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
@@ -22,12 +25,15 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::Res
 use smithay::reexports::wayland_server::Display;
 use smithay::utils::Transform;
 use wayland_client::backend::WaylandError;
-use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use super::*;
+use crate::compositor::transaction::TIME_LIMIT;
 
 /// Client-side state: the bound globals and the last configure serial per
 /// `xdg_surface`, so configures can be acknowledged.
@@ -37,6 +43,7 @@ struct TestClient {
     registry: Option<wl_registry::WlRegistry>,
     compositor: Option<wl_compositor::WlCompositor>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
+    shm: Option<wl_shm::WlShm>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     /// Configure serials arriving before the client's dispatch for the
     /// `xdg_surface` that must acknowledge them.
@@ -84,6 +91,9 @@ struct Harness {
     queue: EventQueue<TestClient>,
     client: TestClient,
     outputs: [OutputId; 2],
+    /// A clock ahead of wall time, so a test can flush the configure throttle
+    /// without sleeping.
+    test_clock: Instant,
 }
 
 impl Harness {
@@ -133,6 +143,7 @@ impl Harness {
                 ..TestClient::default()
             },
             outputs,
+            test_clock: Instant::now(),
         };
         // The registry round trip binds the globals; the second pump lets the
         // server process those bind requests.
@@ -280,6 +291,71 @@ impl Harness {
             .expect("the scenario window exists")
             .rect()
     }
+
+    /// Creates an shm buffer of `width`x`height` for a client commit.
+    fn create_buffer(&mut self, width: i32, height: i32) -> wl_buffer::WlBuffer {
+        let shm = self.client.shm.clone().expect("wl_shm was bound");
+        let qh = self.queue.handle();
+        let width = width.max(1);
+        let height = height.max(1);
+        let stride = width * 4;
+        let size = stride * height;
+        // Tests run in parallel, so the name must be unique across the whole
+        // process, not just this harness.
+        static NEXT_SHM: AtomicU32 = AtomicU32::new(0);
+        let path = format!(
+            "/dev/shm/crab-test-{}-{}",
+            std::process::id(),
+            NEXT_SHM.fetch_add(1, Ordering::Relaxed)
+        );
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create the test shm file");
+        file.set_len(u64::try_from(size).expect("a positive shm size"))
+            .expect("size the test shm file");
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer =
+            pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, &qh, ());
+        let _ = std::fs::remove_file(&path);
+        buffer
+    }
+
+    /// Sends every throttled configure by advancing a test-only clock.
+    ///
+    /// The clock is anchored to wall time so a configure that production code
+    /// timestamped with `Instant::now()` is always older than it, then moved
+    /// past the throttle window. Without that, the first flush could land
+    /// before a configure sent during test setup and leave it pending.
+    fn flush_configures(&mut self) {
+        self.test_clock =
+            self.test_clock.max(Instant::now()) + MIN_CONFIGURE_INTERVAL + Duration::from_millis(1);
+        let now = self.test_clock;
+        for window in &mut self.state.windows {
+            window.flush_configure(now);
+        }
+        self.pump();
+    }
+
+    /// Commits a buffer at the size the layout asked for, as a real client
+    /// does after acknowledging a configure.
+    fn commit_configure(&mut self, id: WindowId, toplevel: &ClientToplevel) {
+        // A configure inside the throttle window is still pending; a real
+        // client would only see it after the frame boundary.
+        self.flush_configures();
+        let size = self
+            .state
+            .window(id)
+            .and_then(|window| window.configure.asked())
+            .expect("the window has been configured");
+        let buffer = self.create_buffer(size.w, size.h);
+        toplevel.surface.attach(Some(&buffer), 0, 0);
+        toplevel.surface.damage_buffer(0, 0, size.w, size.h);
+        toplevel.surface.commit();
+        self.pump();
+    }
 }
 
 /// Registers one output with a mode and a logical model rectangle.
@@ -331,6 +407,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for TestClient {
             }
             "xdg_wm_base" => {
                 state.wm_base = Some(registry.bind(name, version.min(6), qh, ()));
+            }
+            "wl_shm" => {
+                state.shm = Some(registry.bind(name, version.min(1), qh, ()));
             }
             "zwlr_layer_shell_v1" => {
                 state.layer_shell = Some(registry.bind(name, version.min(4), qh, ()));
@@ -433,6 +512,13 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for TestClient {
         }
     }
 }
+
+// The shm objects have no events the test cares about. The compositor still
+// needs the buffer commit to reach `on_commit`, which is what the transaction
+// tests watch.
+delegate_noop!(TestClient: ignore wl_shm::WlShm);
+delegate_noop!(TestClient: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(TestClient: ignore wl_buffer::WlBuffer);
 
 #[test]
 fn closing_a_window_on_a_background_output_compacts_only_that_output() {
@@ -877,5 +963,87 @@ fn closing_the_focused_window_hands_focus_to_a_survivor_on_its_output() {
     assert_eq!(
         h.state.outputs[&right].model.view.visible,
         SpaceSet::SPACE_1
+    );
+}
+
+#[test]
+fn two_clients_commit_before_a_resize_is_presented() {
+    let mut config = Config::default();
+    config.animations.enabled = false;
+    let mut h = Harness::new(config);
+    let [left, _right] = h.outputs;
+
+    h.focus(left);
+    let (first, first_client) = h.create_toplevel();
+    let (second, second_client) = h.create_toplevel();
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+
+    // Let the initial layout settle: both clients commit the size the layout
+    // asked for, as a real client does after acknowledging its configure.
+    h.commit_configure(first, &first_client);
+    h.commit_configure(second, &second_client);
+    assert!(h.state.can_present_frame(), "the initial layout is settled");
+
+    // A resize changes both windows. Presenting now would mix their old and
+    // new buffers, so the frame is held until both have committed.
+    h.state.set_output_size(left, (1600, 900).into());
+    assert!(
+        !h.state.can_present_frame(),
+        "the resize is not presented before the clients answer"
+    );
+    assert!(
+        h.state.is_animating(),
+        "the redraw loop keeps running so the commits and deadline can arrive"
+    );
+
+    h.commit_configure(first, &first_client);
+    assert!(
+        !h.state.can_present_frame(),
+        "one client is still on its old buffer"
+    );
+
+    h.commit_configure(second, &second_client);
+    assert!(
+        h.state.can_present_frame(),
+        "both commits released the frame"
+    );
+}
+
+#[test]
+fn a_client_that_ignores_configure_does_not_hold_the_frame_past_the_deadline() {
+    let mut config = Config::default();
+    config.animations.enabled = false;
+    let mut h = Harness::new(config);
+    let [left, _right] = h.outputs;
+
+    h.focus(left);
+    let (first, first_client) = h.create_toplevel();
+    let (second, second_client) = h.create_toplevel();
+    h.map_toplevel(first);
+    h.map_toplevel(second);
+    h.commit_configure(first, &first_client);
+    h.commit_configure(second, &second_client);
+
+    h.state.set_output_size(left, (1600, 900).into());
+    h.commit_configure(first, &first_client);
+    assert!(
+        !h.state.can_present_frame(),
+        "the second client has not committed yet"
+    );
+
+    // The deadline is what keeps one unresponsive client from freezing the
+    // session: the frame presents the state that has been committed.
+    let expired = h.state.transactions.expire(Instant::now() + TIME_LIMIT);
+    assert_eq!(expired, 1, "the laggard's transaction was released");
+    assert!(
+        h.state.can_present_frame(),
+        "the committed state is presented at the deadline"
+    );
+    assert!(
+        h.state
+            .window(second)
+            .is_some_and(ManagedWindow::awaits_configure),
+        "the laggard is still behind and the WindowFit fallback draws it"
     );
 }
