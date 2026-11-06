@@ -811,6 +811,15 @@ snapshot/epoch state for a coherent reconnect.
   event;
 - backpressure metrics/logs.
 
+**Status (2026-11-06): done.** Each client owns an `Outbound` queue of complete
+JSON lines capped at `MAX_OUTBOUND_BYTES` (256 KiB). A nonblocking partial write
+keeps the unwritten suffix queued and the backend retries it on a short timer, so
+a line is never cut. A client that exceeds the cap is marked lagging, stops
+receiving new events, and is closed only after the already-queued lines drain; a
+broken socket closes immediately. The per-client `Snapshot` is still the first
+event of a subscription. Tests cover partial writes, a 1,000-event burst staying
+under the cap with only whole lines queued, and the full initial snapshot.
+
 **Acceptance:** a burst of 1,000 window events uses bounded per-client memory;
 a deliberately slow reader is disconnected only at an event boundary with a
 warning; a reconnecting subscriber gets a coherent initial snapshot; no

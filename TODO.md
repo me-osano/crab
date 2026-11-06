@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-11-06):** 356 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-11-06):** 359 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -559,9 +559,10 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
 - [x] Event stream: `KeyboardLayoutChanged`, `ConfigReloaded`, `ConfigError`.
 - [x] Robust parsing: malformed requests, unknown fields, and unknown event
       names never crash the compositor or the CLI.
-- [ ] Bounded per-client event queues and per-domain snapshot state; disconnect a
+- [x] Bounded per-client event queues and per-domain snapshot state; disconnect a
       slow reader only at a whole-event boundary, never mid-line. [IMPROV B36]
-      *(niri `ipc/server.rs`, `EventStreamState`)*
+      *(Queues hold whole JSON lines, retry partial writes, and cap per-client
+      memory; a lagging client closes after its queued lines drain.)*
 - [ ] Richer queries: `Layers`, `KeyboardLayouts`, `FocusedOutput`;
       `PickWindow`/`PickColor` deferred until an interaction mode exists. [IMPROV B37]
 - [ ] Runtime output configuration over IPC (`Output { output, action }`),
@@ -789,7 +790,7 @@ Goal: native HDR games/video **and** HDR screen capture look correct. GLES only.
 - [ ] One focus function updates keyboard focus, activation, borders, and IPC together; `focused_output` is distinct from the fallback output. [C5]
 - [ ] Effects are modular, feature-gated, per-rule overridable, and never break direct scanout.
 - [ ] Protocol handlers degrade gracefully; malformed client input never panics.
-- [ ] IPC schema is versioned and additive-only within a major; `Action` names identical between binds and IPC; slow subscribers are disconnected only at whole-event boundaries. [B36]
+- [x] IPC schema is versioned and additive-only within a major; `Action` names identical between binds and IPC; slow subscribers are disconnected only at whole-event boundaries. [B36]
 - [ ] Perf targets in `COMPOSITOR.md` §20 / `ROADMAP.md` §9 hold; regressions block merges once benchmarks exist.
 - [ ] Docs current: ADRs, config/IPC references, protocol table, `crawl-shell` integration matrix.
 - [ ] Borrowed niri code is tracked in `IMPROV.md`, attributed per file, and checked against Smithay `0.7.0` (no git-only APIs).

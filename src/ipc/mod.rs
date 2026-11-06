@@ -33,6 +33,13 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Chunk size for a nonblocking read.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// Largest amount of outbound data a client may fall behind by.
+///
+/// The queue holds whole JSON lines, so this bounds per-client memory without
+/// ever cutting a message in half. A client that exceeds it is closed once the
+/// already-queued lines have drained (an event boundary).
+const MAX_OUTBOUND_BYTES: usize = 256 * 1024;
+
 /// A bound IPC server.
 pub(crate) struct Server {
     path: PathBuf,
@@ -48,7 +55,117 @@ struct Client {
     read_buf: Vec<u8>,
     subscribed: bool,
     snapshot: Option<Snapshot>,
-    dead: bool,
+    out: Outbound,
+    /// The connection is being closed once its queued whole lines drain.
+    closing: bool,
+}
+
+/// A bounded, per-client outbound queue.
+///
+/// Every message is serialized into a complete JSON line before it is queued, so
+/// a partial socket write can only split a line *inside* this buffer: the
+/// unwritten remainder stays here and is flushed on a later turn. When the
+/// queue exceeds [`MAX_OUTBOUND_BYTES`] the client is marked lagging, no further
+/// events are accepted, and it is closed once the queued lines have drained —
+/// never in the middle of one.
+#[derive(Default)]
+struct Outbound {
+    /// Whole JSON lines that have not reached the socket yet.
+    bytes: Vec<u8>,
+    /// How many bytes of `bytes` the kernel has accepted.
+    sent: usize,
+    /// The client fell too far behind; stop accepting new events.
+    lagging: bool,
+    /// The socket failed; close without trying to drain.
+    broken: bool,
+}
+
+impl Outbound {
+    /// Queues one complete JSON line, returning `false` if it was rejected.
+    fn enqueue<T: serde::Serialize>(&mut self, value: &T) -> bool {
+        if self.lagging || self.broken {
+            return false;
+        }
+        let mut line = match serde_json::to_vec(value) {
+            Ok(line) => line,
+            Err(err) => {
+                tracing::error!(?err, "failed to encode an IPC message");
+                self.broken = true;
+                return false;
+            }
+        };
+        line.push(b'\n');
+        if self.bytes.len() - self.sent + line.len() > MAX_OUTBOUND_BYTES {
+            tracing::warn!(
+                queued = self.bytes.len() - self.sent,
+                limit = MAX_OUTBOUND_BYTES,
+                "IPC client fell behind; closing at the next event boundary"
+            );
+            self.lagging = true;
+            return false;
+        }
+        self.bytes.extend_from_slice(&line);
+        true
+    }
+
+    /// Writes as much of the queue as the socket accepts.
+    ///
+    /// A `WouldBlock` leaves the unwritten suffix queued; it is never discarded,
+    /// so the client always sees whole lines.
+    fn flush<W: Write>(&mut self, writer: &mut W) {
+        while self.sent < self.bytes.len() {
+            match writer.write(&self.bytes[self.sent..]) {
+                Ok(0) => {
+                    self.broken = true;
+                    break;
+                }
+                Ok(written) => self.sent += written,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    tracing::debug!(?err, "failed to write an IPC message");
+                    self.broken = true;
+                    break;
+                }
+            }
+        }
+        if self.sent == self.bytes.len() {
+            self.bytes.clear();
+            self.sent = 0;
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        !self.bytes.is_empty()
+    }
+
+    /// Whether the connection can be dropped: broken, or lagging with every
+    /// accepted whole line already written.
+    fn may_close(&self) -> bool {
+        self.broken || (self.lagging && !self.is_pending())
+    }
+
+    fn is_usable(&self) -> bool {
+        !self.lagging && !self.broken
+    }
+}
+
+impl Client {
+    /// Queues one message and tries to flush it, returning `false` if the client
+    /// can no longer be written to.
+    fn send<T: serde::Serialize>(&mut self, value: &T) -> bool {
+        if !self.out.enqueue(value) {
+            return false;
+        }
+        self.out.flush(&mut self.writer);
+        self.out.is_usable()
+    }
+
+    /// Whether the connection can be dropped: broken, or closing/lagging with
+    /// every accepted whole line already written.
+    fn may_close(&self) -> bool {
+        self.out.may_close() || (self.closing && !self.out.is_pending())
+    }
 }
 
 /// What the calloop source should do after a client event.
@@ -179,7 +296,8 @@ impl Server {
                             read_buf: Vec::new(),
                             subscribed: false,
                             snapshot: None,
-                            dead: false,
+                            out: Outbound::default(),
+                            closing: false,
                         },
                     );
                     accepted.push((id, reader));
@@ -209,7 +327,12 @@ impl Server {
             };
         };
         let outcome = self.client_event_owned(&mut client, reader, state);
-        if outcome.keep {
+        if !outcome.keep {
+            client.closing = true;
+        }
+        // A closing client loses its read source but stays in the map until the
+        // whole lines it already accepted have drained.
+        if !client.out.broken && (outcome.keep || client.out.is_pending()) {
             self.clients.insert(id, client);
         }
         self.sync(state);
@@ -222,6 +345,14 @@ impl Server {
         reader: &UnixStream,
         state: &mut Crab,
     ) -> ClientOutcome {
+        // Finish anything queued before reading more requests.
+        client.out.flush(&mut client.writer);
+        if client.closing || !client.out.is_usable() {
+            return ClientOutcome {
+                keep: false,
+                redraw: false,
+            };
+        }
         let mut reader = reader;
         let mut chunk = [0u8; READ_CHUNK];
         let mut eof = false;
@@ -237,12 +368,9 @@ impl Server {
                 Ok(n) => {
                     client.read_buf.extend_from_slice(&chunk[..n]);
                     if client.read_buf.len() > MAX_LINE_BYTES {
-                        let _ = write_response(
-                            &mut client.writer,
-                            &Response::Error {
-                                message: format!("request line exceeds {MAX_LINE_BYTES} bytes"),
-                            },
-                        );
+                        let _ = client.send(&Response::Error {
+                            message: format!("request line exceeds {MAX_LINE_BYTES} bytes"),
+                        });
                         return ClientOutcome {
                             keep: false,
                             redraw: false,
@@ -270,12 +398,9 @@ impl Server {
                 continue;
             }
             if line.len() > MAX_LINE_BYTES {
-                if !write_response(
-                    &mut client.writer,
-                    &Response::Error {
-                        message: format!("request line exceeds {MAX_LINE_BYTES} bytes"),
-                    },
-                ) {
+                if !client.send(&Response::Error {
+                    message: format!("request line exceeds {MAX_LINE_BYTES} bytes"),
+                }) {
                     return ClientOutcome {
                         keep: false,
                         redraw,
@@ -284,12 +409,9 @@ impl Server {
                 continue;
             }
             let Ok(text) = std::str::from_utf8(line) else {
-                if !write_response(
-                    &mut client.writer,
-                    &Response::Error {
-                        message: "request is not valid UTF-8".to_owned(),
-                    },
-                ) {
+                if !client.send(&Response::Error {
+                    message: "request is not valid UTF-8".to_owned(),
+                }) {
                     return ClientOutcome {
                         keep: false,
                         redraw,
@@ -300,12 +422,9 @@ impl Server {
             let request = match serde_json::from_str::<Request>(text) {
                 Ok(request) => request,
                 Err(err) => {
-                    if !write_response(
-                        &mut client.writer,
-                        &Response::Error {
-                            message: format!("invalid request: {err}"),
-                        },
-                    ) {
+                    if !client.send(&Response::Error {
+                        message: format!("invalid request: {err}"),
+                    }) {
                         return ClientOutcome {
                             keep: false,
                             redraw,
@@ -317,12 +436,9 @@ impl Server {
 
             if matches!(request, Request::Subscribe) {
                 if client.subscribed {
-                    if !write_response(
-                        &mut client.writer,
-                        &Response::Error {
-                            message: "connection is already subscribed".to_owned(),
-                        },
-                    ) {
+                    if !client.send(&Response::Error {
+                        message: "connection is already subscribed".to_owned(),
+                    }) {
                         return ClientOutcome {
                             keep: false,
                             redraw,
@@ -331,7 +447,7 @@ impl Server {
                     continue;
                 }
                 let snapshot = Snapshot::of(state);
-                if !write_event(&mut client.writer, &snapshot.event()) {
+                if !client.send(&snapshot.event()) {
                     return ClientOutcome {
                         keep: false,
                         redraw,
@@ -345,13 +461,11 @@ impl Server {
             if client.subscribed
                 && !matches!(request, Request::ConfigReload | Request::ConfigValidate)
             {
-                if !write_response(
-                    &mut client.writer,
-                    &Response::Error {
-                        message: "a subscribed connection is event-only; use another connection to dispatch"
+                if !client.send(&Response::Error {
+                    message:
+                        "a subscribed connection is event-only; use another connection to dispatch"
                             .to_owned(),
-                    },
-                ) {
+                }) {
                     return ClientOutcome {
                         keep: false,
                         redraw,
@@ -361,7 +475,7 @@ impl Server {
             }
 
             let (response, changed) = respond(request, state);
-            if !write_response(&mut client.writer, &response) {
+            if !client.send(&response) {
                 return ClientOutcome {
                     keep: false,
                     redraw,
@@ -370,41 +484,63 @@ impl Server {
             redraw |= changed;
         }
 
+        client.out.flush(&mut client.writer);
         ClientOutcome {
-            keep: !client.dead && !eof,
+            keep: !eof && client.out.is_usable(),
             redraw,
         }
+    }
+
+    /// Writes whatever is queued for every client.
+    ///
+    /// A partial nonblocking write leaves the rest of the queue in place, so the
+    /// backend schedules another attempt instead of dropping a client in the
+    /// middle of a line.
+    pub(crate) fn flush_pending(&mut self) {
+        for client in self.clients.values_mut() {
+            if client.out.is_pending() {
+                client.out.flush(&mut client.writer);
+            }
+        }
+        self.clients.retain(|_, client| !client.may_close());
+    }
+
+    /// Whether any client still has queued bytes to write.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.clients.values().any(|client| client.out.is_pending())
     }
 
     /// Sends the deltas between each subscriber's last snapshot and the current
     /// state. Called once per event-loop turn, after all sources have run.
     pub(crate) fn sync(&mut self, state: &Crab) {
+        self.flush_pending();
         if !self
             .clients
             .values()
-            .any(|client| client.subscribed && !client.dead)
+            .any(|client| client.subscribed && client.out.is_usable())
         {
             return;
         }
         let next = Snapshot::of(state);
         for client in self.clients.values_mut() {
-            if !client.subscribed || client.dead {
+            if !client.subscribed || !client.out.is_usable() {
                 continue;
             }
             let Some(previous) = &client.snapshot else {
                 continue;
             };
+            let mut sent = true;
             for event in diff(previous, &next) {
-                if !write_event(&mut client.writer, &event) {
-                    client.dead = true;
+                if !client.send(&event) {
+                    sent = false;
                     break;
                 }
             }
-            if !client.dead {
+            if sent && client.out.is_usable() {
                 client.snapshot = Some(next.clone());
             }
         }
-        self.clients.retain(|_, client| !client.dead);
+        self.clients.retain(|_, client| !client.may_close());
     }
 }
 
@@ -770,36 +906,6 @@ fn only_focus_changed(old: &WindowInfo, new: &WindowInfo) -> bool {
     old == new
 }
 
-fn write_response(writer: &mut UnixStream, response: &Response) -> bool {
-    write_json_line(writer, response)
-}
-
-fn write_event(writer: &mut UnixStream, event: &Event) -> bool {
-    write_json_line(writer, event)
-}
-
-fn write_json_line<T: serde::Serialize>(writer: &mut UnixStream, value: &T) -> bool {
-    let mut bytes = match serde_json::to_vec(value) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            tracing::error!(?err, "failed to encode an IPC message");
-            return false;
-        }
-    };
-    bytes.push(b'\n');
-    match writer.write_all(&bytes) {
-        Ok(()) => true,
-        Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            tracing::debug!("dropping an IPC client that stopped reading");
-            false
-        }
-        Err(err) => {
-            tracing::debug!(?err, "failed to write an IPC message");
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,5 +1079,120 @@ mod tests {
                 Event::WindowFocused { id: None }
             ]
         );
+    }
+
+    /// A writer that accepts at most `capacity` bytes per call, then reports
+    /// `WouldBlock` until the test replenishes it.
+    struct ChunkedWriter {
+        bytes: Vec<u8>,
+        capacity: usize,
+    }
+
+    impl Write for ChunkedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.capacity == 0 {
+                return Err(std::io::Error::from(ErrorKind::WouldBlock));
+            }
+            let written = buf.len().min(self.capacity);
+            self.bytes.extend_from_slice(&buf[..written]);
+            self.capacity -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn queued_lines_survive_partial_writes() {
+        let mut out = Outbound::default();
+        assert!(out.enqueue(&Event::WindowFocused { id: Some(7) }));
+        assert!(out.enqueue(&Event::WindowFocused { id: None }));
+        let queued = out.bytes.clone();
+
+        let mut writer = ChunkedWriter {
+            bytes: Vec::new(),
+            capacity: 3,
+        };
+        while out.is_pending() {
+            out.flush(&mut writer);
+            writer.capacity = 5;
+        }
+
+        assert_eq!(writer.bytes, queued, "no queued byte is dropped");
+        assert!(writer.bytes.ends_with(b"\n"));
+        let lines: Vec<&[u8]> = writer
+            .bytes
+            .split(|&byte| byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            serde_json::from_slice::<serde_json::Value>(line).expect("every line is whole JSON");
+        }
+    }
+
+    #[test]
+    fn a_burst_keeps_the_outbound_queue_bounded_and_whole() {
+        let mut out = Outbound::default();
+        let mut accepted = 0;
+        for id in 0..1_000 {
+            let mut window = window(id, false);
+            window.title = "x".repeat(1024);
+            if !out.enqueue(&Event::WindowOpened { window }) {
+                break;
+            }
+            accepted += 1;
+        }
+
+        assert!(accepted < 1_000, "the burst must hit the bound");
+        assert!(out.lagging);
+        assert!(out.bytes.len() <= MAX_OUTBOUND_BYTES);
+        assert!(
+            !out.may_close(),
+            "the client closes only after the queued whole lines drain"
+        );
+        for line in out
+            .bytes
+            .split(|&byte| byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            serde_json::from_slice::<serde_json::Value>(line)
+                .expect("a lagging client still has only whole lines queued");
+        }
+
+        let mut writer = Vec::new();
+        out.flush(&mut writer);
+        assert!(!out.is_pending());
+        assert!(out.may_close());
+        assert!(writer.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn a_new_subscription_starts_with_a_full_snapshot() {
+        let snapshot = snapshot(
+            vec![output(1, &[1], "tile")],
+            vec![window(9, true)],
+            Some(9),
+        );
+        match snapshot.event() {
+            Event::Snapshot {
+                outputs,
+                spaces,
+                windows,
+                focused,
+                keyboard_layout,
+                config_error,
+            } => {
+                assert_eq!(outputs, snapshot.outputs);
+                assert_eq!(spaces, snapshot.spaces);
+                assert_eq!(windows, snapshot.windows);
+                assert_eq!(focused, snapshot.focused);
+                assert_eq!(keyboard_layout, snapshot.keyboard_layout);
+                assert_eq!(config_error, snapshot.config_error);
+            }
+            _ => panic!("a new subscription must start with a full snapshot"),
+        }
     }
 }

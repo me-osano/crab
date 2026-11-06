@@ -45,6 +45,8 @@ struct LoopData {
     socket: ListeningSocket,
     /// `None` when no runtime directory is available; the compositor still runs.
     ipc: Option<ipc::Server>,
+    /// Whether a retry timer is already waiting to flush queued IPC output.
+    flush_scheduled: bool,
     #[allow(dead_code)]
     config_watcher: Option<RecommendedWatcher>,
     #[allow(dead_code)]
@@ -363,6 +365,7 @@ pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Re
         backend,
         socket,
         ipc,
+        flush_scheduled: false,
         config_watcher,
         reload_generation: 0,
         pending_reload_gen: 0,
@@ -398,6 +401,7 @@ pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Re
         .map_err(|err| anyhow::anyhow!("insert config reload channel: {err:?}"))?;
 
     let run_signal = Rc::clone(&signal);
+    let flush_handle = event_loop.handle();
     event_loop
         .run(None, &mut data, |data| {
             if let Err(err) = data.display.flush_clients() {
@@ -405,6 +409,22 @@ pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Re
             }
             if let Some(ipc) = &mut data.ipc {
                 ipc.sync(&data.state);
+                // A nonblocking write may leave a suffix queued. Retry shortly
+                // instead of dropping the client in the middle of a line.
+                if ipc.has_pending() && !data.flush_scheduled {
+                    data.flush_scheduled = true;
+                    let handle = flush_handle.clone();
+                    let _ = handle.insert_source(
+                        Timer::from_duration(Duration::from_millis(10)),
+                        |_, _, data: &mut LoopData| {
+                            data.flush_scheduled = false;
+                            if let Some(ipc) = &mut data.ipc {
+                                ipc.flush_pending();
+                            }
+                            TimeoutAction::Drop
+                        },
+                    );
+                }
             }
             if data.state.quit_requested {
                 run_signal.stop();
