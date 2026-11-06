@@ -176,6 +176,13 @@ pub fn run(config: &Config, config_path: Option<&std::path::Path>) -> anyhow::Re
                         }
                     }
                 }
+                WinitEvent::Focus(false) => {
+                    // The nested compositor no longer owns the keyboard, so no
+                    // key or button release will arrive. Forget the held state
+                    // and run any release binds so they do not stay latched.
+                    data.state.release_held_inputs();
+                    request_redraw(data);
+                }
                 WinitEvent::Input(event) => {
                     input::handle(&mut data.state, event);
                     request_redraw(data);

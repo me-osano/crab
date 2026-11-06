@@ -112,6 +112,10 @@ fn keyboard<B: InputBackend>(state: &mut Crab, event: B::KeyboardKeyEvent) {
 
             match key_state {
                 KeyState::Pressed => {
+                    // A new press means any release-only bind armed by a key
+                    // whose release never arrived is stale. Press binds stay
+                    // armed so their release is still swallowed.
+                    state.cancel_interrupted_release_binds();
                     // A key still held from an earlier press is key repeat.
                     // Re-fire only when the bind opted into it, and always
                     // treat the repeat exactly like the original press.

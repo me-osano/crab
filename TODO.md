@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-11-06):** 353 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-11-06):** 356 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -516,8 +516,10 @@ never crashes. (Design: `COMPOSITOR.md` §13, §14.)
       binds; `Mod` remap.
 - [ ] Per-device `device_rule` (by name/type); xkb/input blocks from §5.1.
 - [ ] **Hotkey overlay** listing active binds.
-- [ ] Clear `bound_keys`/`bound_buttons` on focus change, grab begin/end, output
-      focus change, and session pause; cancel interrupted release binds. [IMPROV B35]
+- [x] Clear `bound_keys`/`bound_buttons` on focus change, grab begin/end, output
+      focus change, and session pause; cancel interrupted release binds.
+      *(State hooks and winit focus-loss wiring are in; the tty backend calls
+      `release_held_inputs` on session pause once its event loop lands.)* [IMPROV B35]
 
 ### 5.4 Rules (`COMPOSITOR.md` §13.4)
 - [x] Parse `[window_rule]` / `[[window_rule]]`: `app_id`, `open_floating`, `width`,

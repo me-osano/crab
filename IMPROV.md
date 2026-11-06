@@ -771,6 +771,16 @@ the next press is treated as a repeat and swallowed with stale flags.
 change, grab begin/end, output focus change, and session pause; add a
 `cancel_interrupted_release_binds` equivalent.
 
+**Status (2026-11-06): done.** `Crab::cancel_interrupted_release_binds` keeps
+press binds (so their release is still swallowed) and drops release-only binds
+whose release was interrupted. It runs on a new key press, window/layer focus
+changes, interaction end, and output-focus changes. `Crab::release_held_inputs`
+drains every held key and button, runs the pending release actions, and clears
+both tables; the winit backend calls it on `WinitEvent::Focus(false)`. The tty
+backend will call it from its session-pause handler once the event loop lands.
+Tests cover press-vs-release retention and that release actions run while press
+actions do not.
+
 **Priority:** P2 · **Effort:** S · **Depends on:** none.
 
 ---

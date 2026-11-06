@@ -55,6 +55,7 @@ use smithay::wayland::shm::ShmState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 
+use crate::compositor::actions;
 use crate::compositor::binds::{
     Action, AxisBindTable, BindIssue, BindTable, BoundAction, CompiledBinds, GestureBindTable,
     ModeBinds, MouseBindTable,
@@ -1915,6 +1916,7 @@ impl Crab {
         }
         if self.focused_output == id {
             self.focused_output = target;
+            self.cancel_interrupted_release_binds();
         }
         if self.fallback_output == id {
             // The session's original monitor is gone; the current one becomes
@@ -3322,6 +3324,38 @@ impl Crab {
         self.focus.window().filter(|id| self.window(*id).is_some())
     }
 
+    /// Drops release-only bind state whose matching release was interrupted.
+    ///
+    /// A release bind is armed on press and fires on the key's release. If the
+    /// release never arrives (focus moved, a grab took over, or the session lost
+    /// the keyboard), the stale entry would swallow the next press as a repeat.
+    /// Press binds stay armed: their entry exists to swallow the release, and
+    /// [`Self::release_held_inputs`] clears them when the keyboard is lost
+    /// outright.
+    pub(crate) fn cancel_interrupted_release_binds(&mut self) {
+        self.bound_keys.retain(|_, bound| bound.action.is_some());
+    }
+
+    /// Forgets every held key and button because their releases will never
+    /// arrive.
+    ///
+    /// Release actions still run, so a release bind does not stay latched; press
+    /// actions are not re-run. Called when the compositor loses the keyboard
+    /// (winit focus loss, VT switch, or session pause).
+    pub(crate) fn release_held_inputs(&mut self) {
+        let releases: Vec<Action> = self
+            .bound_keys
+            .drain()
+            .filter_map(|(_, bound)| bound.release_action)
+            .collect();
+        self.bound_buttons.clear();
+        for action in releases {
+            if let Err(reason) = actions::apply(self, action) {
+                tracing::warn!(%reason, "release bind action failed");
+            }
+        }
+    }
+
     /// Every visible window on `output` in bottom-to-top painting order.
     ///
     /// Tiled and covering windows keep their window-list order. Floating windows
@@ -3354,6 +3388,8 @@ impl Crab {
         {
             return;
         }
+        // A pending release bind belonged to the focus that is going away.
+        self.cancel_interrupted_release_binds();
         // Keyboard focus follows the window's output, so space actions and
         // rendering target the monitor the user just interacted with. Do this
         // before looking for an exclusive layer: that layer belongs to the
@@ -3402,6 +3438,7 @@ impl Crab {
             return false;
         };
 
+        self.cancel_interrupted_release_binds();
         if self.focus == FocusTarget::LayerSurface(id) {
             self.focused_output = output;
             return true;
@@ -3509,6 +3546,9 @@ impl Crab {
         // focus here first lets the exclusive-layer and hit-test checks below
         // run against the output the user actually clicked.
         if let Some(output) = self.output_at(position) {
+            if output != self.focused_output {
+                self.cancel_interrupted_release_binds();
+            }
             self.focused_output = output;
         }
         if let Some(id) = self.exclusive_layer() {
@@ -4080,6 +4120,7 @@ impl Crab {
             return None;
         }
         self.interaction = None;
+        self.cancel_interrupted_release_binds();
         self.relayout();
         Some(interaction)
     }

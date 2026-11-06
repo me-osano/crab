@@ -1353,3 +1353,77 @@ fn arranging_a_non_scroll_space_preserves_its_remembered_scroll_state() {
         "taking the scroll state out for arrange must not reset it"
     );
 }
+
+#[test]
+fn cancelling_interrupted_binds_keeps_press_binds_and_drops_release_binds() {
+    let mut h = Harness::new(Config::default());
+    h.state.bound_keys.insert(
+        30,
+        BoundKey {
+            action: Some(Action::Quit),
+            release_action: None,
+            forwarded: false,
+            repeat: false,
+        },
+    );
+    h.state.bound_keys.insert(
+        31,
+        BoundKey {
+            action: None,
+            release_action: Some(Action::Quit),
+            forwarded: false,
+            repeat: false,
+        },
+    );
+
+    h.state.cancel_interrupted_release_binds();
+
+    assert!(
+        h.state.bound_keys.contains_key(&30),
+        "a press bind stays armed so its release is still swallowed"
+    );
+    assert!(
+        !h.state.bound_keys.contains_key(&31),
+        "a release-only bind whose release was lost is dropped"
+    );
+}
+
+#[test]
+fn releasing_held_inputs_does_not_run_press_binds_but_clears_the_tables() {
+    let mut h = Harness::new(Config::default());
+    h.state.bound_keys.insert(
+        30,
+        BoundKey {
+            action: Some(Action::Quit),
+            release_action: None,
+            forwarded: false,
+            repeat: false,
+        },
+    );
+    h.state.bound_buttons.insert(0x110);
+
+    h.state.release_held_inputs();
+
+    assert!(!h.state.quit_requested, "a press action is not re-run");
+    assert!(h.state.bound_keys.is_empty());
+    assert!(h.state.bound_buttons.is_empty());
+}
+
+#[test]
+fn releasing_held_inputs_runs_release_binds() {
+    let mut h = Harness::new(Config::default());
+    h.state.bound_keys.insert(
+        31,
+        BoundKey {
+            action: None,
+            release_action: Some(Action::Quit),
+            forwarded: false,
+            repeat: false,
+        },
+    );
+
+    h.state.release_held_inputs();
+
+    assert!(h.state.quit_requested, "the release action still runs");
+    assert!(h.state.bound_keys.is_empty());
+}
