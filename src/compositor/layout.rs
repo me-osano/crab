@@ -73,7 +73,7 @@ pub(crate) fn arrange(state: &mut Crab, output: OutputId) -> Vec<WindowId> {
     // on it is handled by the floating pass below. This is what makes
     // `layout = "floating"` behave like floating even for windows that are not
     // individually floated (`COMPOSITOR.md` §7.3).
-    let (kind, params, mut scroll) = current_layout(state, output);
+    let (kind, params, mut scroll) = take_layout(state, output);
     let free = kind.is_free();
     let tiled = if free {
         Vec::new()
@@ -216,11 +216,12 @@ fn tiled_windows(state: &Crab, output: OutputId, view: SpaceSet) -> Vec<LayoutWi
         .collect()
 }
 
-/// The current space's layout, parameters, and scroll state (copied out so the
-/// layout call does not borrow `state`).
+/// The current space's layout, parameters, and scroll state, copied out for
+/// read-only callers such as [`directional_target`].
 ///
 /// The scroll state is cloned rather than copied — it owns the scroller's
-/// columns — and written back after the arrange.
+/// columns. [`arrange`] instead uses [`take_layout`] so the per-frame path does
+/// not allocate.
 fn current_layout(state: &Crab, output: OutputId) -> (LayoutKind, LayoutParams, ScrollState) {
     state
         .outputs
@@ -235,6 +236,35 @@ fn current_layout(state: &Crab, output: OutputId) -> (LayoutKind, LayoutParams, 
                 )
             },
             |space| (space.layout, space.params, space.scroll.clone()),
+        )
+}
+
+/// Moves the current space's layout, parameters, and scroll state out of
+/// `state`, so [`arrange`] can borrow the state mutably without cloning the
+/// scroller's columns.
+///
+/// The caller must write the returned scroll state back; [`arrange`] does so
+/// after the layout has updated the offset.
+fn take_layout(state: &mut Crab, output: OutputId) -> (LayoutKind, LayoutParams, ScrollState) {
+    state
+        .outputs
+        .get_mut(&output)
+        .and_then(|runtime| runtime.model.current_space_state_mut())
+        .map_or_else(
+            || {
+                (
+                    LayoutKind::default(),
+                    LayoutParams::default(),
+                    ScrollState::default(),
+                )
+            },
+            |space| {
+                (
+                    space.layout,
+                    space.params,
+                    core::mem::take(&mut space.scroll),
+                )
+            },
         )
 }
 

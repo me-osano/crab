@@ -1333,3 +1333,23 @@ fn parked_spaces_survive_their_host_output_being_unplugged_too() {
     );
     assert_eq!(h.state.outputs[&right].model.space_states[0].home, None);
 }
+
+#[test]
+fn arranging_a_non_scroll_space_preserves_its_remembered_scroll_state() {
+    let mut h = Harness::new(Config::default());
+    let [left, _right] = h.outputs;
+    h.focus(left);
+    let (window, _client) = h.create_toplevel();
+    // A Fair space never touches the scroll model, so the arrange path must
+    // write the state back exactly as it took it out.
+    {
+        let runtime = h.state.outputs.get_mut(&left).expect("the output exists");
+        runtime.model.space_states[0].layout = LayoutKind::Fair;
+        runtime.model.space_states[0].scroll.offset = 123.0;
+    }
+    h.map_toplevel(window);
+    assert_eq!(
+        h.state.outputs[&left].model.space_states[0].scroll.offset, 123.0,
+        "taking the scroll state out for arrange must not reset it"
+    );
+}

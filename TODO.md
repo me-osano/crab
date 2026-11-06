@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-11-06):** 352 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-11-06):** 353 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -273,7 +273,7 @@ acceptance criteria are in `IMPROV.md` §3.
 - [x] `C6` — headless two-output harness: close on a background output, layer exclusive-zone change on a secondary output, and rule application on a non-focused output. *(`src/compositor/state/multi_output.rs` drives a real `wayland-client` over a socket pair; five scenarios plus output remove/re-add.)*
 - [x] `B41` — start the niri-style harness with the C6 scenarios; add window move/resize/close, output remove/re-add, column move/consume/expel, and a transaction deadline as those features land. *(Done: `tests/layout_scenarios.rs` drives pure `Output`/`SpaceState`/`LayoutWindow` values through add, move-to-space, move-between-outputs, swap, close, scroll-column close, column move, and consume/expel; `src/compositor/state/multi_output.rs` adds protocol-level move-drag snap, resize-drag pinned edges, focused-close focus handoff, move-to-space output isolation, and scroll column move/width/height, plus the transaction deadline and both clients releasing a held frame. niri `src/layout/tests.rs`, `src/tests/` — borrow the scenario shape, not the types.)*
 - [x] `B43` — CI: run `cargo test --workspace --all-features`, enforce MSRV 1.85, add a headless smoke test, and keep the boundary check green. *(CI runs all-features tests, adds an MSRV job, and `--backend headless` builds real compositor state on an in-process display; a bin unit test and a CLI integration test cover it.)*
-- [ ] `B44` — remove per-arrange `ScrollState` cloning (`layout.rs:210–230`); ~~`B45`~~ (done: compact moves kept states and clones `default_space` only for freed slots).
+- [x] ~~`B44`~~ (done: arrange moves the current space's `ScrollState` out and writes it back instead of cloning its columns) and ~~`B45`~~ (done: compact moves kept states and clones `default_space` only for freed slots).
 
 **Exit criteria (phase):** a full day of tiling + floating dialogs works nested; per-space layouts and params are remembered; `cargo test -p crab layout` green; the §2.9 correctness/test gate is green. *(Two `foot` windows verified tiled nested with per-space `tile` layout; a GTK app and a full interactive day remain before the phase is closed.)*
 
