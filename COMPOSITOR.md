@@ -285,6 +285,12 @@ pub struct SpaceState {
     pub params: LayoutParams,     // gaps, borders, scroll column defaults
     pub scroll: ScrollState,      // for scroller: its columns and the view offset
     pub focus_history: Vec<WindowId>,
+    pub home: Option<SpaceHome>,  // set while parked on another output
+}
+
+pub struct SpaceHome {
+    pub output: OutputId,         // the output this space belongs to
+    pub slot: u8,                 // the 1-based slot it occupied there
 }
 ```
 
@@ -308,6 +314,22 @@ therefore never an empty space before the focused one: `MOD+5` on a two-space
 desktop shows the empty space 3, closing the last window of space 2 makes space 3
 become space 2, and with no windows at all every index collapses to space 1. The
 fixed 32-slot `SpaceSet` is unchanged; this is a renumbering policy on top of it.
+
+**Output unplug/replug.** Each output owns its spaces. When an output goes away,
+its occupied spaces move as units to the session's fallback output (or the
+lowest surviving id when the fallback is the one leaving), keeping their layout,
+scroll columns, params, and focus history; the slot number is kept when the
+target does not use it, otherwise the space takes the next free slot. While
+parked, a space records `SpaceHome { output, slot }`, and the removed output's
+visible/previous view is saved so it can be restored. When an output with that
+id is registered again, spaces whose home matches it return to their recorded
+slots, their windows follow, and the saved view is restored. A window that
+belongs to both a returning space and a space staying behind remains on the
+source output and loses the departing membership bits — a window cannot be
+split across two outputs. Slots freed by a replug are compacted densely as
+usual. The DRM backend must allocate `OutputId` per connector for the home
+match to survive a physical replug.
+
 There is **no per-space configuration**: a new space starts from the `[layout]`
 defaults, and cycling the layout changes only the current space at runtime.
 
@@ -1020,7 +1042,7 @@ Plan: ship option 1 with a clear config hook (`xwayland { satellite-path "..." }
 
 ## 16. Outputs, scaling, and color
 
-- Hotplug via udev; output add/remove updates space views and migrates windows from removed outputs to a fallback output. The compositor already keeps one `OutputRuntime` per `OutputId`, arranges each output's windows separately, routes focus to the owning output, and implements the fallback migration; the DRM backend still has to feed it connector events.
+- Hotplug via udev; output add/remove updates space views and migrates spaces and their windows from removed outputs to a fallback output, preserving layout, scroll, and focus state and restoring them on replug (see §6). The compositor already keeps one `OutputRuntime` per `OutputId`, arranges each output's windows separately, routes focus to the owning output, and implements the lossless fallback migration; the DRM backend still has to feed it connector events.
 - Pointer routing is global: window and layer hit-testing select the output under the pointer, layer maps convert between output-local geometry and global compositor coordinates, and the software cursor is drawn only by the output that owns the pointer. A pointer in a gap between outputs is clamped to the nearest monitor edge.
 - Modes: parse `WxH@Hz`, support custom modes later, VRR (adaptive sync) toggle.
 - **Fractional scaling:** use `wp_fractional_scale` + `wp_viewporter`; layout in logical coordinates; round buffer positions to physical pixels consistently to avoid blurry borders.

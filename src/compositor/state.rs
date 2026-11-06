@@ -21,8 +21,8 @@ use crab::animation::{Animated, Clocks, Curve, Easing, Kind, SpringParams};
 use crab::config::{AnimationStyle, Config, WindowRule};
 use crab::core::{
     ColumnWidth, Direction, FocusStack, FocusTarget, LayerId, LayoutCommand, LayoutKind,
-    LayoutParams, Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceSet, SpaceState,
-    Window, WindowId,
+    LayoutParams, Output as OutputModel, OutputId, Rect, Size as CoreSize, SpaceHome, SpaceSet,
+    SpaceState, SpaceView, Window, WindowId,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::utils::{Buffer, with_renderer_surface_state};
@@ -151,6 +151,70 @@ fn output_rects(outputs: &HashMap<OutputId, OutputRuntime>) -> Vec<(OutputId, Re
         .iter()
         .map(|(id, runtime)| (*id, runtime.model.geometry))
         .collect()
+}
+
+/// An explicit old-slot → new-slot mapping used when spaces move between
+/// outputs.
+///
+/// [`crab::core::SpaceRemap`] densifies one output; this instead maps exactly
+/// the slots named by an unplug or replug. A slot that is not in the map is not
+/// moving, so mapping a mask drops it.
+#[derive(Clone, Copy, Debug)]
+struct SpaceMap {
+    /// `slots[old]` is the new 1-based slot, or 0 when the space does not move.
+    slots: [u8; SpaceSet::COUNT as usize + 1],
+}
+
+impl SpaceMap {
+    fn new() -> Self {
+        Self {
+            slots: [0; SpaceSet::COUNT as usize + 1],
+        }
+    }
+
+    /// Records that old slot `old` becomes `new`.
+    fn insert(&mut self, old: u8, new: u8) {
+        if (1..=SpaceSet::COUNT).contains(&old) && (1..=SpaceSet::COUNT).contains(&new) {
+            self.slots[usize::from(old)] = new;
+        }
+    }
+
+    /// The new slot for `old`, or 0 when it is not moving.
+    fn new_index(self, old: u8) -> u8 {
+        self.slots.get(usize::from(old)).copied().unwrap_or(0)
+    }
+
+    /// Renumbers a window's space membership.
+    fn map_mask(self, mask: SpaceSet) -> SpaceSet {
+        mask.iter_indices()
+            .filter_map(|old| SpaceSet::from_index(self.new_index(old)))
+            .fold(SpaceSet::empty(), |spaces, space| spaces | space)
+    }
+
+    /// Renumbers a view's visible and previous sets.
+    fn map_view(self, view: SpaceView) -> SpaceView {
+        SpaceView {
+            visible: self.map_mask(view.visible),
+            previous: self.map_mask(view.previous),
+        }
+    }
+
+    /// The old slots this map moves.
+    fn moved_mask(self) -> SpaceSet {
+        (1..=SpaceSet::COUNT)
+            .filter(|&old| self.new_index(old) != 0)
+            .filter_map(SpaceSet::from_index)
+            .fold(SpaceSet::empty(), |spaces, space| spaces | space)
+    }
+}
+
+/// The lowest space slot not in `used`, or 1 when all 32 are taken.
+fn first_free_space(used: SpaceSet) -> u8 {
+    (1..=SpaceSet::COUNT)
+        .find(|&slot| {
+            !used.contains(SpaceSet::from_index(slot).expect("a space index is in range"))
+        })
+        .unwrap_or(1)
 }
 
 /// Whether `point` lies inside `rect`.
@@ -1191,6 +1255,12 @@ pub(crate) struct Crab {
     pub(crate) pointer: PointerHandle<Self>,
     /// Every output, keyed by the stable id in its model.
     pub(crate) outputs: HashMap<OutputId, OutputRuntime>,
+    /// The view each unplugged output had when it went away.
+    ///
+    /// Its occupied spaces are parked on a surviving output with
+    /// [`SpaceState::home`] set; keeping the view here lets a replug restore
+    /// which of them were visible.
+    parked_views: HashMap<OutputId, SpaceView>,
     /// The output that owns the current focus and receives input.
     ///
     /// Pointer clicks, window focus, and layer focus move this. Space and
@@ -1408,6 +1478,7 @@ impl Crab {
             keyboard_layout: None,
             pointer,
             outputs: HashMap::new(),
+            parked_views: HashMap::new(),
             focused_output: OutputId::new(0),
             fallback_output: OutputId::new(0),
             config: config.clone(),
@@ -1569,6 +1640,9 @@ impl Crab {
         // backend can apply it here and let `set_output_size` preserve the
         // origin. Mode, scale, and transform wait for the DRM backend.
         apply_configured_position(&self.config, &mut model);
+        // Spaces parked when this output was last unplugged move back as a
+        // unit before the new output is registered.
+        self.restore_parked_spaces(&mut model);
         tracing::debug!(%id, connector = %model.name, "registered an output");
         let first = self.outputs.is_empty();
         let location = Point::<i32, Logical>::from((
@@ -1584,16 +1658,149 @@ impl Crab {
             self.focused_output = id;
             self.fallback_output = id;
         }
+        // Restored spaces may be sparse if a window closed while they were
+        // parked; dynamic numbering keeps them dense from 1.
+        self.compact_spaces();
         self.relayout();
         id
     }
 
-    /// Removes an output and migrates its windows to a remaining one.
+    /// Moves spaces parked by [`Self::remove_output`] back to `model`.
+    ///
+    /// A space remembers the output and slot it came from. When that output is
+    /// registered again, the space and the windows that belong only to it move
+    /// back, and the view recorded at unplug is restored. Spaces stay where
+    /// they are if the new output is not their home.
+    fn restore_parked_spaces(&mut self, model: &mut OutputModel) {
+        let id = model.id;
+        let sources: Vec<OutputId> = self
+            .outputs
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime
+                    .model
+                    .space_states
+                    .iter()
+                    .any(|state| state.home.is_some_and(|home| home.output == id))
+            })
+            .map(|(source, _)| *source)
+            .collect();
+        let mut restored = SpaceSet::empty();
+        for source in sources {
+            let mut map = SpaceMap::new();
+            let mut moved = Vec::new();
+            {
+                let Some(runtime) = self.outputs.get(&source) else {
+                    continue;
+                };
+                for (index, state) in runtime.model.space_states.iter().enumerate() {
+                    let Some(home) = state.home else {
+                        continue;
+                    };
+                    if home.output != id {
+                        continue;
+                    }
+                    let old = u8::try_from(index + 1).expect("a space slot fits in u8");
+                    let new = if home.slot >= 1
+                        && home.slot <= SpaceSet::COUNT
+                        && !restored.contains(
+                            SpaceSet::from_index(home.slot).expect("a space index is in range"),
+                        ) {
+                        home.slot
+                    } else {
+                        first_free_space(restored)
+                    };
+                    map.insert(old, new);
+                    moved.push((old, new, state.clone()));
+                }
+            }
+            if moved.is_empty() {
+                continue;
+            }
+            let moving = map.moved_mask();
+            for (old, new, mut state) in moved {
+                state.home = None;
+                model.space_states[usize::from(new - 1)] = state;
+                restored |= SpaceSet::from_index(new).expect("a space index is in range");
+                if let Some(runtime) = self.outputs.get_mut(&source) {
+                    runtime.model.space_states[usize::from(old - 1)] =
+                        runtime.model.default_space.clone();
+                }
+            }
+            // A window moves back only if every space it belongs to is
+            // returning home; a multi-space window that also lives on a space
+            // staying behind cannot be split across outputs.
+            for window in &mut self.windows {
+                if window.window.output != source {
+                    continue;
+                }
+                let moving_spaces = window.window.spaces & moving;
+                if moving_spaces.is_empty() {
+                    continue;
+                }
+                let staying = window.window.spaces - moving_spaces;
+                if staying.is_empty() {
+                    window.window.output = id;
+                    window.window.spaces = map.map_mask(moving_spaces);
+                } else {
+                    window.window.spaces = staying;
+                }
+            }
+            // Take the moved spaces out of the source's view, keeping at least
+            // one visible space.
+            let remaining = self
+                .windows
+                .iter()
+                .filter(|window| window.window.output == source)
+                .fold(SpaceSet::empty(), |spaces, window| {
+                    spaces | window.window.spaces
+                });
+            if let Some(runtime) = self.outputs.get_mut(&source) {
+                runtime.model.view.visible -= moving;
+                runtime.model.view.previous -= moving;
+                if runtime.model.view.visible.is_empty() {
+                    runtime.model.view.visible =
+                        SpaceSet::from_index(remaining.iter_indices().next().unwrap_or(1))
+                            .unwrap_or(SpaceSet::SPACE_1);
+                }
+            }
+        }
+        if let Some(parked) = self.parked_views.remove(&id) {
+            let mut visible = if restored.is_empty() {
+                parked.visible
+            } else {
+                parked.visible & restored
+            };
+            let previous = if restored.is_empty() {
+                parked.previous
+            } else {
+                parked.previous & restored
+            };
+            if visible.is_empty() {
+                visible = restored
+                    .iter_indices()
+                    .next()
+                    .and_then(SpaceSet::from_index)
+                    .unwrap_or(SpaceSet::SPACE_1);
+            }
+            model.view = SpaceView { visible, previous };
+        } else if !restored.is_empty() {
+            model.view.visible = restored
+                .iter_indices()
+                .next()
+                .and_then(SpaceSet::from_index)
+                .unwrap_or(SpaceSet::SPACE_1);
+        }
+    }
+
+    /// Removes an output and migrates its spaces to a remaining one.
     ///
     /// The last output cannot be removed: there would be nowhere to put its
     /// windows. The DRM hotplug path (M4) calls this when a connector goes
-    /// away; its windows move to the session's fallback output, or to the
-    /// lowest surviving id when the fallback is the one going away.
+    /// away; its spaces move to the session's fallback output, or to the
+    /// lowest surviving id when the fallback is the one going away. Each
+    /// occupied space moves as a unit with its layout, scroll position, and
+    /// focus history, and remembers its home so a replug can move it back.
     #[allow(dead_code)]
     pub(crate) fn remove_output(&mut self, id: OutputId) -> bool {
         if self.outputs.len() <= 1 || !self.outputs.contains_key(&id) {
@@ -1613,10 +1820,81 @@ impl Crab {
                     .min()
                     .expect("a remaining output exists")
             };
+        // Snapshot the removed output's view and occupied spaces before it
+        // leaves the map; its per-space state moves with the windows.
+        let removed_view = self.outputs[&id].model.view;
+        let removed_occupied = self.occupied_spaces(id);
+        // Pick a target slot for each occupied space. Keeping its number when
+        // the target does not use it makes an unplug/replug round trip
+        // invisible; a taken slot falls through to the next free one, keeping
+        // the spaces in order. The target's own spaces are never displaced.
+        let target_used = self.occupied_spaces(target)
+            | self.outputs[&target].model.view.visible
+            | self.outputs[&target].model.view.previous;
+        let mut map = SpaceMap::new();
+        let mut taken = target_used;
+        let mut next_free = 1u8;
+        for old in removed_occupied.iter_indices() {
+            let old_mask = SpaceSet::from_index(old).expect("a space index is in range");
+            let new = if !taken.contains(old_mask) {
+                old
+            } else {
+                while next_free <= SpaceSet::COUNT
+                    && taken.contains(
+                        SpaceSet::from_index(next_free).expect("a space index is in range"),
+                    )
+                {
+                    next_free += 1;
+                }
+                if next_free <= SpaceSet::COUNT {
+                    let slot = next_free;
+                    next_free += 1;
+                    slot
+                } else {
+                    // Every slot is in use: fold the space into the target's
+                    // lowest one so its windows stay reachable.
+                    target_used.iter_indices().next().unwrap_or(1)
+                }
+            };
+            map.insert(old, new);
+            taken |= SpaceSet::from_index(new).expect("a space index is in range");
+        }
+
+        let mut parked = Vec::new();
+        {
+            let runtime = self.outputs.get(&id).expect("the output exists");
+            for old in removed_occupied.iter_indices() {
+                let new = map.new_index(old);
+                if new == 0 {
+                    continue;
+                }
+                let mut state = runtime.model.space_states[usize::from(old - 1)].clone();
+                if state.home.is_none() {
+                    state.home = Some(SpaceHome {
+                        output: id,
+                        slot: old,
+                    });
+                }
+                parked.push((new, state));
+            }
+        }
+
         self.outputs.remove(&id);
+        let target_runtime = self.outputs.get_mut(&target).expect("the target exists");
+        for (new, state) in parked {
+            target_runtime.model.space_states[usize::from(new - 1)] = state;
+        }
+        // Keep the removed output's visible spaces on screen while it is away;
+        // the exact view is kept for the replug.
+        let remapped = map.map_view(removed_view);
+        target_runtime.model.view.visible |= remapped.visible;
+        target_runtime.model.view.previous |= remapped.previous;
+        self.parked_views.insert(id, removed_view);
+
         for window in &mut self.windows {
             if window.window.output == id {
                 window.window.output = target;
+                window.window.spaces = map.map_mask(window.window.spaces);
             }
         }
         let removed_layers: Vec<LayerId> = self
@@ -1647,7 +1925,7 @@ impl Crab {
         if lost_layer_focus {
             self.refocus_after_view_change();
         }
-        // The fallback may already have windows in the same slots; renumbering
+        // The target may already have windows in the same slots; renumbering
         // both sets keeps every space dense on its new output.
         self.compact_spaces();
         self.relayout();

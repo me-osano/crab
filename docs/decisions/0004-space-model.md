@@ -130,6 +130,21 @@ into its slot. A newly created space starts from the `[layout]` defaults. An
 without changing the pure model, and the `Vec`/`SlotMap` change rejected below
 remains a follow-up only if more than 32 spaces are ever needed.
 
+## Update (2026-11-06): spaces survive output unplug/replug
+
+Output removal now moves each **occupied space** and its windows as a unit
+instead of dumping the windows on the lowest-id output. The space keeps its
+layout, params, scroll columns, and focus history; its number is preserved when
+the target output does not use it, otherwise it takes the next free slot. A
+parked space records `SpaceState::home: Option<SpaceHome { output, slot }>` and
+the removed output's view is kept, so registering that output id again moves the
+space and the windows that belong only to it back to their home slots and
+restores the visible/previous view. A multi-space window that also belongs to a
+space staying behind remains on the source and loses the departing bits, because
+a window cannot live on two outputs. Spaces stay dense through the existing
+`compact` pass after both operations. The DRM backend must key `OutputId` by
+connector for a physical replug to match.
+
 ## Alternatives considered
 
 - **Pure mango tags (keep the name).** Rejected: "tag" reads as metadata, not a

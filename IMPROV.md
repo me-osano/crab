@@ -418,6 +418,17 @@ once; the fixed-slot model is a valid product choice.
 scroll state; replugging restores it; no window is silently moved to the focused
 output.
 
+**Status (2026-11-06): done.** `SpaceState.home: Option<SpaceHome { output, slot }>`
+records where a parked space came from. `remove_output` moves each occupied
+space and its windows as a unit to the fallback (or the lowest survivor when the
+fallback is leaving), keeps the slot number when the target does not use it and
+falls through to the next free slot otherwise, and saves the removed view in
+`Crab.parked_views`. `add_output` moves spaces whose home matches the new output
+back to their recorded slots, restores the parked visible/previous view, and
+compacts afterwards. A window that also belongs to a space staying behind cannot
+be split across outputs: it remains on the source and loses the departing bits.
+Covered by `unplugging_an_output_parks_its_spaces_and_replug_restores_them`.
+
 **Priority:** P1 · **Effort:** L · **Depends on:** C5, C6.
 
 ---

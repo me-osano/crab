@@ -191,6 +191,20 @@ impl OutputTransform {
     }
 }
 
+/// Where a space belongs when it is parked on another output.
+///
+/// A space normally lives on the output that owns it, so [`SpaceState::home`]
+/// is `None`. When that output is unplugged, its occupied spaces move to a
+/// surviving output as a unit and remember where they came from here. The
+/// replug path uses the recorded slot to put the space back where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpaceHome {
+    /// The output this space belongs to.
+    pub output: OutputId,
+    /// The 1-based slot it occupied on that output.
+    pub slot: u8,
+}
+
 /// Per-space layout state, remembered for the lifetime of the output.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpaceState {
@@ -202,6 +216,9 @@ pub struct SpaceState {
     pub scroll: ScrollState,
     /// Most-recently-focused windows on this space, newest first.
     pub focus_history: Vec<WindowId>,
+    /// Set while this space is parked on another output after its own output
+    /// was unplugged; `None` while it is at home.
+    pub home: Option<SpaceHome>,
 }
 
 impl SpaceState {

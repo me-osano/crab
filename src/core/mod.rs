@@ -27,7 +27,9 @@ pub use color::Color;
 pub use focus::{FocusStack, FocusTarget};
 pub use geometry::{Point, Rect, Size};
 pub use ids::{LayerId, OutputId, WindowId};
-pub use output::{Output, OutputMode, OutputSpecError, OutputTransform, RedrawState, SpaceState};
+pub use output::{
+    Output, OutputMode, OutputSpecError, OutputTransform, RedrawState, SpaceHome, SpaceState,
+};
 pub use output_plan::{
     ConnectorInfo, ConnectorMode, OutputPlan, OutputPlanError, OutputPlanner, OutputPreference,
 };

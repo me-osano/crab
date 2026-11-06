@@ -1047,3 +1047,289 @@ fn a_client_that_ignores_configure_does_not_hold_the_frame_past_the_deadline() {
         "the laggard is still behind and the WindowFit fallback draws it"
     );
 }
+
+#[test]
+fn unplugging_an_output_parks_its_spaces_and_replug_restores_them() {
+    let mut h = Harness::new(Config::default());
+    let [left, right] = h.outputs;
+    // A third output takes focus, so migration must follow the fallback rather
+    // than dumping the windows on whatever output is focused.
+    let third = h.add_output(
+        OutputId::new(2),
+        "DP-3",
+        Rect::new(4480.0, 0.0, 1920.0, 1080.0),
+    );
+
+    // The fallback output keeps a window of its own in space 1.
+    h.focus(left);
+    let (left_window, _left_client) = h.create_toplevel();
+    h.map_toplevel(left_window);
+
+    // The unplugged output has two spaces with distinct layout, scroll, and
+    // focus state. That state must travel with the windows.
+    h.focus(right);
+    let (right_first, _first_client) = h.create_toplevel();
+    let (right_second, _second_client) = h.create_toplevel();
+    {
+        let runtime = h.state.outputs.get_mut(&right).expect("the output exists");
+        runtime.model.space_states[0].layout = LayoutKind::Scroll;
+        runtime.model.space_states[0].scroll.offset = 120.0;
+        runtime.model.space_states[0].params.gaps = 4.0;
+        runtime.model.space_states[0].focus_history = vec![right_first];
+        runtime.model.space_states[1].layout = LayoutKind::Floating;
+        runtime.model.space_states[1].scroll.offset = 45.0;
+        runtime.model.space_states[1].params.gaps = 12.0;
+        runtime.model.space_states[1].focus_history = vec![right_second];
+    }
+    h.state
+        .window_mut(right_first)
+        .expect("the window exists")
+        .window
+        .spaces = SpaceSet::SPACE_1;
+    h.state
+        .window_mut(right_second)
+        .expect("the window exists")
+        .window
+        .spaces = SpaceSet::SPACE_2;
+    h.map_toplevel(right_first);
+    h.map_toplevel(right_second);
+
+    // Unplug: the two spaces move to the fallback output as units, keeping
+    // their order and staying distinct from the fallback's own space 1.
+    h.focus(third);
+    assert!(h.state.remove_output(right));
+    assert_eq!(
+        h.state
+            .window(right_first)
+            .map(|window| window.window.output),
+        Some(left),
+        "the spaces follow the fallback, not the focused output"
+    );
+    assert_eq!(
+        h.state
+            .window(right_second)
+            .map(|window| window.window.output),
+        Some(left)
+    );
+    let first_slot = h
+        .state
+        .window(right_first)
+        .expect("the window exists")
+        .window
+        .spaces;
+    let second_slot = h
+        .state
+        .window(right_second)
+        .expect("the window exists")
+        .window
+        .spaces;
+    assert_eq!(first_slot.iter_indices().count(), 1);
+    assert_eq!(second_slot.iter_indices().count(), 1);
+    assert_ne!(first_slot, second_slot, "the two spaces stay distinct");
+    assert_ne!(
+        first_slot,
+        h.state
+            .window(left_window)
+            .expect("the window exists")
+            .window
+            .spaces,
+        "the fallback's own space is not reused"
+    );
+
+    let first_index = usize::from(first_slot.iter_indices().next().expect("one space") - 1);
+    let second_index = usize::from(second_slot.iter_indices().next().expect("one space") - 1);
+    let left_model = &h.state.outputs[&left].model;
+    assert_eq!(
+        left_model.space_states[first_index].layout,
+        LayoutKind::Scroll
+    );
+    assert_eq!(left_model.space_states[first_index].scroll.offset, 120.0);
+    assert_eq!(left_model.space_states[first_index].params.gaps, 4.0);
+    assert_eq!(
+        left_model.space_states[first_index].focus_history,
+        vec![right_first]
+    );
+    assert_eq!(
+        left_model.space_states[second_index].layout,
+        LayoutKind::Floating
+    );
+    assert_eq!(left_model.space_states[second_index].scroll.offset, 45.0);
+    assert_eq!(left_model.space_states[second_index].params.gaps, 12.0);
+    assert_eq!(
+        left_model.space_states[second_index].focus_history,
+        vec![right_second]
+    );
+    assert_eq!(
+        left_model.space_states[first_index].home,
+        Some(SpaceHome {
+            output: right,
+            slot: 1
+        }),
+        "the space remembers where it came from"
+    );
+
+    // Replug: the spaces and their windows move back to their old slots, and
+    // the fallback returns to its own view.
+    let right = h.add_output(right, "DP-2", Rect::new(1920.0, 0.0, 2560.0, 1440.0));
+    assert_eq!(
+        h.state
+            .window(right_first)
+            .map(|window| window.window.output),
+        Some(right)
+    );
+    assert_eq!(
+        h.state
+            .window(right_first)
+            .map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_1)
+    );
+    assert_eq!(
+        h.state
+            .window(right_second)
+            .map(|window| window.window.spaces),
+        Some(SpaceSet::SPACE_2)
+    );
+    let right_model = &h.state.outputs[&right].model;
+    assert_eq!(right_model.space_states[0].layout, LayoutKind::Scroll);
+    assert_eq!(right_model.space_states[0].scroll.offset, 120.0);
+    assert_eq!(right_model.space_states[0].params.gaps, 4.0);
+    assert_eq!(right_model.space_states[1].layout, LayoutKind::Floating);
+    assert_eq!(right_model.space_states[1].scroll.offset, 45.0);
+    assert_eq!(right_model.view.visible, SpaceSet::SPACE_1);
+    assert_eq!(
+        h.state
+            .window(left_window)
+            .map(|window| window.window.output),
+        Some(left),
+        "the fallback's own window did not move"
+    );
+    assert_eq!(
+        h.state.outputs[&left].model.view.visible,
+        SpaceSet::SPACE_1,
+        "the fallback's view is its own again"
+    );
+}
+
+#[test]
+fn a_parked_space_takes_a_free_slot_and_returns_to_its_home_slot() {
+    let mut h = Harness::new(Config::default());
+    let [left, right] = h.outputs;
+
+    // Both outputs use space 1, so parking the right output's space must pick
+    // another slot on the fallback without disturbing the fallback's own space.
+    h.focus(left);
+    let (left_window, _left_client) = h.create_toplevel();
+    h.map_toplevel(left_window);
+    h.focus(right);
+    let (right_window, _right_client) = h.create_toplevel();
+    h.map_toplevel(right_window);
+    assert_eq!(
+        h.state
+            .window(right_window)
+            .expect("the window exists")
+            .window
+            .spaces,
+        SpaceSet::SPACE_1
+    );
+
+    assert!(h.state.remove_output(right));
+    let parked = h
+        .state
+        .window(right_window)
+        .expect("the window exists")
+        .window
+        .spaces;
+    assert_eq!(parked, SpaceSet::SPACE_2, "the occupied slot is skipped");
+    assert_eq!(
+        h.state.outputs[&left].model.space_states[1].home,
+        Some(SpaceHome {
+            output: right,
+            slot: 1
+        })
+    );
+    assert_eq!(
+        h.state
+            .window(left_window)
+            .expect("the window exists")
+            .window
+            .spaces,
+        SpaceSet::SPACE_1,
+        "the fallback's own window stays in its space"
+    );
+
+    let right = h.add_output(right, "DP-2", Rect::new(1920.0, 0.0, 2560.0, 1440.0));
+    assert_eq!(
+        h.state
+            .window(right_window)
+            .expect("the window exists")
+            .window
+            .spaces,
+        SpaceSet::SPACE_1,
+        "replug restores the home slot, not the parked one"
+    );
+    assert_eq!(
+        h.state
+            .window(right_window)
+            .expect("the window exists")
+            .window
+            .output,
+        right
+    );
+    assert_eq!(h.state.outputs[&right].model.space_states[0].home, None);
+}
+
+#[test]
+fn parked_spaces_survive_their_host_output_being_unplugged_too() {
+    let mut h = Harness::new(Config::default());
+    let [left, right] = h.outputs;
+    let third = h.add_output(
+        OutputId::new(2),
+        "DP-3",
+        Rect::new(4480.0, 0.0, 1920.0, 1080.0),
+    );
+
+    h.focus(right);
+    let (window, _client) = h.create_toplevel();
+    {
+        let runtime = h.state.outputs.get_mut(&right).expect("the output exists");
+        runtime.model.space_states[0].layout = LayoutKind::Scroll;
+        runtime.model.space_states[0].params.gaps = 3.0;
+    }
+    h.map_toplevel(window);
+
+    // Right parks on the fallback (left), then left is unplugged too. The
+    // window's home is still right, not its current host.
+    assert!(h.state.remove_output(right));
+    assert_eq!(
+        h.state
+            .window(window)
+            .expect("the window exists")
+            .window
+            .output,
+        left
+    );
+    assert!(h.state.remove_output(left));
+    assert_eq!(
+        h.state
+            .window(window)
+            .expect("the window exists")
+            .window
+            .output,
+        third
+    );
+
+    // Replugging right pulls it back off the second host, with its state.
+    let right = h.add_output(right, "DP-2", Rect::new(1920.0, 0.0, 2560.0, 1440.0));
+    let window = h.state.window(window).expect("the window exists");
+    assert_eq!(window.window.output, right);
+    assert_eq!(window.window.spaces, SpaceSet::SPACE_1);
+    assert_eq!(
+        h.state.outputs[&right].model.space_states[0].layout,
+        LayoutKind::Scroll
+    );
+    assert_eq!(
+        h.state.outputs[&right].model.space_states[0].params.gaps,
+        3.0
+    );
+    assert_eq!(h.state.outputs[&right].model.space_states[0].home, None);
+}

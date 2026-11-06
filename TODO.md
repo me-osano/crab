@@ -21,7 +21,7 @@ especially M4–M6, rather than fit inside the original ranges.
 **Name:** `crab`; binary `crab`, CLI `crab-cli`; env `CRAB_SOCKET`;
 directory `crab/`.
 
-**Current state (2026-10-31):** 349 workspace tests pass; `cargo fmt --check`,
+**Current state (2026-11-06):** 352 workspace tests pass; `cargo fmt --check`,
 clippy (`--all-features`), `cargo check` on MSRV 1.85, and
 `check-boundaries.sh` are clean. The §2.9 correctness gate (`C3–C6`) is closed:
 focus and space state are per output, and the two-output harness drives real
@@ -39,7 +39,8 @@ milestones and only cross-references the actionable items.
    clock, DMA-BUF, presentation-time, and cursor shape. This is what makes crab a
    daily driver.
 3. ~~`B01`/`B02`~~ (done: configure transactions and throttling).
-4. `B05` — preserve space identity and layout state across output unplug/replug.
+4. ~~`B05`~~ (done: occupied spaces move as units on unplug and return to their
+   home slots on replug).
 5. `B18`/`B19`/`B14`/`B20` — `ext-workspace`, foreign-toplevel, session lock, and
    idle.
 
@@ -229,10 +230,10 @@ and per-space layout memory. Everything here is pure and unit-testable.
 - [x] Per-output space views; moving windows/output focus between spaces.
 - [x] Windows are arranged on their owning output; the layout pass is per-output.
 - [ ] Space compaction runs for every output, and focus cycling, activation, and rule application use the window's owning output too; today they read the focused output (`C4`).
-- [x] Output registry keyed by `OutputId`; the first output becomes the initial focused output, and removing one migrates its windows and layer entries to a fallback output. *(Migration is lossy: per-space layout, scroll, visibility, and focus history are dropped — see B05.)*
+- [x] Output registry keyed by `OutputId`; the first output becomes the initial focused output, and removing one migrates its spaces, windows, and layer entries to a fallback output.
 - [x] Global pointer/input routing: window and layer hit-testing, popup origins, and the software cursor use the output under the pointer; a pointer in a gap snaps to the nearest output, and layer maps translate between output-local and global coordinates.
 - [x] **Dynamic numbering** (niri-style): a space exists while it holds a window or is the empty space past the last occupied one; spaces that are now empty and followed by occupied ones are removed and the survivors compacted from 1, with their layout state following and window membership renumbered through `SpaceRemap` — so there is never an empty space before the focused one, and removing the focused space hands the view to the space that moves up.
-- [ ] **Preserve spaces across output removal/re-add** — move each `SpaceState` with its windows as a unit, keep visible/scroll/layout state, record ordered output candidates, and restore them on replug. [IMPROV B05] *(depends on C5/C6; niri `layout/monitor.rs` — borrow the migration semantics, not its unbounded `Vec<Workspace>` storage.)*
+- [x] **Preserve spaces across output removal/re-add** — each occupied `SpaceState` moves with its windows as a unit and records `SpaceHome { output, slot }`; the view at unplug is parked and restored, and replug moves matching spaces back to their home slots. [IMPROV B05]
 - [x] `move-to-space` shows the target space, so focus follows the moved window.
 - [x] **No per-space configuration**: every space starts from `[layout]` defaults; cycling the layout changes only the current space at runtime.
 
@@ -422,8 +423,8 @@ Goal: boot `crab` from a TTY and use it as the real session on one machine.
   drives the winit backend. [IMPROV B09]
 - [ ] vblank-driven redraw wired to the Phase-1 state machine (one per output), backed
   by a per-output frame clock. [IMPROV B09/B12] *(niri `frame_clock.rs`, `backend/tty.rs`)*
-- [ ] Handle connector hotplug (add/remove), mode selection, and lossless window/space
-  migration off removed outputs. [IMPROV B09/B13/B05]
+- [ ] Handle connector hotplug (add/remove), mode selection, and call the lossless
+  window/space migration off removed outputs (the state logic landed with B05). [IMPROV B09/B13]
 
 ### 4.3 Input devices
 - [ ] `libinput` backend: keyboard, pointer, touchpad, touch, switches. [IMPROV B10] *(niri `backend/tty.rs`, `input/mod.rs`)*
