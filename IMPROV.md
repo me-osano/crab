@@ -972,13 +972,19 @@ These are not niri ports, but niri's scale makes the patterns worth adopting.
 | ID | Item | Crab evidence | Change |
 |---|---|---|---|
 | B44 | Stop cloning `ScrollState` per arrange | `layout.rs:210–230` clones `Vec<Column>` on every relayout | `mem::take` + write back, or an `Arc`/`&mut` split |
-| B45 | Stop deep-cloning 32 `SpaceState`s on compact | `core/output.rs:394–403` | move states + `default_space` only for freed slots |
+| B45 | Stop deep-cloning 32 `SpaceState`s on compact | `core/output.rs:394–403` | move states + `default_space` only for freed slots (done 2026-11-06) |
 | B46 | Render the config banner as a texture | `render.rs:285–330` creates up to ~16k solid elements | rasterize the glyph run once into a buffer/texture |
 | B47 | Index windows per output | `arrange` filters all windows for each output; `occupied_spaces` scans all | `HashMap<OutputId, Vec<WindowId>>` maintained on add/remove/migrate |
 | B48 | Avoid full-snapshot diff allocation on every IPC event | `ipc/mod.rs:637–745` builds full snapshots + maps | per-domain dirty flags or incremental event state (B36) |
 | B49 | Content-type/opaque region correctness | render path already uses damage tracker | ensure `wp_content_type` and opaque regions match once dmabuf lands |
 
 **Priority:** P2/P3, except B44/B45 which are cheap and can land with B01.
+
+**B45 landed (2026-11-06):** `Output::compact` moves each kept `SpaceState`
+into its new slot with `mem::take` and clones `default_space` only for freed
+slots, so closing or migrating a window no longer deep-clones all 32 states
+(including their column lists and focus histories). The compaction unit test
+checks that a moved focus-history allocation keeps its address.
 
 ---
 

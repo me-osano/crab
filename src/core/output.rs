@@ -410,14 +410,22 @@ impl Output {
     #[must_use]
     pub fn compact(&mut self, occupied: SpaceSet) -> SpaceRemap {
         let remap = SpaceRemap::new(occupied, self.view);
-        let old = self.space_states.clone();
-        self.space_states = core::array::from_fn(|_| self.default_space.clone());
+        // Move the kept states into their new slots instead of deep-cloning the
+        // whole array: each state owns a column list and focus history, so a
+        // clone would allocate for every space on every close/migration. Freed
+        // slots are the only ones that get a fresh copy of `default_space`.
+        let mut moved: [Option<SpaceState>; SpaceSet::COUNT as usize] =
+            core::array::from_fn(|_| None);
         for old_index in 1..=SpaceSet::COUNT {
             let new_index = remap.new_index(old_index);
             if new_index != 0 {
-                self.space_states[usize::from(new_index - 1)] =
-                    old[usize::from(old_index - 1)].clone();
+                moved[usize::from(new_index - 1)] = Some(core::mem::take(
+                    &mut self.space_states[usize::from(old_index - 1)],
+                ));
             }
+        }
+        for (slot, state) in moved.into_iter().enumerate() {
+            self.space_states[slot] = state.unwrap_or_else(|| self.default_space.clone());
         }
         remap.map_view(&mut self.view);
         remap
@@ -625,9 +633,19 @@ mod tests {
     fn compact_resets_freed_slots_and_moves_the_state_of_kept_spaces() {
         let mut out = output();
         out.space_states[2].layout = LayoutKind::Scroll;
+        out.space_states[2].params.gaps = 3.0;
+        out.space_states[2].focus_history = vec![WindowId::new(7)];
+        let history = out.space_states[2].focus_history.as_ptr();
         out.view_space(SpaceSet::SPACE_1);
         let _ = out.compact(SpaceSet::SPACE_1 | SpaceSet::SPACE_3);
         assert_eq!(out.space_states[1].layout, LayoutKind::Scroll);
+        assert!((out.space_states[1].params.gaps - 3.0).abs() < 1e-9);
+        assert_eq!(out.space_states[1].focus_history, vec![WindowId::new(7)]);
+        assert_eq!(
+            out.space_states[1].focus_history.as_ptr(),
+            history,
+            "the kept state moves instead of being cloned"
+        );
         assert_eq!(out.space_states[2].layout, out.default_space.layout);
     }
 
