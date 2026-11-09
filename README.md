@@ -66,7 +66,6 @@ builds the whole thing.
 
 ## License
 
-GPL-3.0-or-later. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE); code adapted
-from niri / cosmic / mango is attributed per file (ADR-0001).
+GPL-3.0-or-later. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
 
 [smithay]: https://github.com/Smithay/smithay
